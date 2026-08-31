@@ -22,9 +22,11 @@ const (
 	baseVersion        = "0.2.0"
 	businessCapability = "go-crud"
 	businessVersion    = "0.2.0"
+	adminCapability    = "vue-admin"
+	adminVersion       = "0.1.0"
 )
 
-//go:embed templates
+//go:embed all:templates
 var templateFS embed.FS
 
 var outputTemplates = map[string]string{
@@ -60,6 +62,28 @@ var businessTemplates = []struct {
 	{PathSuffix: "postgres/store.go", TemplatePath: "templates/business_postgres_store.go.tmpl"},
 }
 
+var adminTemplates = map[string]string{
+	"web/admin/.prettierignore":             "templates/admin/.prettierignore",
+	"web/admin/.prettierrc.json":            "templates/admin/.prettierrc.json",
+	"web/admin/eslint.config.js":            "templates/admin/eslint.config.js",
+	"web/admin/index.html":                  "templates/admin/index.html",
+	"web/admin/package-lock.json":           "templates/admin/package-lock.json",
+	"web/admin/package.json":                "templates/admin/package.json",
+	"web/admin/tsconfig.json":               "templates/admin/tsconfig.json",
+	"web/admin/vite.config.ts":              "templates/admin/vite.config.ts",
+	"web/admin/vitest.config.ts":            "templates/admin/vitest.config.ts",
+	"web/admin/src/App.vue":                 "templates/admin/src/App.vue",
+	"web/admin/src/api/client.test.ts":      "templates/admin/src/api/client.test.ts",
+	"web/admin/src/api/client.ts":           "templates/admin/src/api/client.ts",
+	"web/admin/src/env.d.ts":                "templates/admin/src/env.d.ts",
+	"web/admin/src/main.ts":                 "templates/admin/src/main.ts",
+	"web/admin/src/stores/session.ts":       "templates/admin/src/stores/session.ts",
+	"web/admin/src/styles.css":              "templates/admin/src/styles.css",
+	"web/admin/src/types.ts":                "templates/admin/src/types.ts",
+	"web/admin/src/views/DashboardView.vue": "templates/admin/src/views/DashboardView.vue",
+	"web/admin/src/views/LoginView.vue":     "templates/admin/src/views/LoginView.vue",
+}
+
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -84,8 +108,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if project.Spec.Database.Engine != "postgresql" {
 		return generator.Result{}, fmt.Errorf("the Go adapter currently supports only PostgreSQL")
 	}
-	if enabled(project.Spec.Stack.AdminUI) || enabled(project.Spec.Stack.Storefront) {
-		return generator.Result{}, fmt.Errorf("the Go adapter does not generate frontends yet")
+	if enabled(project.Spec.Stack.Storefront) {
+		return generator.Result{}, fmt.Errorf("the Go adapter does not generate a storefront yet")
+	}
+	adminEnabled := enabled(project.Spec.Stack.AdminUI)
+	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
+		return generator.Result{}, fmt.Errorf("the Go adapter supports only the Element Plus administration UI")
 	}
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Go adapter currently requires both session and token authentication")
@@ -101,6 +129,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		ProjectName: project.Metadata.Name,
 		ModulePath:  "example.com/" + project.Metadata.Name,
 		Business:    business,
+		Admin:       adminEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -115,6 +144,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		migrationPath := "internal/platform/migrate/migrations/000100_" + business.ModuleName + "_" + business.EntityName + ".sql"
 		targets[migrationPath] = renderTarget{TemplatePath: "templates/business.sql.tmpl", Owner: businessCapability}
 		capabilityLock[businessCapability] = businessVersion
+	}
+	if adminEnabled {
+		for path, templatePath := range adminTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: adminCapability}
+		}
+		if business != nil {
+			path := "web/admin/src/views/BusinessView.vue"
+			targets[path] = renderTarget{TemplatePath: "templates/admin/src/views/BusinessView.vue.tmpl", Owner: adminCapability}
+		}
+		capabilityLock[adminCapability] = adminVersion
 	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -170,6 +209,7 @@ type templateData struct {
 	ProjectName string
 	ModulePath  string
 	Business    *businessData
+	Admin       bool
 }
 
 type renderTarget struct {
@@ -190,18 +230,38 @@ type businessData struct {
 }
 
 type businessField struct {
-	Name          string
-	GoName        string
-	GoType        string
-	EntityType    string
-	SQLType       string
-	Required      bool
-	Unique        bool
-	StringLike    bool
-	SampleOne     string
-	SampleTwo     string
-	OpenAPIType   string
-	OpenAPIFormat string
+	Name              string
+	GoName            string
+	GoType            string
+	EntityType        string
+	SQLType           string
+	Required          bool
+	Unique            bool
+	StringLike        bool
+	SampleOne         string
+	SampleTwo         string
+	OpenAPIType       string
+	OpenAPIFormat     string
+	TypeScriptType    string
+	TypeScriptDefault string
+	InputKind         string
+	JSONOptions       string
+	OpenAPIPattern    string
+}
+
+type supportedFieldType struct {
+	GoType            string
+	SQLType           string
+	StringLike        bool
+	SampleOne         string
+	SampleTwo         string
+	OpenAPIType       string
+	OpenAPIFormat     string
+	OpenAPIPattern    string
+	TypeScriptType    string
+	TypeScriptDefault string
+	InputKind         string
+	JSONOptions       string
 }
 
 func buildBusinessData(modules []spec.Module) (*businessData, error) {
@@ -248,19 +308,23 @@ func buildBusinessData(modules []spec.Module) (*businessData, error) {
 		if _, exists := reserved[field.Name]; exists {
 			return nil, fmt.Errorf("business field %q is reserved", field.Name)
 		}
-		goType, sqlType, stringLike, sampleOne, sampleTwo, openAPIType, openAPIFormat, ok := businessFieldType(field.Type)
+		fieldType, ok := businessFieldType(field.Type)
 		if !ok {
 			return nil, fmt.Errorf("business field %q uses unsupported Go CRUD type %q", field.Name, field.Type)
 		}
-		entityType := goType
+		entityType := fieldType.GoType
 		if !field.Required {
-			entityType = "*" + goType
+			entityType = "*" + fieldType.GoType
 		}
 		fields = append(fields, businessField{
-			Name: field.Name, GoName: exportedName(field.Name), GoType: goType,
-			EntityType: entityType, SQLType: sqlType, Required: field.Required,
-			Unique: field.Unique, StringLike: stringLike, SampleOne: sampleOne, SampleTwo: sampleTwo,
-			OpenAPIType: openAPIType, OpenAPIFormat: openAPIFormat,
+			Name: field.Name, GoName: exportedName(field.Name), GoType: fieldType.GoType,
+			EntityType: entityType, SQLType: fieldType.SQLType, Required: field.Required,
+			Unique: field.Unique, StringLike: fieldType.StringLike,
+			SampleOne: fieldType.SampleOne, SampleTwo: fieldType.SampleTwo,
+			OpenAPIType: fieldType.OpenAPIType, OpenAPIFormat: fieldType.OpenAPIFormat,
+			OpenAPIPattern: fieldType.OpenAPIPattern, JSONOptions: fieldType.JSONOptions,
+			TypeScriptType:    fieldType.TypeScriptType,
+			TypeScriptDefault: fieldType.TypeScriptDefault, InputKind: fieldType.InputKind,
 		})
 		if field.Required {
 			requiredFields = append(requiredFields, field.Name)
@@ -274,20 +338,20 @@ func buildBusinessData(modules []spec.Module) (*businessData, error) {
 	}, nil
 }
 
-func businessFieldType(value string) (goType, sqlType string, stringLike bool, sampleOne, sampleTwo, openAPIType, openAPIFormat string, ok bool) {
+func businessFieldType(value string) (supportedFieldType, bool) {
 	switch value {
 	case "string":
-		return "string", "varchar(255)", true, `"first"`, `"second"`, "string", "", true
+		return supportedFieldType{GoType: "string", SQLType: "varchar(255)", StringLike: true, SampleOne: `"first"`, SampleTwo: `"second"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "text"}, true
 	case "text":
-		return "string", "text", true, `"first text"`, `"second text"`, "string", "", true
+		return supportedFieldType{GoType: "string", SQLType: "text", StringLike: true, SampleOne: `"first text"`, SampleTwo: `"second text"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "textarea"}, true
 	case "bool":
-		return "bool", "boolean", false, "true", "false", "boolean", "", true
+		return supportedFieldType{GoType: "bool", SQLType: "boolean", SampleOne: "true", SampleTwo: "false", OpenAPIType: "boolean", TypeScriptType: "boolean", TypeScriptDefault: "false", InputKind: "boolean"}, true
 	case "int64":
-		return "int64", "bigint", false, "int64(1)", "int64(2)", "integer", "int64", true
+		return supportedFieldType{GoType: "int64", SQLType: "bigint", SampleOne: "int64(1)", SampleTwo: "int64(2)", OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`, TypeScriptType: "string", TypeScriptDefault: `"0"`, InputKind: "text", JSONOptions: ",string"}, true
 	case "datetime":
-		return "time.Time", "timestamptz", false, "time.Unix(1_700_000_000, 0).UTC()", "time.Unix(1_700_000_100, 0).UTC()", "string", "date-time", true
+		return supportedFieldType{GoType: "time.Time", SQLType: "timestamptz", SampleOne: "time.Unix(1_700_000_000, 0).UTC()", SampleTwo: "time.Unix(1_700_000_100, 0).UTC()", OpenAPIType: "string", OpenAPIFormat: "date-time", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "datetime"}, true
 	default:
-		return "", "", false, "", "", "", "", false
+		return supportedFieldType{}, false
 	}
 }
 

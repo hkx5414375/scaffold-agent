@@ -118,7 +118,7 @@ metadata:
 spec:
   stack:
     backend: go
-    admin_ui: none
+    admin_ui: element-plus
     storefront: none
   database:
     engine: postgresql
@@ -146,7 +146,7 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 26 || plannedData.CapabilityLock["go-service"] != "0.2.0" || plannedData.CapabilityLock["go-crud"] != "0.2.0" {
+	if plannedData.ChangeCount != 46 || plannedData.CapabilityLock["go-service"] != "0.2.0" || plannedData.CapabilityLock["go-crud"] != "0.2.0" || plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
@@ -169,6 +169,24 @@ spec:
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("generated %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+		}
+	}
+	if os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+		adminRoot := filepath.Join(root, "web", "admin")
+		adminCommands := [][]string{
+			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},
+			{"npm", "run", "lint"},
+			{"npm", "test"},
+			{"npm", "run", "build"},
+			{"npm", "run", "format:check"},
+		}
+		for _, arguments := range adminCommands {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = adminRoot
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated admin %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+			}
 		}
 	}
 	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})

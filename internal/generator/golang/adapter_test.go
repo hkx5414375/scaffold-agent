@@ -64,6 +64,7 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 	t.Parallel()
 
 	project := validProject()
+	project.Spec.Stack.AdminUI = "element-plus"
 	project.Spec.Modules = []spec.Module{{
 		Name: "tasks",
 		Entities: []spec.Entity{{Name: "task", Fields: []spec.Field{
@@ -85,10 +86,23 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 	if generated.CapabilityLock[businessCapability] != businessVersion {
 		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
 	}
+	if generated.CapabilityLock[adminCapability] != adminVersion {
+		t.Fatalf("Generate() administration capability lock = %#v", generated.CapabilityLock)
+	}
 	openAPIFound := false
+	var entitySource, adminTypes, businessView, openAPISource string
 	for _, output := range generated.Outputs {
+		switch output.Path {
+		case "internal/tasks/entity.go":
+			entitySource = string(output.Content)
+		case "web/admin/src/types.ts":
+			adminTypes = string(output.Content)
+		case "web/admin/src/views/BusinessView.vue":
+			businessView = string(output.Content)
+		}
 		if output.Path == "api/openapi.yaml" {
 			openAPIFound = true
+			openAPISource = string(output.Content)
 			var document struct {
 				OpenAPI string         `yaml:"openapi"`
 				Paths   map[string]any `yaml:"paths"`
@@ -114,6 +128,22 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 	if !openAPIFound {
 		t.Fatal("Generate() did not produce api/openapi.yaml")
 	}
+	for name, source := range map[string]string{
+		"Go entity version":    entitySource,
+		"administration types": adminTypes,
+		"administration view":  businessView,
+		"OpenAPI contract":     openAPISource,
+	} {
+		if source == "" {
+			t.Fatalf("Generate() did not produce %s", name)
+		}
+	}
+	if !strings.Contains(entitySource, `json:"version,string"`) ||
+		!strings.Contains(adminTypes, "version: string;") ||
+		!strings.Contains(businessView, "version: editing.value.version") ||
+		!strings.Contains(openAPISource, `pattern: "^[1-9][0-9]*$"`) {
+		t.Fatal("Generate() did not preserve int64 optimistic-lock versions as decimal strings")
+	}
 }
 
 func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
@@ -124,7 +154,7 @@ func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
 		mutate func(*spec.Project)
 	}{
 		{name: "MySQL", mutate: func(project *spec.Project) { project.Spec.Database.Engine = "mysql" }},
-		{name: "admin UI", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "element-plus" }},
+		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }},
 		{name: "single auth mode", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }},
 	}
 	for _, test := range tests {

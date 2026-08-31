@@ -1,0 +1,191 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, reactive, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import {
+  emptyBusinessWrite,
+  type BusinessEntity,
+  type BusinessPage,
+  type BusinessWrite,
+} from "../types";
+
+const resourcePath = "{{.Business.RoutePath}}";
+const rows = ref<BusinessEntity[]>([]);
+const loading = ref(false);
+const dialogOpen = ref(false);
+const saving = ref(false);
+const editing = ref<BusinessEntity | null>(null);
+const currentCursor = ref("");
+const nextCursor = ref("");
+const cursorHistory = ref<string[]>([]);
+const form = reactive<BusinessWrite>(emptyBusinessWrite());
+
+onMounted(() => loadPage(""));
+
+async function loadPage(cursor: string): Promise<void> {
+  loading.value = true;
+  try {
+    const query = new URLSearchParams({ limit: "20" });
+    if (cursor) query.set("cursor", cursor);
+    const page = await request<BusinessPage>(`${resourcePath}?${query}`);
+    rows.value = page.items;
+    currentCursor.value = cursor;
+    nextCursor.value = page.next_cursor ?? "";
+  } catch (error) {
+    showError(error, "Records could not be loaded");
+  } finally {
+    loading.value = false;
+  }
+}
+
+function openCreate(): void {
+  editing.value = null;
+  Object.assign(form, emptyBusinessWrite());
+  dialogOpen.value = true;
+}
+
+function openEdit(value: BusinessEntity): void {
+  editing.value = value;
+  Object.assign(form, {
+{{- range .Business.Fields}}
+    {{.Name}}: value.{{.Name}},
+{{- end}}
+  });
+  dialogOpen.value = true;
+}
+
+async function save(): Promise<void> {
+  if (saving.value) return;
+  saving.value = true;
+  const payload: BusinessWrite = { ...form };
+{{- range .Business.Fields}}
+{{- if not .Required}}
+{{- if or (eq .InputKind "text") (eq .InputKind "textarea") (eq .InputKind "datetime")}}
+  if (payload.{{.Name}} === "") delete payload.{{.Name}};
+{{- end}}
+{{- end}}
+{{- end}}
+  try {
+    if (editing.value) {
+      await request<BusinessEntity>(`${resourcePath}/${editing.value.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ ...payload, version: editing.value.version }),
+      });
+    } else {
+      await request<BusinessEntity>(resourcePath, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    }
+    dialogOpen.value = false;
+    ElMessage.success(editing.value ? "Record updated" : "Record created");
+    await loadPage(currentCursor.value);
+  } catch (error) {
+    showError(error, "Record could not be saved");
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function remove(value: BusinessEntity): Promise<void> {
+  try {
+    await ElMessageBox.confirm("This action cannot be undone.", "Delete record", {
+      type: "warning",
+      confirmButtonText: "Delete",
+    });
+  } catch {
+    return;
+  }
+  try {
+    await request<void>(`${resourcePath}/${value.id}?version=${value.version}`, {
+      method: "DELETE",
+    });
+    ElMessage.success("Record deleted");
+    await loadPage(currentCursor.value);
+  } catch (error) {
+    showError(error, "Record could not be deleted");
+  }
+}
+
+async function nextPage(): Promise<void> {
+  if (!nextCursor.value) return;
+  cursorHistory.value.push(currentCursor.value);
+  await loadPage(nextCursor.value);
+}
+
+async function previousPage(): Promise<void> {
+  const cursor = cursorHistory.value.pop();
+  if (cursor === undefined) return;
+  await loadPage(cursor);
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section>
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">{{.Business.ModuleName}}</p>
+        <h1>{{.Business.EntityType}} management</h1>
+      </div>
+      <el-button type="primary" @click="openCreate">Create {{.Business.EntityName}}</el-button>
+    </div>
+
+    <el-card shadow="never">
+      <el-table v-loading="loading" :data="rows" row-key="id">
+{{- range .Business.Fields}}
+        <el-table-column label="{{.GoName}}" prop="{{.Name}}" min-width="140" />
+{{- end}}
+        <el-table-column label="Version" prop="version" width="90" />
+        <el-table-column label="Actions" width="180" fixed="right">
+          <template #default="scope">
+            <div class="table-actions">
+              <el-button link type="primary" @click="openEdit(scope.row)">Edit</el-button>
+              <el-button link type="danger" @click="remove(scope.row)">Delete</el-button>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="pagination-actions">
+        <el-button :disabled="cursorHistory.length === 0" @click="previousPage">Previous</el-button>
+        <el-button :disabled="!nextCursor" @click="nextPage">Next</el-button>
+      </div>
+    </el-card>
+
+    <el-dialog
+      v-model="dialogOpen"
+      :title="editing ? 'Edit {{.Business.EntityName}}' : 'Create {{.Business.EntityName}}'"
+      width="min(560px, 92vw)"
+    >
+      <el-form label-position="top">
+{{- range .Business.Fields}}
+        <el-form-item label="{{.GoName}}" :required="{{.Required}}">
+{{- if eq .InputKind "textarea"}}
+          <el-input v-model="form.{{.Name}}" :rows="4" type="textarea" />
+{{- else if eq .InputKind "boolean"}}
+          <el-switch v-model="form.{{.Name}}" />
+{{- else if eq .InputKind "number"}}
+          <el-input-number v-model="form.{{.Name}}" controls-position="right" />
+{{- else if eq .InputKind "datetime"}}
+          <el-date-picker
+            v-model="form.{{.Name}}"
+            type="datetime"
+            value-format="YYYY-MM-DDTHH:mm:ssZ"
+          />
+{{- else}}
+          <el-input v-model="form.{{.Name}}" />
+{{- end}}
+        </el-form-item>
+{{- end}}
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogOpen = false">Cancel</el-button>
+        <el-button type="primary" :loading="saving" @click="save">Save</el-button>
+      </template>
+    </el-dialog>
+  </section>
+</template>

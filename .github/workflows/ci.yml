@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -38,3 +38,25 @@ jobs:
         run: go build ./cmd/scaffold-agent
       - name: Doctor
         run: go run ./cmd/scaffold-agent doctor --json
+
+  generated-admin:
+    name: Generated Vue administration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: internal/generator/golang/templates/admin/package-lock.json
+      - name: Audit locked dependencies
+        working-directory: internal/generator/golang/templates/admin
+        run: npm audit --package-lock-only --audit-level=high
+      - name: Generate, lint, test, and build administration UI
+        env:
+          SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
+        run: go test ./internal/engine -run TestGoPlanApplyVerifyEndToEnd -count=1

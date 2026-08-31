@@ -237,9 +237,8 @@ paths:
           in: query
           required: true
           schema:
-            type: integer
-            format: int64
-            minimum: 1
+            type: string
+            pattern: "^[1-9][0-9]*$"
       responses:
         "204":
           description: Deleted
@@ -350,11 +349,13 @@ components:
 {{- if .OpenAPIFormat}}
           format: {{.OpenAPIFormat}}
 {{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
 {{- end}}
         version:
-          type: integer
-          format: int64
-          minimum: 1
+          type: string
+          pattern: "^[1-9][0-9]*$"
         created_at:
           type: string
           format: date-time
@@ -377,6 +378,9 @@ components:
 {{- if .OpenAPIFormat}}
           format: {{.OpenAPIFormat}}
 {{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
 {{- end}}
     {{.Business.EntityType}}Update:
       type: object
@@ -393,11 +397,13 @@ components:
 {{- if .OpenAPIFormat}}
           format: {{.OpenAPIFormat}}
 {{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
 {{- end}}
         version:
-          type: integer
-          format: int64
-          minimum: 1
+          type: string
+          pattern: "^[1-9][0-9]*$"
     {{.Business.EntityType}}Page:
       type: object
       required: [items]

@@ -25,9 +25,9 @@ var (
 type {{.Business.EntityType}} struct {
 	ID string `json:"id"`
 {{- range .Business.Fields}}
-	{{.GoName}} {{.EntityType}} `json:"{{.Name}}{{if not .Required}},omitempty{{end}}"`
+	{{.GoName}} {{.EntityType}} `json:"{{.Name}}{{.JSONOptions}}{{if not .Required}},omitempty{{end}}"`
 {{- end}}
-	Version   int64     `json:"version"`
+	Version   int64     `json:"version,string"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -35,14 +35,14 @@ type {{.Business.EntityType}} struct {
 // WriteInput is the full create or replacement representation.
 type WriteInput struct {
 {{- range .Business.Fields}}
-	{{.GoName}} *{{.GoType}} `json:"{{.Name}}"`
+	{{.GoName}} *{{.GoType}} `json:"{{.Name}}{{.JSONOptions}}"`
 {{- end}}
 }
 
 // UpdateInput adds the optimistic-lock version to a replacement representation.
 type UpdateInput struct {
 	WriteInput
-	Version int64 `json:"version"`
+	Version int64 `json:"version,string"`
 }
 
 // Page is one bounded keyset page.

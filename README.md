@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated Go services include migrations, password hashing, browser sessions, API tokens, permission-based RBAC, security audit events, a Blueprint-driven CRUD module with keyset pagination and optimistic locking, and an OpenAPI 3.1 contract. Frontends remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Nuxt storefronts and broader capability packs remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -33,6 +33,7 @@ Prerequisites:
 
 - Go 1.27 or newer in the 1.27 release line
 - Git
+- Node.js 22.12 or newer when validating generated frontends
 
 Run the baseline checks:
 

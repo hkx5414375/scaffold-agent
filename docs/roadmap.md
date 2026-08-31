@@ -25,7 +25,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Permission-based RBAC with deny-by-default HTTP wrappers.
 - [x] One stateful CRUD module with keyset pagination, optimistic concurrency, transactional audit, and generated RBAC.
 - [x] OpenAPI 3.1 contract with authentication, permission, CRUD, pagination, and conflict semantics.
-- [ ] Vue/Element Plus administration UI generated from the same Blueprint contract.
+- [x] Vue/Element Plus administration UI generated from the same Blueprint contract and verified through lint, unit test, type check, format check, and production build.
 - [ ] PostgreSQL integration tests against an ephemeral database.
 
 ## M5 — MySQL and platform capabilities

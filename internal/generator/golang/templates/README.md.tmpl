@@ -11,6 +11,8 @@ pagination, optimistic locking, transactional audit events, and explicit RBAC.
 
 - Go 1.27 or later
 - PostgreSQL 14 or later
+{{if .Admin}}- Node.js 22.12 or later
+{{end}}
 
 ## Run locally
 
@@ -46,6 +48,19 @@ The machine-readable HTTP contract is `api/openapi.yaml`.
 
 Browser authentication uses an HttpOnly, SameSite=Lax cookie. Automation uses
 `Authorization: Bearer <token>`. Only token digests and password hashes are stored.
+{{if .Admin}}
+## Administration UI
+
+```bash
+cd web/admin
+npm ci
+npm run dev
+```
+
+The Vite development server proxies `/api` and `/healthz` to `localhost:8080`.
+Run `npm run lint`, `npm test`, `npm run build`, and `npm run format:check`
+before committing changes.
+{{end}}
 
 ## Verify
 
