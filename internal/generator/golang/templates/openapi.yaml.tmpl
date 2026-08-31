@@ -544,6 +544,83 @@ paths:
         "500":
           $ref: "#/components/responses/ErrorResponse"
 {{end}}
+{{if .JobAdmin}}
+  /api/v1/jobs:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: listBackgroundJobs
+      x-required-permission: jobs:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, retry, dead]
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Background job metadata without payloads
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/jobs/{id}/retry:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+      - $ref: "#/components/parameters/EntityId"
+{{- else}}
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- end}}
+    post:
+      operationId: retryDeadBackgroundJob
+      x-required-permission: jobs:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Dead job returned to the queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobItem"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -971,6 +1048,56 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/FileAsset"
+        next_cursor:
+          type: string
+{{end}}
+{{if .JobAdmin}}
+    JobItem:
+      type: object
+      required: [id, type, status, priority, attempts, max_attempts, available_at, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, retry, dead]
+        priority:
+          type: integer
+        attempts:
+          type: integer
+        max_attempts:
+          type: integer
+        available_at:
+          type: string
+          format: date-time
+        lease_owner:
+          type: string
+        lease_until:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    JobPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobItem"
         next_cursor:
           type: string
 {{end}}

@@ -39,7 +39,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Idempotent email notification enqueue and TLS-only SMTP worker delivery.
 - [x] Tenant-aware file metadata, bounded streaming HTTP, atomic local object storage, and mutation compensation.
 - [x] Cross-instance database TTL cache with tenant scopes, bounded JSON values, and bounded cleanup.
-- [ ] Import/export, job administration, and observability.
+- [x] Payload-free job administration with tenant-scoped listing and audited dead-job retry.
+- [ ] Import/export and observability.
 - [ ] Portable approval workflows.
 
 ## M6 — Language parity

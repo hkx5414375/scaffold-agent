@@ -38,6 +38,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 选择 `application-cache` `0.1.0` 后，生成项目会加入跨实例一致的数据库 TTL 缓存和有大小限制的 JSON 值。业务代码应给键增加业务命名空间并选择稳定的 TTL，把 `cache.ErrMiss` 统一理解为不存在、已过期或跨租户不可见。AI 不得增加通用缓存 HTTP 接口、缓存秘密、绕过组织范围或执行无界清理。维护任务可调用带批次上限的 `cache.Service.PurgeExpired`；以后替换为 Redis 适配器时也必须保持同一服务契约。
 
+选择 `job-administration` `0.1.0` 会自动解析 `background-jobs` `0.1.x`。管理员可以查看有界的任务元数据，并且只能重试死信任务。所有公开类型都故意排除了载荷和幂等键。AI 不得增加载荷查看或编辑、重试运行中任务、绕过组织范围，或在生成的事务服务之外直接更新任务表。
+
 ## STDIO 协议
 
 启动服务：

@@ -12,6 +12,9 @@ import OrganizationSettingsView from "./views/OrganizationSettingsView.vue";
 {{- if .Files}}
 import FilesView from "./views/FilesView.vue";
 {{- end}}
+{{- if .JobAdmin}}
+import JobsView from "./views/JobsView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -163,9 +166,22 @@ async function acceptInvitation(): Promise<void> {
           <FilesView :key="session.currentOrganizationId" />
         </el-tab-pane>
 {{- end}}
+{{- if .JobAdmin}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="Jobs"
+          name="jobs"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
+        <el-tab-pane label="Jobs" name="jobs">
+{{- end}}
+          <JobsView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
-{{- if .Files}}
+{{- if or .Files .JobAdmin}}
 {{- if .Tenancy}}
       <el-tabs v-else class="workspace-tabs">
 {{- else}}
@@ -180,9 +196,16 @@ async function acceptInvitation(): Promise<void> {
           <DashboardView />
         </el-tab-pane>
 {{- end}}
+{{- if .Files}}
         <el-tab-pane label="Files" name="files">
           <FilesView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
         </el-tab-pane>
+{{- end}}
+{{- if .JobAdmin}}
+        <el-tab-pane label="Jobs" name="jobs">
+          <JobsView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
 {{- if .Business}}

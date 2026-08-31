@@ -37,6 +37,8 @@ const (
 	filesVersion            = "0.1.0"
 	cacheCapability         = "application-cache"
 	cacheVersion            = "0.1.0"
+	jobAdminCapability      = "job-administration"
+	jobAdminVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -94,6 +96,9 @@ type databaseTemplateSet struct {
 	CacheStorePath                    string
 	CacheStoreTemplate                string
 	CacheMigrationTemplate            string
+	JobAdminStorePath                 string
+	JobAdminStoreTemplate             string
+	JobAdminMigrationTemplate         string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -130,6 +135,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CacheStorePath:                    "internal/cache/postgres/store.go",
 		CacheStoreTemplate:                "templates/cache_postgres_store.go.tmpl",
 		CacheMigrationTemplate:            "templates/cache_postgres.sql.tmpl",
+		JobAdminStorePath:                 "internal/jobs/postgres/admin.go",
+		JobAdminStoreTemplate:             "templates/jobadmin_postgres_store.go.tmpl",
+		JobAdminMigrationTemplate:         "templates/jobadmin_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -165,6 +173,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CacheStorePath:                    "internal/cache/mysql/store.go",
 		CacheStoreTemplate:                "templates/cache_mysql_store.go.tmpl",
 		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
+		JobAdminStorePath:                 "internal/jobs/mysql/admin.go",
+		JobAdminStoreTemplate:             "templates/jobadmin_mysql_store.go.tmpl",
+		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
 	},
 }
 
@@ -240,6 +251,17 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobAdminCapability, Version: jobAdminVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Permission-protected background job inspection and dead-job retry",
+			Requires:    []spec.PackDependency{{Name: jobsCapability, Constraint: "^0.1.0"}},
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -293,6 +315,13 @@ var filesTemplates = map[string]string{
 var cacheTemplates = map[string]string{
 	"internal/cache/cache.go":      "templates/cache.go.tmpl",
 	"internal/cache/cache_test.go": "templates/cache_test.go.tmpl",
+}
+
+var jobAdminTemplates = map[string]string{
+	"internal/jobadmin/service.go":              "templates/jobadmin.go.tmpl",
+	"internal/jobadmin/service_test.go":         "templates/jobadmin_test.go.tmpl",
+	"internal/jobadmin/httpapi/handler.go":      "templates/jobadmin_handler.go.tmpl",
+	"internal/jobadmin/httpapi/handler_test.go": "templates/jobadmin_handler_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -363,6 +392,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	notificationsEnabled := false
 	filesEnabled := false
 	cacheEnabled := false
+	jobAdminEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -386,6 +416,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == cacheCapability {
 			cacheEnabled = true
 		}
+		if pack.Metadata.Name == jobAdminCapability {
+			jobAdminEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
@@ -404,6 +437,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Notifications:    notificationsEnabled,
 		Files:            filesEnabled,
 		Cache:            cacheEnabled,
+		JobAdmin:         jobAdminEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -425,6 +459,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if cacheEnabled {
+		data.MigrationCount++
+	}
+	if jobAdminEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
@@ -544,6 +581,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			Owner:        cacheCapability,
 		}
 	}
+	if jobAdminEnabled {
+		for path, templatePath := range jobAdminTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: jobAdminCapability}
+		}
+		targets[database.JobAdminStorePath] = renderTarget{TemplatePath: database.JobAdminStoreTemplate, Owner: jobAdminCapability}
+		targets["internal/platform/migrate/migrations/000230_job_administration.sql"] = renderTarget{
+			TemplatePath: database.JobAdminMigrationTemplate,
+			Owner:        jobAdminCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/JobsView.vue"] = renderTarget{
+				TemplatePath: "templates/admin/src/views/JobsView.vue",
+				Owner:        jobAdminCapability,
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -607,6 +660,7 @@ type templateData struct {
 	Notifications    bool
 	Files            bool
 	Cache            bool
+	JobAdmin         bool
 	MigrationCount   int
 }
 

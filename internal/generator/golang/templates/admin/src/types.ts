@@ -73,6 +73,30 @@ export interface FileAssetPage {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .JobAdmin}}
+
+export interface JobItem {
+  id: string;
+  organization_id?: string;
+  type: string;
+  status: "queued" | "running" | "succeeded" | "retry" | "dead";
+  priority: number;
+  attempts: number;
+  max_attempts: number;
+  available_at: string;
+  lease_owner?: string;
+  lease_until?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+export interface JobPage {
+  items: JobItem[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

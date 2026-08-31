@@ -1,0 +1,71 @@
+package jobadmin
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/jobs"
+)
+
+func TestServiceListsWithoutPayloadAndRetriesDeadJob(t *testing.T) {
+	now := time.Date(2026, time.September, 1, 1, 0, 0, 0, time.UTC)
+	store := &recordingStore{job: jobs.Job{
+		ID: "job-1", OrganizationID: {{if .Tenancy}}"organization-1"{{else}}""{{end}}, Type: "reports.export",
+		Payload: []byte(`{"secret":"not-public"}`), Status: jobs.StatusDead, Attempts: 8, MaxAttempts: 8,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+	}}
+	service := NewService(store)
+	service.now = func() time.Time { return now }
+	actor := identity.Principal{UserID: "admin-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+
+	page, err := service.List(context.Background(), jobs.StatusDead, "", 20, actor)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "job-1" {
+		t.Fatalf("List() = %#v, %v", page, err)
+	}
+	if store.organizationID != {{if .Tenancy}}"organization-1"{{else}}""{{end}} || store.status != jobs.StatusDead {
+		t.Fatalf("List() scope = %q, status = %q", store.organizationID, store.status)
+	}
+	item, err := service.Retry(context.Background(), "job-1", actor)
+	if err != nil || item.Status != jobs.StatusQueued || item.Attempts != 0 {
+		t.Fatalf("Retry() = %#v, %v", item, err)
+	}
+	if store.audit.Action != "jobs:retry" || store.audit.Target != "job-1" {
+		t.Fatalf("Retry() audit = %#v", store.audit)
+	}
+}
+
+func TestServiceRejectsUnsafeFilters(t *testing.T) {
+	service := NewService(&recordingStore{})
+	actor := identity.Principal{UserID: "admin-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	if _, err := service.List(context.Background(), "unknown", "", 20, actor); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("List(unknown status) error = %v, want ErrInvalid", err)
+	}
+	if _, err := service.List(context.Background(), "", "", 101, actor); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("List(large page) error = %v, want ErrInvalid", err)
+	}
+}
+
+type recordingStore struct {
+	job            jobs.Job
+	organizationID string
+	status         string
+	audit          identity.AuditEvent
+}
+
+func (store *recordingStore) ListAdmin(_ context.Context, organizationID, status, _ string, _ int) ([]jobs.Job, string, error) {
+	store.organizationID, store.status = organizationID, status
+	return []jobs.Job{store.job}, "", nil
+}
+
+func (store *recordingStore) RetryDead(_ context.Context, organizationID, id string, now time.Time, audit identity.AuditEvent) (jobs.Job, error) {
+	if store.job.ID != id || store.job.OrganizationID != organizationID || store.job.Status != jobs.StatusDead {
+		return jobs.Job{}, ErrConflict
+	}
+	store.audit = audit
+	store.job.Status, store.job.Attempts, store.job.AvailableAt, store.job.UpdatedAt = jobs.StatusQueued, 0, now, now
+	store.job.LastError, store.job.CompletedAt = "", nil
+	return store.job, nil
+}

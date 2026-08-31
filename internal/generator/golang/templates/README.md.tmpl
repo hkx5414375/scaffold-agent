@@ -27,6 +27,10 @@ streaming uploads, SHA-256 integrity metadata, and atomic local object writes.
 It also contains the `application-cache` capability with cross-instance database
 storage, tenant-aware keys, bounded JSON values, and explicit TTL cleanup.
 {{end}}
+{{if .JobAdmin}}
+It also contains `job-administration` with payload-free status inspection and
+audited dead-job retry. Only administrators receive its permissions.
+{{end}}
 
 ## Requirements
 
@@ -123,6 +127,10 @@ runtime secret store; queued message bodies are sensitive database content.
 - `GET /api/v1/files/{id}`
 - `GET /api/v1/files/{id}/content`
 - `DELETE /api/v1/files/{id}`
+{{end}}
+{{if .JobAdmin}}
+- `GET /api/v1/jobs`
+- `POST /api/v1/jobs/{id}/retry`
 {{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`

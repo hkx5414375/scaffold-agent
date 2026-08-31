@@ -572,6 +572,44 @@ func TestGenerateGlobalMySQLApplicationCacheCapability(t *testing.T) {
 	}
 }
 
+func TestGenerateJobAdministrationResolvesBackgroundJobs(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+		{Name: jobAdminCapability, Version: jobAdminVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[jobAdminCapability] != jobAdminVersion || generated.CapabilityLock[jobsCapability] != jobsVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, path := range []string{
+		"cmd/worker/main.go",
+		"internal/jobadmin/service.go",
+		"internal/jobadmin/httpapi/handler.go",
+		"internal/jobs/postgres/admin.go",
+		"internal/platform/migrate/migrations/000230_job_administration.sql",
+		"web/admin/src/views/JobsView.vue",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	openAPI := string(outputContent(generated, "api/openapi.yaml"))
+	if !strings.Contains(openAPI, "/api/v1/jobs/{id}/retry:") || strings.Contains(openAPI, "payload:") {
+		t.Fatal("Generate() did not expose the payload-free job administration contract")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated job administration OpenAPI is invalid YAML: %v", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

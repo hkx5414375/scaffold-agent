@@ -1,0 +1,83 @@
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/jobadmin"
+	"{{.ModulePath}}/internal/jobs"
+)
+
+// ListAdmin returns a stable metadata page in one organization scope.
+func (store *Store) ListAdmin(ctx context.Context, organizationID, status, cursor string, limit int) ([]jobs.Job, string, error) {
+	rows, err := store.database.QueryContext(ctx, selectJob+`
+		where {{if .Tenancy}}organization_id = ? and (? = '' or status = ?) and (? = '' or id < ?){{else}}(? = '' or status = ?) and (? = '' or id < ?){{end}}
+		order by id desc limit ?`, {{if .Tenancy}}organizationID, {{end}}status, status, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query job administration page: %w", err)
+	}
+	defer rows.Close()
+	items := make([]jobs.Job, 0, limit)
+	for rows.Next() {
+		item, err := scanJob(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate job administration page: %w", err)
+	}
+	nextCursor := ""
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+// RetryDead atomically checks state, resets the job, and appends an audit event.
+func (store *Store) RetryDead(ctx context.Context, organizationID, id string, now time.Time, audit identity.AuditEvent) (jobs.Job, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("begin dead job retry: %w", err)
+	}
+	var status string
+	err = transaction.QueryRowContext(ctx, `select status from background_jobs where id = ?{{if .Tenancy}} and organization_id = ?{{end}} for update`, id{{if .Tenancy}}, organizationID{{end}}).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return jobs.Job{}, rollback(transaction, jobadmin.ErrNotFound)
+	}
+	if err != nil {
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("lock dead job: %w", err))
+	}
+	if status != jobs.StatusDead {
+		return jobs.Job{}, rollback(transaction, jobadmin.ErrConflict)
+	}
+	_, err = transaction.ExecContext(ctx, `
+		update background_jobs set status = ?, attempts = 0, available_at = ?,
+			lease_owner = null, lease_until = null, last_error = null,
+			completed_at = null, updated_at = ?
+		where id = ?{{if .Tenancy}} and organization_id = ?{{end}}`, jobs.StatusQueued, now, now, id{{if .Tenancy}}, organizationID{{end}})
+	if err != nil {
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("reset dead job: %w", err))
+	}
+	job, err := scanJob(transaction.QueryRowContext(ctx, selectJob+` where id = ?{{if .Tenancy}} and organization_id = ?{{end}}`, id{{if .Tenancy}}, organizationID{{end}}))
+	if err != nil {
+		return jobs.Job{}, rollback(transaction, err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
+		audit.ID, audit.UserID, audit.Action, audit.Outcome, audit.Target, audit.IPAddress, audit.UserAgent, audit.CreatedAt,
+	); err != nil {
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("append dead job retry audit: %w", err))
+	}
+	if err := transaction.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("commit dead job retry: %w", err)
+	}
+	return job, nil
+}

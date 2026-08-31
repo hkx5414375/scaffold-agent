@@ -92,6 +92,13 @@ secrets in cached values, bypass organization scope, or run unbounded cleanup.
 `cache.Service.PurgeExpired` accepts a bounded maintenance batch; a later store
 adapter may use Redis while preserving the same service contract.
 
+Selecting `job-administration` version `0.1.0` automatically resolves
+`background-jobs` `0.1.x`. Administrators can inspect bounded job metadata and
+retry only dead jobs. Payloads and deduplication keys are deliberately absent from
+all public types. Agents must not add payload viewing or editing, retry running
+jobs, bypass organization scope, or update queue rows outside the generated
+transactional service.
+
 ## STDIO protocol
 
 Run the server with:

@@ -203,6 +203,26 @@ func TestGoCacheWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", cacheSelection, "", 52, false)
 }
 
+func TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyJobAdminSelection, "0.3.0", 82, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantJobAdministrationMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyJobAdminSelection, "0.3.0", 83, false)
+}
+
+func TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", jobAdminSelection, "", 62, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoJobAdministrationWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", jobAdminSelection, "", 63, false)
+}
+
+func TestGoNotificationsAndJobAdministrationCompose(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", notificationsJobAdminSelection, "0.3.0", 88, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -263,6 +283,27 @@ const tenancyCacheSelection = `  capabilities:
 
 const cacheSelection = `  capabilities:
     - name: application-cache
+      version: 0.1.0
+`
+
+const tenancyJobAdminSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: job-administration
+      version: 0.1.0
+`
+
+const jobAdminSelection = `  capabilities:
+    - name: job-administration
+      version: 0.1.0
+`
+
+const notificationsJobAdminSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: notifications
+      version: 0.1.0
+    - name: job-administration
       version: 0.1.0
 `
 
@@ -333,6 +374,11 @@ CAPABILITIES
 	}
 	if strings.Contains(capabilities, "application-cache") && plannedData.CapabilityLock["application-cache"] != "0.1.0" {
 		t.Fatalf("Plan() application cache lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "job-administration") {
+		if plannedData.CapabilityLock["job-administration"] != "0.1.0" || plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+			t.Fatalf("Plan() job administration lock = %#v", plannedData.CapabilityLock)
+		}
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

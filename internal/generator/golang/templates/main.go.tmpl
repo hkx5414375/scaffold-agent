@@ -25,6 +25,11 @@ import (
 	"{{.ModulePath}}/internal/files/local"
 	filesdatabase "{{.ModulePath}}/internal/files/{{.Database.PackageName}}"
 {{- end}}
+{{- if .JobAdmin}}
+	"{{.ModulePath}}/internal/jobadmin"
+	jobadminhttp "{{.ModulePath}}/internal/jobadmin/httpapi"
+	jobsdatabase "{{.ModulePath}}/internal/jobs/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Tenancy}}
 	"{{.ModulePath}}/internal/tenancy"
 	tenancyhttp "{{.ModulePath}}/internal/tenancy/httpapi"
@@ -84,6 +89,10 @@ func run() error {
 	fileService := files.NewService(filesdatabase.New(pool), fileBlobs)
 	fileAPI := fileshttp.New(fileService)
 {{- end}}
+{{- if .JobAdmin}}
+	jobAdminService := jobadmin.NewService(jobsdatabase.New(pool))
+	jobAdminAPI := jobadminhttp.New(jobAdminService)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -106,6 +115,9 @@ func run() error {
 		identityAPI.Register(mux)
 {{- if .Files}}
 		fileAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .JobAdmin}}
+		jobAdminAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .Tenancy}}
 		tenancyAPI.Register(mux, identityAPI)

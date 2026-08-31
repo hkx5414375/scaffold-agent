@@ -1,0 +1,75 @@
+// Package httpapi exposes background job administration over HTTP.
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/jobadmin"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const defaultPageLimit = 20
+
+// Handler maps safe job metadata operations to HTTP.
+type Handler struct {
+	service *jobadmin.Service
+}
+
+// New returns a job administration HTTP adapter.
+func New(service *jobadmin.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds administrator routes without exposing job payloads.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("GET /api/v1/jobs", security.Authorized("jobs:read", handler.list))
+	mux.HandleFunc("POST /api/v1/jobs/{id}/retry", security.Authorized("jobs:manage", handler.retry))
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "jobs.invalid", "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	page, err := handler.service.List(
+		request.Context(), request.URL.Query().Get("status"), request.URL.Query().Get("cursor"), limit, actor,
+	)
+	if err != nil {
+		handleError(response, "list background jobs", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) retry(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	item, err := handler.service.Retry(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "retry background job", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, item)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, jobadmin.ErrInvalid):
+		httpjson.WriteError(response, http.StatusBadRequest, "jobs.invalid", "job administration request is invalid")
+	case errors.Is(err, jobadmin.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "jobs.not_found", "background job was not found")
+	case errors.Is(err, jobadmin.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "jobs.not_retryable", "only dead background jobs can be retried")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

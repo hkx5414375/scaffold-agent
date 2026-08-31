@@ -6,7 +6,7 @@ import (
 	{{- end}}
 	"context"
 	"crypto/rand"
-{{- if or .Cache (and .Jobs (not .Notifications))}}
+{{- if or .Cache .JobAdmin (and .Jobs (not .Notifications))}}
 	"encoding/json"
 {{- end}}
 	"errors"
@@ -37,6 +37,9 @@ import (
 	"{{.ModulePath}}/internal/jobs"
 	jobspostgres "{{.ModulePath}}/internal/jobs/postgres"
 	{{- end}}
+{{- if .JobAdmin}}
+	"{{.ModulePath}}/internal/jobadmin"
+{{- end}}
 {{- if .Notifications}}
 	"{{.ModulePath}}/internal/notifications"
 {{- end}}
@@ -314,6 +317,32 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := jobStore.Complete(ctx, retried.ID, "worker-2", time.Now().UTC()); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("Complete(after completion) error = %v, want ErrLeaseLost", err)
 	}
+{{- if .JobAdmin}}
+	deadJob, err := jobService.Enqueue(ctx, organizationID, jobs.EnqueueInput{
+		Type: "system.dead-test", Payload: json.RawMessage(`{"source":"job-admin-integration"}`),
+		IdempotencyKey: "job-admin-dead", MaxAttempts: 1,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue(job admin) error = %v", err)
+	}
+	deadJob, err = jobService.LeaseNext(ctx, "worker-admin", 30*time.Second)
+	if err != nil {
+		t.Fatalf("LeaseNext(job admin) error = %v", err)
+	}
+	if err := jobService.Fail(ctx, deadJob, "worker-admin", errors.New("expected dead job")); err != nil {
+		t.Fatalf("Fail(job admin) error = %v", err)
+	}
+	jobAdminService := jobadmin.NewService(jobStore)
+	jobAdminActor := identity.Principal{UserID: user.ID, OrganizationID: organizationID}
+	deadPage, err := jobAdminService.List(ctx, jobs.StatusDead, "", 20, jobAdminActor)
+	if err != nil || len(deadPage.Items) != 1 || deadPage.Items[0].ID != deadJob.ID {
+		t.Fatalf("jobadmin.List() = %#v, %v", deadPage, err)
+	}
+	requeued, err := jobAdminService.Retry(ctx, deadJob.ID, jobAdminActor)
+	if err != nil || requeued.Status != jobs.StatusQueued || requeued.Attempts != 0 {
+		t.Fatalf("jobadmin.Retry() = %#v, %v", requeued, err)
+	}
+{{- end}}
 {{- end}}
 
 {{- range .Business.Fields}}

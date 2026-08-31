@@ -1,0 +1,129 @@
+// Package jobadmin owns permission-protected background job operations.
+package jobadmin
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/jobs"
+)
+
+var (
+	ErrInvalid  = errors.New("job administration input is invalid")
+	ErrNotFound = errors.New("background job was not found")
+	ErrConflict = errors.New("background job is not retryable")
+)
+
+// Item deliberately omits payloads, deduplication keys, and storage scope keys.
+type Item struct {
+	ID             string     `json:"id"`
+	OrganizationID string     `json:"organization_id,omitempty"`
+	Type           string     `json:"type"`
+	Status         string     `json:"status"`
+	Priority       int        `json:"priority"`
+	Attempts       int        `json:"attempts"`
+	MaxAttempts    int        `json:"max_attempts"`
+	AvailableAt    time.Time  `json:"available_at"`
+	LeaseOwner     string     `json:"lease_owner,omitempty"`
+	LeaseUntil     *time.Time `json:"lease_until,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+}
+
+// Page is one bounded stable job page.
+type Page struct {
+	Items      []Item `json:"items"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+// Store provides read and dead-job retry operations over the durable queue.
+type Store interface {
+	ListAdmin(context.Context, string, string, string, int) ([]jobs.Job, string, error)
+	RetryDead(context.Context, string, string, time.Time, identity.AuditEvent) (jobs.Job, error)
+}
+
+// Service applies scope and state rules independently from HTTP.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns job administration use cases.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// List returns metadata only; queued payloads are never exposed.
+func (service *Service) List(ctx context.Context, status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	organizationID, err := actorScope(actor)
+	if err != nil || limit < 1 || limit > 100 {
+		return Page{}, ErrInvalid
+	}
+	status = strings.TrimSpace(status)
+	if status != "" && !validStatus(status) {
+		return Page{}, ErrInvalid
+	}
+	values, nextCursor, err := service.store.ListAdmin(ctx, organizationID, status, strings.TrimSpace(cursor), limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("list background jobs: %w", err)
+	}
+	items := make([]Item, 0, len(values))
+	for _, value := range values {
+		items = append(items, publicItem(value))
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+// Retry returns one dead job to the queue and resets its attempt budget.
+func (service *Service) Retry(ctx context.Context, id string, actor identity.Principal) (Item, error) {
+	organizationID, err := actorScope(actor)
+	id = strings.TrimSpace(id)
+	if err != nil || id == "" {
+		return Item{}, ErrInvalid
+	}
+	now := service.now().UTC()
+	audit := identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: "jobs:retry", Outcome: "allowed", Target: id, CreatedAt: now,
+	}
+	value, err := service.store.RetryDead(ctx, organizationID, id, now, audit)
+	if err != nil {
+		return Item{}, fmt.Errorf("retry background job: %w", err)
+	}
+	return publicItem(value), nil
+}
+
+func actorScope(actor identity.Principal) (string, error) {
+	if actor.UserID == ""{{if .Tenancy}} || strings.TrimSpace(actor.OrganizationID) == ""{{end}} {
+		return "", ErrInvalid
+	}
+{{- if .Tenancy}}
+	return strings.TrimSpace(actor.OrganizationID), nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func validStatus(status string) bool {
+	switch status {
+	case jobs.StatusQueued, jobs.StatusRunning, jobs.StatusSucceeded, jobs.StatusRetry, jobs.StatusDead:
+		return true
+	default:
+		return false
+	}
+}
+
+func publicItem(value jobs.Job) Item {
+	return Item{
+		ID: value.ID, OrganizationID: value.OrganizationID, Type: value.Type, Status: value.Status,
+		Priority: value.Priority, Attempts: value.Attempts, MaxAttempts: value.MaxAttempts,
+		AvailableAt: value.AvailableAt, LeaseOwner: value.LeaseOwner, LeaseUntil: value.LeaseUntil,
+		LastError: value.LastError, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, CompletedAt: value.CompletedAt,
+	}
+}

@@ -1,0 +1,52 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/jobadmin"
+	"{{.ModulePath}}/internal/jobs"
+)
+
+func TestHandlerDoesNotExposePayload(t *testing.T) {
+	store := handlerStore{job: jobs.Job{
+		ID: "job-1", OrganizationID: {{if .Tenancy}}"organization-1"{{else}}""{{end}}, Type: "reports.export",
+		Payload: []byte(`{"secret":"hidden"}`), Status: jobs.StatusDead,
+	}}
+	handler := New(jobadmin.NewService(store))
+	actor := identity.Principal{UserID: "admin-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	response := httptest.NewRecorder()
+	handler.list(response, request, actor)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if contains(body, "secret") || contains(body, "payload") || !contains(body, "job-1") {
+		t.Fatalf("list response = %s", body)
+	}
+}
+
+type handlerStore struct{ job jobs.Job }
+
+func (store handlerStore) ListAdmin(context.Context, string, string, string, int) ([]jobs.Job, string, error) {
+	return []jobs.Job{store.job}, "", nil
+}
+
+func (store handlerStore) RetryDead(context.Context, string, string, time.Time, identity.AuditEvent) (jobs.Job, error) {
+	store.job.Status, store.job.Attempts = jobs.StatusQueued, 0
+	return store.job, nil
+}
+
+func contains(value, fragment string) bool {
+	for index := 0; index+len(fragment) <= len(value); index++ {
+		if value[index:index+len(fragment)] == fragment {
+			return true
+		}
+	}
+	return false
+}
