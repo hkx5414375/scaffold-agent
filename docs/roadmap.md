@@ -49,7 +49,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java 21/Spring Boot 4.1 Maven foundation for PostgreSQL and MySQL with deterministic output, health/readiness, and automated quality gates.
 - [x] Java session/token identity, permission RBAC, transactional audit, dialect migrations, and live-database CI gates.
 - [x] Java Blueprint CRUD parity with keyset pagination, optimistic concurrency, transactional audit, and PostgreSQL/MySQL generation gates.
-- [ ] Java OpenAPI and Vue administration parity.
+- [x] Java OpenAPI and shared Vue/Element Plus administration parity with locked frontend build gates.
 - [ ] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 

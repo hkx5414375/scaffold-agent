@@ -40,7 +40,7 @@ jobs:
         run: go run ./cmd/scaffold-agent doctor --json
 
   generated-admin:
-    name: Generated Vue administration
+    name: Shared generated Vue administration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -52,14 +52,14 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: internal/generator/golang/templates/admin/package-lock.json
+          cache-dependency-path: internal/generator/admin/templates/package-lock.json
       - name: Audit locked dependencies
-        working-directory: internal/generator/golang/templates/admin
+        working-directory: internal/generator/admin/templates
         run: npm audit --package-lock-only --audit-level=high
       - name: Generate, lint, test, and build administration UI
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd)$' -count=1
+        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLAdminPlanApplyVerifyEndToEnd)$' -count=1
 
   generated-java:
     name: Generated Java identity and CRUD

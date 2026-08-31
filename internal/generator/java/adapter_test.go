@@ -65,7 +65,8 @@ func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 		mutate func(*spec.Project)
 		want   string
 	}{
-		{name: "frontend", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "element-plus" }, want: "does not generate frontends"},
+		{name: "admin", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "ant-design" }, want: "Element Plus"},
+		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }, want: "storefront"},
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "requires both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
 			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "observability", Version: "0.1.0"}}
@@ -83,6 +84,36 @@ func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 				t.Fatalf("Generate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestGenerateSharedAdministrationProject(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Modules = []spec.Module{businessModule()}
+	result, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(result.Outputs) != 60 || result.CapabilityLock[adminOwner] != adminVersion {
+		t.Fatalf("Generate() result = %#v", result)
+	}
+	for _, path := range []string{
+		"web/admin/package-lock.json",
+		"web/admin/src/App.vue",
+		"web/admin/src/types.ts",
+		"web/admin/src/views/BusinessView.vue",
+	} {
+		if outputContent(result, path) == nil || outputOwner(result, path) != adminOwner {
+			t.Errorf("Generate() administration output %s is missing or has the wrong owner", path)
+		}
+	}
+	types := string(outputContent(result, "web/admin/src/types.ts"))
+	if !strings.Contains(types, "priority?: string") ||
+		!strings.Contains(types, "version: string") {
+		t.Fatalf("generated administration types lose the decimal-string contract:\n%s", types)
 	}
 }
 

@@ -15,6 +15,8 @@ optimistic concurrency, and mutation audit records committed in the same transac
 - JDK 21
 - Maven 3.9 or later
 - {{.Database.DisplayName}}
+{{if .Admin}}- Node.js 22.12 or later
+{{end}}
 
 ## Run locally
 
@@ -39,6 +41,20 @@ cookie, while automation uses `Authorization: Bearer <token>`. Raw session and A
 tokens are returned only to their owners and only SHA-256 digests are persisted.
 Database errors are never returned to clients. The HTTP contract is
 `api/openapi.yaml`.
+{{if .Admin}}
+
+## Administration UI
+
+```bash
+cd web/admin
+npm ci
+npm run dev
+```
+
+The Vite development server proxies `/api` and `/healthz` to `localhost:8080`.
+Run `npm run lint`, `npm test`, `npm run build`, and `npm run format:check`
+before committing changes.
+{{end}}
 
 ## Verify
 

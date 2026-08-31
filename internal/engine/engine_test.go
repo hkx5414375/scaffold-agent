@@ -272,19 +272,27 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 }
 
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", false)
+	runGeneratedJavaReference(t, "postgresql", false, false)
 }
 
 func TestJavaMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", false)
+	runGeneratedJavaReference(t, "mysql", false, false)
 }
 
 func TestJavaPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true)
+	runGeneratedJavaReference(t, "postgresql", true, false)
 }
 
 func TestJavaMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true)
+	runGeneratedJavaReference(t, "mysql", true, false)
+}
+
+func TestJavaPostgreSQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql", true, true)
+}
+
+func TestJavaMySQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql", true, true)
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -463,7 +471,7 @@ WORKFLOWS
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["go-service"] != "0.3.0" || plannedData.CapabilityLock["go-crud"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
-	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
+	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
 	if strings.Contains(capabilities, "organization-tenancy") && plannedData.CapabilityLock["organization-tenancy"] != expectedTenancyVersion {
@@ -543,7 +551,7 @@ WORKFLOWS
 	}
 }
 
-func runGeneratedJavaReference(t *testing.T, database string, business bool) {
+func runGeneratedJavaReference(t *testing.T, database string, business, admin bool) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -555,7 +563,7 @@ metadata:
 spec:
   stack:
     backend: java
-    admin_ui: none
+    admin_ui: ADMIN_UI
     storefront: none
   database:
     engine: DATABASE_ENGINE
@@ -564,6 +572,11 @@ spec:
 MODULES
 `
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	adminUI := "none"
+	if admin {
+		adminUI = "element-plus"
+	}
+	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	modules := ""
 	if business {
 		modules = `  modules:
@@ -595,11 +608,17 @@ MODULES
 	if business {
 		wantChanges = 41
 	}
+	if admin {
+		wantChanges += 20
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	if business && plannedData.CapabilityLock["java-crud"] != "0.1.0" {
 		t.Fatalf("Plan() CRUD lock = %#v", plannedData.CapabilityLock)
+	}
+	if admin && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
+		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {
@@ -618,6 +637,24 @@ MODULES
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("generated mvn verify failed: %v\n%s", err, output)
+		}
+	}
+	if admin && os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+		adminRoot := filepath.Join(root, "web", "admin")
+		adminCommands := [][]string{
+			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},
+			{"npm", "run", "lint"},
+			{"npm", "test"},
+			{"npm", "run", "build"},
+			{"npm", "run", "format:check"},
+		}
+		for _, arguments := range adminCommands {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = adminRoot
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated Java admin %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+			}
 		}
 	}
 	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})

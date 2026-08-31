@@ -13,6 +13,7 @@ import (
 
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -22,6 +23,8 @@ const (
 	baseVersion     = "0.3.0"
 	businessOwner   = "java-crud"
 	businessVersion = "0.1.0"
+	adminOwner      = adminui.Owner
+	adminVersion    = adminui.Version
 )
 
 //go:embed all:templates
@@ -72,18 +75,27 @@ var databases = map[string]databaseData{
 }
 
 type templateData struct {
-	ProjectName string
-	ArtifactID  string
-	PackageName string
-	PackagePath string
-	Database    databaseData
-	Business    *businessData
+	ProjectName      string
+	ArtifactID       string
+	PackageName      string
+	PackagePath      string
+	Database         databaseData
+	Business         *businessData
+	Admin            bool
+	Tenancy          bool
+	TenancyMembers   bool
+	TenancyLifecycle bool
+	Files            bool
+	JobAdmin         bool
+	CSVTransfer      bool
+	Approvals        bool
 }
 
 type businessData struct {
 	ModuleName       string
 	EntityName       string
 	EntityClass      string
+	EntityType       string
 	PackageName      string
 	PackagePath      string
 	TableName        string
@@ -94,21 +106,25 @@ type businessData struct {
 }
 
 type businessField struct {
-	Name           string
-	JavaName       string
-	JavaType       string
-	EntityType     string
-	SQLType        string
-	Required       bool
-	Unique         bool
-	StringLike     bool
-	MaximumLength  int
-	SampleOne      string
-	SampleTwo      string
-	JSONSampleOne  string
-	OpenAPIType    string
-	OpenAPIFormat  string
-	OpenAPIPattern string
+	Name              string
+	JavaName          string
+	JavaType          string
+	EntityType        string
+	SQLType           string
+	Required          bool
+	Unique            bool
+	StringLike        bool
+	MaximumLength     int
+	SampleOne         string
+	SampleTwo         string
+	JSONSampleOne     string
+	OpenAPIType       string
+	OpenAPIFormat     string
+	OpenAPIPattern    string
+	GoName            string
+	TypeScriptType    string
+	TypeScriptDefault string
+	InputKind         string
 }
 
 // Adapter generates the first-party Java service.
@@ -136,8 +152,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !supported {
 		return generator.Result{}, fmt.Errorf("the Java adapter supports only PostgreSQL and MySQL")
 	}
-	if enabled(project.Spec.Stack.AdminUI) || enabled(project.Spec.Stack.Storefront) {
-		return generator.Result{}, fmt.Errorf("the Java foundation adapter does not generate frontends yet")
+	if enabled(project.Spec.Stack.Storefront) {
+		return generator.Result{}, fmt.Errorf("the Java adapter does not generate a storefront yet")
+	}
+	adminEnabled := enabled(project.Spec.Stack.AdminUI)
+	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
+		return generator.Result{}, fmt.Errorf("the Java adapter supports only the Element Plus administration UI")
 	}
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Java adapter requires both session and token authentication")
@@ -158,15 +178,21 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		PackagePath: "com/scaffold/generated/" + packageSegment,
 		Database:    database,
 		Business:    business,
+		Admin:       adminEnabled,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
 	for path, templatePath := range outputTemplates {
 		targets[path] = templatePath
 	}
 	businessPaths := make(map[string]struct{}, 9)
+	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
+	}
+	addAdminTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -209,6 +235,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		addBusinessTarget("src/main/resources/db/migration/V000100__"+business.ModuleName+"_"+business.EntityName+".sql", database.BusinessMigrationTemplate)
 		capabilityLock[businessOwner] = businessVersion
 	}
+	if adminEnabled {
+		for path, templatePath := range adminui.BaseTemplates {
+			addAdminTarget(path, templatePath)
+		}
+		if business != nil {
+			addAdminTarget("web/admin/src/views/BusinessView.vue", adminui.BusinessViewTemplate)
+		}
+		capabilityLock[adminOwner] = adminVersion
+	}
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -220,13 +255,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if err := ctx.Err(); err != nil {
 			return generator.Result{}, err
 		}
-		content, err := render(targets[path], data)
+		var content []byte
+		var err error
+		if _, isAdminPath := adminPaths[path]; isAdminPath {
+			content, err = adminui.Render(targets[path], data)
+		} else {
+			content, err = render(targets[path], data)
+		}
 		if err != nil {
 			return generator.Result{}, fmt.Errorf("render %q: %w", path, err)
 		}
 		owner := baseOwner
 		if _, isBusinessPath := businessPaths[path]; isBusinessPath {
 			owner = businessOwner
+		}
+		if _, isAdminPath := adminPaths[path]; isAdminPath {
+			owner = adminOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}
@@ -327,6 +371,7 @@ func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessD
 		}
 		fieldData.Name = field.Name
 		fieldData.JavaName = javaName
+		fieldData.GoName = upperCamel(field.Name)
 		fieldData.Required = field.Required
 		fieldData.Unique = field.Unique
 		if field.Required {
@@ -340,6 +385,7 @@ func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessD
 	entityClass := upperCamel(entity.Name)
 	return &businessData{
 		ModuleName: module.Name, EntityName: entity.Name, EntityClass: entityClass,
+		EntityType:  entityClass,
 		PackageName: module.Name, PackagePath: module.Name,
 		TableName: tableName, RoutePath: "/api/v1/" + module.Name,
 		PermissionPrefix: prefix, Fields: fields, RequiredFields: requiredFields,
@@ -349,19 +395,19 @@ func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessD
 func javaBusinessField(fieldType, databaseEngine string) (businessField, bool) {
 	switch fieldType {
 	case "string":
-		return businessField{JavaType: "String", SQLType: "varchar(255)", StringLike: true, MaximumLength: 255, SampleOne: `"first"`, SampleTwo: `"second"`, JSONSampleOne: `\"first\"`, OpenAPIType: "string"}, true
+		return businessField{JavaType: "String", SQLType: "varchar(255)", StringLike: true, MaximumLength: 255, SampleOne: `"first"`, SampleTwo: `"second"`, JSONSampleOne: `\"first\"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "text"}, true
 	case "text":
-		return businessField{JavaType: "String", SQLType: "text", StringLike: true, MaximumLength: 4000, SampleOne: `"first text"`, SampleTwo: `"second text"`, JSONSampleOne: `\"first text\"`, OpenAPIType: "string"}, true
+		return businessField{JavaType: "String", SQLType: "text", StringLike: true, MaximumLength: 4000, SampleOne: `"first text"`, SampleTwo: `"second text"`, JSONSampleOne: `\"first text\"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "textarea"}, true
 	case "bool":
-		return businessField{JavaType: "Boolean", SQLType: "boolean", SampleOne: "true", SampleTwo: "false", JSONSampleOne: "true", OpenAPIType: "boolean"}, true
+		return businessField{JavaType: "Boolean", SQLType: "boolean", SampleOne: "true", SampleTwo: "false", JSONSampleOne: "true", OpenAPIType: "boolean", TypeScriptType: "boolean", TypeScriptDefault: "false", InputKind: "boolean"}, true
 	case "int64":
-		return businessField{JavaType: "Long", SQLType: "bigint", SampleOne: "1L", SampleTwo: "2L", JSONSampleOne: `\"1\"`, OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`}, true
+		return businessField{JavaType: "Long", SQLType: "bigint", SampleOne: "1L", SampleTwo: "2L", JSONSampleOne: `\"1\"`, OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`, TypeScriptType: "string", TypeScriptDefault: `"0"`, InputKind: "text"}, true
 	case "datetime":
 		sqlType := "timestamptz"
 		if databaseEngine == "mysql" {
 			sqlType = "datetime(6)"
 		}
-		return businessField{JavaType: "Instant", SQLType: sqlType, SampleOne: `Instant.parse("2026-09-01T00:00:00Z")`, SampleTwo: `Instant.parse("2026-09-02T00:00:00Z")`, JSONSampleOne: `\"2026-09-01T00:00:00Z\"`, OpenAPIType: "string", OpenAPIFormat: "date-time"}, true
+		return businessField{JavaType: "Instant", SQLType: sqlType, SampleOne: `Instant.parse("2026-09-01T00:00:00Z")`, SampleTwo: `Instant.parse("2026-09-02T00:00:00Z")`, JSONSampleOne: `\"2026-09-01T00:00:00Z\"`, OpenAPIType: "string", OpenAPIFormat: "date-time", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "datetime"}, true
 	default:
 		return businessField{}, false
 	}

@@ -1,4 +1,6 @@
 interface ErrorEnvelope {
+  code?: string;
+  message?: string;
   error?: {
     code?: string;
     message?: string;
@@ -38,8 +40,10 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     const envelope = await readError(response);
     throw new ApiError(
       response.status,
-      envelope.error?.code ?? "request.failed",
-      envelope.error?.message ?? `request failed with status ${response.status}`,
+      envelope.error?.code ?? envelope.code ?? "request.failed",
+      envelope.error?.message ??
+        envelope.message ??
+        `request failed with status ${response.status}`,
     );
   }
   if (response.status === 204) {
@@ -61,8 +65,10 @@ export async function download(path: string): Promise<Blob> {
     const envelope = await readError(response);
     throw new ApiError(
       response.status,
-      envelope.error?.code ?? "request.failed",
-      envelope.error?.message ?? `request failed with status ${response.status}`,
+      envelope.error?.code ?? envelope.code ?? "request.failed",
+      envelope.error?.message ??
+        envelope.message ??
+        `request failed with status ${response.status}`,
     );
   }
   return await response.blob();

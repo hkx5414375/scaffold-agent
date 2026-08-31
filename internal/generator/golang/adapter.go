@@ -16,6 +16,7 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/capability"
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -25,8 +26,8 @@ const (
 	baseVersion             = "0.3.0"
 	businessCapability      = "go-crud"
 	businessVersion         = "0.3.0"
-	adminCapability         = "vue-admin"
-	adminVersion            = "0.1.0"
+	adminCapability         = adminui.Owner
+	adminVersion            = adminui.Version
 	tenancyCapability       = "organization-tenancy"
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
@@ -401,28 +402,6 @@ var approvalsTemplates = map[string]string{
 	"internal/approvals/httpapi/handler_test.go": "templates/approvals_handler_test.go.tmpl",
 }
 
-var adminTemplates = map[string]string{
-	"web/admin/.prettierignore":             "templates/admin/.prettierignore",
-	"web/admin/.prettierrc.json":            "templates/admin/.prettierrc.json",
-	"web/admin/eslint.config.js":            "templates/admin/eslint.config.js",
-	"web/admin/index.html":                  "templates/admin/index.html",
-	"web/admin/package-lock.json":           "templates/admin/package-lock.json",
-	"web/admin/package.json":                "templates/admin/package.json",
-	"web/admin/tsconfig.json":               "templates/admin/tsconfig.json",
-	"web/admin/vite.config.ts":              "templates/admin/vite.config.ts",
-	"web/admin/vitest.config.ts":            "templates/admin/vitest.config.ts",
-	"web/admin/src/App.vue":                 "templates/admin/src/App.vue",
-	"web/admin/src/api/client.test.ts":      "templates/admin/src/api/client.test.ts",
-	"web/admin/src/api/client.ts":           "templates/admin/src/api/client.ts",
-	"web/admin/src/env.d.ts":                "templates/admin/src/env.d.ts",
-	"web/admin/src/main.ts":                 "templates/admin/src/main.ts",
-	"web/admin/src/stores/session.ts":       "templates/admin/src/stores/session.ts",
-	"web/admin/src/styles.css":              "templates/admin/src/styles.css",
-	"web/admin/src/types.ts":                "templates/admin/src/types.ts",
-	"web/admin/src/views/DashboardView.vue": "templates/admin/src/views/DashboardView.vue",
-	"web/admin/src/views/LoginView.vue":     "templates/admin/src/views/LoginView.vue",
-}
-
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -595,12 +574,18 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		capabilityLock[businessCapability] = businessVersion
 	}
 	if adminEnabled {
-		for path, templatePath := range adminTemplates {
-			targets[path] = renderTarget{TemplatePath: templatePath, Owner: adminCapability}
+		for path, templatePath := range adminui.BaseTemplates {
+			targets[path] = renderTarget{
+				TemplatePath: templatePath, Owner: adminCapability, SharedAdmin: true,
+			}
 		}
 		if business != nil {
 			path := "web/admin/src/views/BusinessView.vue"
-			targets[path] = renderTarget{TemplatePath: "templates/admin/src/views/BusinessView.vue.tmpl", Owner: adminCapability}
+			targets[path] = renderTarget{
+				TemplatePath: adminui.BusinessViewTemplate,
+				Owner:        adminCapability,
+				SharedAdmin:  true,
+			}
 		}
 		capabilityLock[adminCapability] = adminVersion
 	}
@@ -623,8 +608,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if adminEnabled {
 			targets["web/admin/src/views/MembersView.vue"] = renderTarget{
-				TemplatePath: "templates/admin/src/views/MembersView.vue",
+				TemplatePath: "templates/src/views/MembersView.vue",
 				Owner:        tenancyCapability,
+				SharedAdmin:  true,
 			}
 		}
 	}
@@ -639,8 +625,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if adminEnabled {
 			targets["web/admin/src/views/OrganizationSettingsView.vue"] = renderTarget{
-				TemplatePath: "templates/admin/src/views/OrganizationSettingsView.vue",
+				TemplatePath: "templates/src/views/OrganizationSettingsView.vue",
 				Owner:        tenancyCapability,
+				SharedAdmin:  true,
 			}
 		}
 	}
@@ -670,8 +657,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if adminEnabled {
 			targets["web/admin/src/views/FilesView.vue"] = renderTarget{
-				TemplatePath: "templates/admin/src/views/FilesView.vue",
+				TemplatePath: "templates/src/views/FilesView.vue",
 				Owner:        filesCapability,
+				SharedAdmin:  true,
 			}
 		}
 	}
@@ -696,8 +684,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if adminEnabled {
 			targets["web/admin/src/views/JobsView.vue"] = renderTarget{
-				TemplatePath: "templates/admin/src/views/JobsView.vue",
+				TemplatePath: "templates/src/views/JobsView.vue",
 				Owner:        jobAdminCapability,
+				SharedAdmin:  true,
 			}
 		}
 	}
@@ -729,8 +718,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if adminEnabled {
 			targets["web/admin/src/views/ApprovalsView.vue"] = renderTarget{
-				TemplatePath: "templates/admin/src/views/ApprovalsView.vue.tmpl",
+				TemplatePath: "templates/src/views/ApprovalsView.vue.tmpl",
 				Owner:        approvalsCapability,
+				SharedAdmin:  true,
 			}
 		}
 	}
@@ -745,7 +735,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			return generator.Result{}, err
 		}
 		target := targets[path]
-		content, err := render(target.TemplatePath, data)
+		var content []byte
+		var err error
+		if target.SharedAdmin {
+			content, err = adminui.Render(target.TemplatePath, data)
+		} else {
+			content, err = render(target.TemplatePath, data)
+		}
 		if err != nil {
 			return generator.Result{}, fmt.Errorf("render %q: %w", path, err)
 		}
@@ -813,6 +809,7 @@ type databaseData struct {
 type renderTarget struct {
 	TemplatePath string
 	Owner        string
+	SharedAdmin  bool
 }
 
 type businessData struct {

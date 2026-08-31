@@ -36,6 +36,21 @@ describe("request", () => {
     expect(failure).toBeInstanceOf(ApiError);
     expect(failure).toMatchObject({ status: 409, code: "tasks.conflict", message: "changed" });
   });
+
+  it("supports direct stable error bodies", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ code: "tasks.not_found", message: "missing" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    const failure = await request("/api/v1/tasks/missing").catch((error: unknown) => error);
+    expect(failure).toMatchObject({ status: 404, code: "tasks.not_found", message: "missing" });
+  });
 {{- if .Files}}
 
   it("lets the browser set multipart boundaries", async () => {
