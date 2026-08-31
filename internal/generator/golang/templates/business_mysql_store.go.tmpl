@@ -1,43 +1,39 @@
-// Package postgres persists {{.Business.EntityName}} aggregates in PostgreSQL.
-package postgres
+// Package mysql persists {{.Business.EntityName}} aggregates in MySQL.
+package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+	mysqldriver "github.com/go-sql-driver/mysql"
 
 	"{{.ModulePath}}/internal/identity"
 	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 )
 
-const cleanupTimeout = 5 * time.Second
-
-// Store is the PostgreSQL {{.Business.EntityName}} repository.
+// Store is the MySQL {{.Business.EntityName}} repository.
 type Store struct {
-	pool *pgxpool.Pool
+	database *sql.DB
 }
 
-// New returns a PostgreSQL {{.Business.EntityName}} store.
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// New returns a MySQL {{.Business.EntityName}} store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
 }
 
 func (store *Store) Create(ctx context.Context, value {{.Business.PackageName}}.{{.Business.EntityType}}, audit identity.AuditEvent) error {
-	return store.mutate(ctx, func(transaction pgx.Tx) error {
-		_, err := transaction.Exec(ctx, `
+	return store.mutate(ctx, func(transaction *sql.Tx) error {
+		_, err := transaction.ExecContext(ctx, `
 			insert into {{goSQL .Business.TableName}} (id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at)
-			values (@id{{range .Business.Fields}}, @{{.Name}}{{end}}, @version, @created_at, @updated_at)`, pgx.NamedArgs{
-			"id": value.ID,
+			values (?{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)`,
+			value.ID,
 {{- range .Business.Fields}}
-			"{{.Name}}": value.{{.GoName}},
+			value.{{.GoName}},
 {{- end}}
-			"version": value.Version, "created_at": value.CreatedAt, "updated_at": value.UpdatedAt,
-		})
+			value.Version, value.CreatedAt, value.UpdatedAt,
+		)
 		if err != nil {
 			return persistenceError(err)
 		}
@@ -46,18 +42,18 @@ func (store *Store) Create(ctx context.Context, value {{.Business.PackageName}}.
 }
 
 func (store *Store) Get(ctx context.Context, id string) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
-	return scan{{.Business.EntityType}}(store.pool.QueryRow(ctx, `
+	return scan{{.Business.EntityType}}(store.database.QueryRowContext(ctx, `
 		select id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
-		from {{goSQL .Business.TableName}} where id = $1`, id))
+		from {{goSQL .Business.TableName}} where id = ?`, id))
 }
 
 func (store *Store) List(ctx context.Context, cursor string, limit int) ([]{{.Business.PackageName}}.{{.Business.EntityType}}, string, error) {
-	rows, err := store.pool.Query(ctx, `
+	rows, err := store.database.QueryContext(ctx, `
 		select id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
 		from {{goSQL .Business.TableName}}
-		where ($1 = '' or id > $1)
+		where (? = '' or id > ?)
 		order by id
-		limit $2`, cursor, limit+1)
+		limit ?`, cursor, cursor, limit+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("query {{.Business.EntityName}} page: %w", err)
 	}
@@ -83,26 +79,32 @@ func (store *Store) List(ctx context.Context, cursor string, limit int) ([]{{.Bu
 
 func (store *Store) Update(ctx context.Context, value {{.Business.PackageName}}.{{.Business.EntityType}}, audit identity.AuditEvent) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
 	var updated {{.Business.PackageName}}.{{.Business.EntityType}}
-	err := store.mutate(ctx, func(transaction pgx.Tx) error {
-		row := transaction.QueryRow(ctx, `
+	err := store.mutate(ctx, func(transaction *sql.Tx) error {
+		command, err := transaction.ExecContext(ctx, `
 			update {{goSQL .Business.TableName}}
-			set {{range $index, $field := .Business.Fields}}{{if $index}}, {{end}}{{goSQL $field.Name}} = @{{$field.Name}}{{end}},
-				version = version + 1, updated_at = @updated_at
-			where id = @id and version = @version
-			returning id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at`, pgx.NamedArgs{
-			"id": value.ID,
+			set {{range $index, $field := .Business.Fields}}{{if $index}}, {{end}}{{goSQL $field.Name}} = ?{{end}},
+				version = version + 1, updated_at = ?
+			where id = ? and version = ?`,
 {{- range .Business.Fields}}
-			"{{.Name}}": value.{{.GoName}},
+			value.{{.GoName}},
 {{- end}}
-			"version": value.Version, "updated_at": value.UpdatedAt,
-		})
-		var err error
-		updated, err = scan{{.Business.EntityType}}(row)
-		if errors.Is(err, {{.Business.PackageName}}.ErrNotFound) {
-			return {{.Business.PackageName}}.ErrConflict
-		}
+			value.UpdatedAt, value.ID, value.Version,
+		)
 		if err != nil {
 			return persistenceError(err)
+		}
+		rowsAffected, err := command.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect {{.Business.EntityName}} update: %w", err)
+		}
+		if rowsAffected != 1 {
+			return {{.Business.PackageName}}.ErrConflict
+		}
+		updated, err = scan{{.Business.EntityType}}(transaction.QueryRowContext(ctx, `
+			select id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
+			from {{goSQL .Business.TableName}} where id = ?`, value.ID))
+		if err != nil {
+			return err
 		}
 		return appendAudit(ctx, transaction, audit)
 	})
@@ -113,37 +115,41 @@ func (store *Store) Update(ctx context.Context, value {{.Business.PackageName}}.
 }
 
 func (store *Store) Delete(ctx context.Context, id string, version int64, audit identity.AuditEvent) error {
-	return store.mutate(ctx, func(transaction pgx.Tx) error {
-		command, err := transaction.Exec(ctx, `
-			delete from {{goSQL .Business.TableName}} where id = $1 and version = $2`, id, version)
+	return store.mutate(ctx, func(transaction *sql.Tx) error {
+		command, err := transaction.ExecContext(ctx, `
+			delete from {{goSQL .Business.TableName}} where id = ? and version = ?`, id, version)
 		if err != nil {
 			return persistenceError(err)
 		}
-		if command.RowsAffected() != 1 {
+		rowsAffected, err := command.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("inspect {{.Business.EntityName}} delete: %w", err)
+		}
+		if rowsAffected != 1 {
 			return {{.Business.PackageName}}.ErrConflict
 		}
 		return appendAudit(ctx, transaction, audit)
 	})
 }
 
-func (store *Store) mutate(ctx context.Context, operation func(pgx.Tx) error) error {
-	transaction, err := store.pool.Begin(ctx)
+func (store *Store) mutate(ctx context.Context, operation func(*sql.Tx) error) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin {{.Business.EntityName}} mutation: %w", err)
 	}
 	if err := operation(transaction); err != nil {
 		return rollback(transaction, err)
 	}
-	if err := transaction.Commit(ctx); err != nil {
+	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit {{.Business.EntityName}} mutation: %w", err)
 	}
 	return nil
 }
 
-func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {
-	_, err := transaction.Exec(ctx, `
+func appendAudit(ctx context.Context, transaction *sql.Tx, event identity.AuditEvent) error {
+	_, err := transaction.ExecContext(ctx, `
 		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
-		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
 		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
 	)
 	if err != nil {
@@ -152,10 +158,8 @@ func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEv
 	return nil
 }
 
-func rollback(transaction pgx.Tx, cause error) error {
-	rollbackContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	defer cancel()
-	if err := transaction.Rollback(rollbackContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+func rollback(transaction *sql.Tx, cause error) error {
+	if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 		return errors.Join(cause, fmt.Errorf("roll back {{.Business.EntityName}} mutation: %w", err))
 	}
 	return cause
@@ -168,7 +172,7 @@ type rowScanner interface {
 func scan{{.Business.EntityType}}(row rowScanner) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
 	var value {{.Business.PackageName}}.{{.Business.EntityType}}
 	if err := row.Scan(&value.ID{{range .Business.Fields}}, &value.{{.GoName}}{{end}}, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return {{.Business.PackageName}}.{{.Business.EntityType}}{}, {{.Business.PackageName}}.ErrNotFound
 		}
 		return {{.Business.PackageName}}.{{.Business.EntityType}}{}, fmt.Errorf("scan {{.Business.EntityName}}: %w", err)
@@ -177,8 +181,8 @@ func scan{{.Business.EntityType}}(row rowScanner) ({{.Business.PackageName}}.{{.
 }
 
 func persistenceError(err error) error {
-	var databaseError *pgconn.PgError
-	if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+	var databaseError *mysqldriver.MySQLError
+	if errors.As(err, &databaseError) && databaseError.Number == 1062 {
 		return {{.Business.PackageName}}.ErrConflict
 	}
 	return err

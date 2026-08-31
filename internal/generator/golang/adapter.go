@@ -19,9 +19,9 @@ import (
 const (
 	backend            = "go"
 	baseCapability     = "go-service"
-	baseVersion        = "0.2.0"
+	baseVersion        = "0.3.0"
 	businessCapability = "go-crud"
-	businessVersion    = "0.2.0"
+	businessVersion    = "0.3.0"
 	adminCapability    = "vue-admin"
 	adminVersion       = "0.1.0"
 )
@@ -30,26 +30,20 @@ const (
 var templateFS embed.FS
 
 var outputTemplates = map[string]string{
-	".gitignore":                           "templates/gitignore.tmpl",
-	"README.md":                            "templates/README.md.tmpl",
-	"api/openapi.yaml":                     "templates/openapi.yaml.tmpl",
-	"cmd/server/main.go":                   "templates/main.go.tmpl",
-	"go.mod":                               "templates/go.mod.tmpl",
-	"go.sum":                               "templates/go.sum.tmpl",
-	"internal/identity/httpapi/handler.go": "templates/identity_handler.go.tmpl",
-	"internal/identity/httpapi/handler_test.go":                "templates/identity_handler_test.go.tmpl",
-	"internal/identity/password.go":                            "templates/password.go.tmpl",
-	"internal/identity/password_test.go":                       "templates/password_test.go.tmpl",
-	"internal/identity/postgres/store.go":                      "templates/identity_postgres_store.go.tmpl",
-	"internal/identity/service.go":                             "templates/identity_service.go.tmpl",
-	"internal/identity/service_test.go":                        "templates/identity_service_test.go.tmpl",
-	"internal/identity/store.go":                               "templates/identity_store.go.tmpl",
-	"internal/platform/httpserver/server.go":                   "templates/server.go.tmpl",
-	"internal/platform/httpserver/server_test.go":              "templates/server_test.go.tmpl",
-	"internal/platform/httpjson/httpjson.go":                   "templates/httpjson.go.tmpl",
-	"internal/platform/migrate/migrate.go":                     "templates/migrate.go.tmpl",
-	"internal/platform/migrate/migrations/000001_identity.sql": "templates/000001_identity.sql.tmpl",
-	"internal/platform/postgres/pool.go":                       "templates/postgres_pool.go.tmpl",
+	".gitignore":                                  "templates/gitignore.tmpl",
+	"README.md":                                   "templates/README.md.tmpl",
+	"api/openapi.yaml":                            "templates/openapi.yaml.tmpl",
+	"cmd/server/main.go":                          "templates/main.go.tmpl",
+	"internal/identity/httpapi/handler.go":        "templates/identity_handler.go.tmpl",
+	"internal/identity/httpapi/handler_test.go":   "templates/identity_handler_test.go.tmpl",
+	"internal/identity/password.go":               "templates/password.go.tmpl",
+	"internal/identity/password_test.go":          "templates/password_test.go.tmpl",
+	"internal/identity/service.go":                "templates/identity_service.go.tmpl",
+	"internal/identity/service_test.go":           "templates/identity_service_test.go.tmpl",
+	"internal/identity/store.go":                  "templates/identity_store.go.tmpl",
+	"internal/platform/httpserver/server.go":      "templates/server.go.tmpl",
+	"internal/platform/httpserver/server_test.go": "templates/server_test.go.tmpl",
+	"internal/platform/httpjson/httpjson.go":      "templates/httpjson.go.tmpl",
 }
 
 var businessTemplates = []struct {
@@ -59,7 +53,52 @@ var businessTemplates = []struct {
 	{PathSuffix: "entity.go", TemplatePath: "templates/business_entity.go.tmpl"},
 	{PathSuffix: "entity_test.go", TemplatePath: "templates/business_entity_test.go.tmpl"},
 	{PathSuffix: "httpapi/handler.go", TemplatePath: "templates/business_handler.go.tmpl"},
-	{PathSuffix: "postgres/store.go", TemplatePath: "templates/business_postgres_store.go.tmpl"},
+}
+
+type databaseTemplateSet struct {
+	Data                      databaseData
+	Outputs                   map[string]string
+	BusinessStorePath         string
+	BusinessStoreTemplate     string
+	BusinessMigrationTemplate string
+	IntegrationPath           string
+	IntegrationTemplate       string
+}
+
+var databaseTemplates = map[string]databaseTemplateSet{
+	"postgresql": {
+		Data: databaseData{Engine: "postgresql", DisplayName: "PostgreSQL", PackageName: "postgres"},
+		Outputs: map[string]string{
+			"go.mod":                               "templates/go.mod.tmpl",
+			"go.sum":                               "templates/go.sum.tmpl",
+			"internal/identity/postgres/store.go":  "templates/identity_postgres_store.go.tmpl",
+			"internal/platform/migrate/migrate.go": "templates/migrate.go.tmpl",
+			"internal/platform/migrate/migrations/000001_identity.sql": "templates/000001_identity.sql.tmpl",
+			"internal/platform/postgres/pool.go":                       "templates/postgres_pool.go.tmpl",
+		},
+		BusinessStorePath:         "postgres/store.go",
+		BusinessStoreTemplate:     "templates/business_postgres_store.go.tmpl",
+		BusinessMigrationTemplate: "templates/business.sql.tmpl",
+		IntegrationPath:           "internal/integration/postgres_test.go",
+		IntegrationTemplate:       "templates/postgres_integration_test.go.tmpl",
+	},
+	"mysql": {
+		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
+		Outputs: map[string]string{
+			"go.mod":                               "templates/mysql_go.mod.tmpl",
+			"go.sum":                               "templates/mysql_go.sum.tmpl",
+			"internal/identity/mysql/store.go":     "templates/identity_mysql_store.go.tmpl",
+			"internal/platform/migrate/migrate.go": "templates/mysql_migrate.go.tmpl",
+			"internal/platform/migrate/migrate_test.go":                "templates/mysql_migrate_test.go.tmpl",
+			"internal/platform/migrate/migrations/000001_identity.sql": "templates/mysql_000001_identity.sql.tmpl",
+			"internal/platform/mysql/pool.go":                          "templates/mysql_pool.go.tmpl",
+		},
+		BusinessStorePath:         "mysql/store.go",
+		BusinessStoreTemplate:     "templates/business_mysql_store.go.tmpl",
+		BusinessMigrationTemplate: "templates/mysql_business.sql.tmpl",
+		IntegrationPath:           "internal/integration/mysql_test.go",
+		IntegrationTemplate:       "templates/mysql_integration_test.go.tmpl",
+	},
 }
 
 var adminTemplates = map[string]string{
@@ -105,8 +144,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if project.Spec.Stack.Backend != backend {
 		return generator.Result{}, fmt.Errorf("backend must be %q for the Go adapter", backend)
 	}
-	if project.Spec.Database.Engine != "postgresql" {
-		return generator.Result{}, fmt.Errorf("the Go adapter currently supports only PostgreSQL")
+	database, supported := databaseTemplates[project.Spec.Database.Engine]
+	if !supported {
+		return generator.Result{}, fmt.Errorf("the Go adapter supports only PostgreSQL and MySQL")
 	}
 	if enabled(project.Spec.Stack.Storefront) {
 		return generator.Result{}, fmt.Errorf("the Go adapter does not generate a storefront yet")
@@ -121,18 +161,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if len(project.Spec.Capabilities) > 0 {
 		return generator.Result{}, fmt.Errorf("go capability packs are not available in the base adapter yet")
 	}
-	business, err := buildBusinessData(project.Spec.Modules)
+	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
 		return generator.Result{}, err
 	}
 	data := templateData{
 		ProjectName: project.Metadata.Name,
 		ModulePath:  "example.com/" + project.Metadata.Name,
+		Database:    database.Data,
 		Business:    business,
 		Admin:       adminEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
+		targets[path] = renderTarget{TemplatePath: templatePath, Owner: baseCapability}
+	}
+	for path, templatePath := range database.Outputs {
 		targets[path] = renderTarget{TemplatePath: templatePath, Owner: baseCapability}
 	}
 	capabilityLock := map[string]string{baseCapability: baseVersion}
@@ -141,12 +185,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			path := "internal/" + business.ModuleName + "/" + target.PathSuffix
 			targets[path] = renderTarget{TemplatePath: target.TemplatePath, Owner: businessCapability}
 		}
-		targets["internal/integration/postgres_test.go"] = renderTarget{
-			TemplatePath: "templates/postgres_integration_test.go.tmpl",
+		storePath := "internal/" + business.ModuleName + "/" + database.BusinessStorePath
+		targets[storePath] = renderTarget{TemplatePath: database.BusinessStoreTemplate, Owner: businessCapability}
+		targets[database.IntegrationPath] = renderTarget{
+			TemplatePath: database.IntegrationTemplate,
 			Owner:        businessCapability,
 		}
 		migrationPath := "internal/platform/migrate/migrations/000100_" + business.ModuleName + "_" + business.EntityName + ".sql"
-		targets[migrationPath] = renderTarget{TemplatePath: "templates/business.sql.tmpl", Owner: businessCapability}
+		targets[migrationPath] = renderTarget{TemplatePath: database.BusinessMigrationTemplate, Owner: businessCapability}
 		capabilityLock[businessCapability] = businessVersion
 	}
 	if adminEnabled {
@@ -212,8 +258,15 @@ func hasExactAuthModes(actual []string, expected ...string) bool {
 type templateData struct {
 	ProjectName string
 	ModulePath  string
+	Database    databaseData
 	Business    *businessData
 	Admin       bool
+}
+
+type databaseData struct {
+	Engine      string
+	DisplayName string
+	PackageName string
 }
 
 type renderTarget struct {
@@ -268,7 +321,7 @@ type supportedFieldType struct {
 	JSONOptions       string
 }
 
-func buildBusinessData(modules []spec.Module) (*businessData, error) {
+func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessData, error) {
 	if len(modules) == 0 {
 		return nil, nil
 	}
@@ -312,9 +365,15 @@ func buildBusinessData(modules []spec.Module) (*businessData, error) {
 		if _, exists := reserved[field.Name]; exists {
 			return nil, fmt.Errorf("business field %q is reserved", field.Name)
 		}
+		if databaseEngine == "mysql" && field.Type == "text" && field.Unique {
+			return nil, fmt.Errorf("MySQL text field %q cannot use the portable unique constraint", field.Name)
+		}
 		fieldType, ok := businessFieldType(field.Type)
 		if !ok {
 			return nil, fmt.Errorf("business field %q uses unsupported Go CRUD type %q", field.Name, field.Type)
+		}
+		if field.Type == "datetime" && databaseEngine == "mysql" {
+			fieldType.SQLType = "datetime(6)"
 		}
 		entityType := fieldType.GoType
 		if !field.Required {
@@ -382,7 +441,11 @@ func render(templatePath string, data templateData) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := template.New(templatePath).Option("missingkey=error").Parse(string(content))
+	functions := template.FuncMap{
+		"sql":   func(value string) string { return quoteSQLIdentifier(data.Database.Engine, value) },
+		"goSQL": func(value string) string { return quoteGoSQLIdentifier(data.Database.Engine, value) },
+	}
+	parsed, err := template.New(templatePath).Funcs(functions).Option("missingkey=error").Parse(string(content))
 	if err != nil {
 		return nil, err
 	}
@@ -391,4 +454,19 @@ func render(templatePath string, data templateData) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+func quoteSQLIdentifier(databaseEngine, value string) string {
+	if databaseEngine == "mysql" {
+		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
+	}
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func quoteGoSQLIdentifier(databaseEngine, value string) string {
+	if databaseEngine == "mysql" {
+		escaped := strings.ReplaceAll(value, "`", "``")
+		return "`+\"`" + escaped + "`\"+`"
+	}
+	return quoteSQLIdentifier(databaseEngine, value)
 }

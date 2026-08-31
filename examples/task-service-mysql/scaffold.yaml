@@ -1,0 +1,40 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: task-service-mysql
+  display_name: Task Service MySQL
+spec:
+  stack:
+    backend: go
+    admin_ui: element-plus
+    storefront: none
+  database:
+    engine: mysql
+  auth:
+    modes:
+      - session
+      - token
+  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - name: title
+              type: string
+              required: true
+              unique: true
+            - name: description
+              type: text
+            - name: done
+              type: bool
+              required: true
+            - name: priority
+              type: int64
+              required: true
+            - name: due_at
+              type: datetime
+      permissions:
+        - code: tasks:task:create
+        - code: tasks:task:read
+        - code: tasks:task:update
+        - code: tasks:task:delete

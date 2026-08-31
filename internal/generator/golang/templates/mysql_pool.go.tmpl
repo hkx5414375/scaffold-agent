@@ -1,0 +1,39 @@
+// Package mysql owns the generated service's MySQL connection pool.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+)
+
+// Open validates the data source name, creates a bounded pool, and verifies connectivity.
+func Open(ctx context.Context, dataSourceName string) (*sql.DB, error) {
+	if dataSourceName == "" {
+		return nil, errors.New("DATABASE_URL is required")
+	}
+	configuration, err := mysqldriver.ParseDSN(dataSourceName)
+	if err != nil {
+		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+	}
+	configuration.ParseTime = true
+	configuration.Loc = time.UTC
+	configuration.MultiStatements = false
+	database, err := sql.Open("mysql", configuration.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("create MySQL pool: %w", err)
+	}
+	database.SetMaxOpenConns(20)
+	database.SetMaxIdleConns(2)
+	database.SetConnMaxIdleTime(5 * time.Minute)
+	database.SetConnMaxLifetime(30 * time.Minute)
+	if err := database.PingContext(ctx); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("ping MySQL: %w", err)
+	}
+	return database, nil
+}

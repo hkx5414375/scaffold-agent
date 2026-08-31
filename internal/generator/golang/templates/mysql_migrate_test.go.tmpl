@@ -1,0 +1,27 @@
+package migrate
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestSplitStatementsPreservesQuotedSemicolons(t *testing.T) {
+	t.Parallel()
+
+	actual, err := splitStatements("insert into example values ('one;two', `three;four`); select 1;")
+	if err != nil {
+		t.Fatalf("splitStatements() error = %v", err)
+	}
+	want := []string{"insert into example values ('one;two', `three;four`)", "select 1"}
+	if !reflect.DeepEqual(actual, want) {
+		t.Fatalf("splitStatements() = %#v, want %#v", actual, want)
+	}
+}
+
+func TestSplitStatementsRejectsUnterminatedQuote(t *testing.T) {
+	t.Parallel()
+
+	if _, err := splitStatements("select 'unfinished"); err == nil {
+		t.Fatal("splitStatements() error = nil, want malformed migration error")
+	}
+}

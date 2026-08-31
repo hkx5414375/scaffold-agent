@@ -2,22 +2,23 @@ insert into identity_permissions (code, description) values
     ('{{.Business.PermissionPrefix}}:create', 'Create {{.Business.EntityName}} records'),
     ('{{.Business.PermissionPrefix}}:read', 'Read {{.Business.EntityName}} records'),
     ('{{.Business.PermissionPrefix}}:update', 'Update {{.Business.EntityName}} records'),
-    ('{{.Business.PermissionPrefix}}:delete', 'Delete {{.Business.EntityName}} records');
+    ('{{.Business.PermissionPrefix}}:delete', 'Delete {{.Business.EntityName}} records')
+on duplicate key update code = code;
 
 insert into identity_role_permissions (role_code, permission_code) values
     ('admin', '{{.Business.PermissionPrefix}}:create'),
     ('admin', '{{.Business.PermissionPrefix}}:read'),
     ('admin', '{{.Business.PermissionPrefix}}:update'),
-    ('admin', '{{.Business.PermissionPrefix}}:delete');
+    ('admin', '{{.Business.PermissionPrefix}}:delete')
+on duplicate key update role_code = role_code;
 
-create table {{sql .Business.TableName}} (
-    id text primary key,
+create table if not exists {{sql .Business.TableName}} (
+    id varchar(191) primary key,
 {{- range .Business.Fields}}
     {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
 {{- end}}
     version bigint not null check (version > 0),
-    created_at timestamptz not null,
-    updated_at timestamptz not null
-);
-
-create index {{sql (printf "%s_updated_idx" .Business.TableName)}} on {{sql .Business.TableName}} (updated_at desc);
+    created_at datetime(6) not null,
+    updated_at datetime(6) not null,
+    index {{sql (printf "%s_updated_idx" .Business.TableName)}} (updated_at desc)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

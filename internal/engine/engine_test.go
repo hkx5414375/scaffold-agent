@@ -108,9 +108,18 @@ func TestVerifyStoresPageableFinding(t *testing.T) {
 }
 
 func TestGoPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", 47, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", 48, false)
+}
+
+func runGeneratedGoEndToEnd(t *testing.T, database, adminUI string, wantChanges int, runAdminBuild bool) {
+	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
-	writeBlueprint(t, root, `
+	blueprint := `
 api_version: scaffold-agent.io/v1alpha1
 kind: Project
 metadata:
@@ -118,10 +127,10 @@ metadata:
 spec:
   stack:
     backend: go
-    admin_ui: element-plus
+    admin_ui: ADMIN_UI
     storefront: none
   database:
-    engine: postgresql
+    engine: DATABASE_ENGINE
   auth:
     modes: [session, token]
   modules:
@@ -139,15 +148,21 @@ spec:
         - {code: "tasks:task:read"}
         - {code: "tasks:task:update"}
         - {code: "tasks:task:delete"}
-`)
+`
+	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
+	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	writeBlueprint(t, root, blueprint)
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
 	if planned.Status != result.StatusOK {
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 47 || plannedData.CapabilityLock["go-service"] != "0.2.0" || plannedData.CapabilityLock["go-crud"] != "0.2.0" || plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
+	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["go-service"] != "0.3.0" || plannedData.CapabilityLock["go-crud"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
+		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {
@@ -171,7 +186,7 @@ spec:
 			t.Fatalf("generated %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
 		}
 	}
-	if os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+	if runAdminBuild {
 		adminRoot := filepath.Join(root, "web", "admin")
 		adminCommands := [][]string{
 			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},

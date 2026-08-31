@@ -30,12 +30,24 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M5 — MySQL and platform capabilities
 
-Database parity, organization, tenant isolation, files, notifications, jobs, cache, import/export, observability, and portable approval workflows.
+- [x] Go/MySQL 8.4 connection pool, named-lock migrations, identity, RBAC, audit, CRUD, and isolated integration gate.
+- [x] Shared Blueprint, domain, HTTP, OpenAPI, and Vue contracts across PostgreSQL and MySQL.
+- [ ] Organization and tenant isolation.
+- [ ] Files, notifications, jobs, cache, import/export, and observability.
+- [ ] Portable approval workflows.
 
-## M6 — General business suite
+## M6 — Language parity
+
+Java and Python adapters with the same Blueprint, transport, security, database, and quality contracts.
+
+## M7 — General business suite and storefront
 
 Membership, CRM, ERP and inventory, commerce, marketing, payment abstraction, sandbox adapters, and Nuxt storefront.
 
-## M7–M9 — Language parity and 1.0
+## M8 — Cross-agent conformance
 
-Java adapter, Python adapter, cross-agent conformance, token benchmarks, signed cross-platform releases, and stable public schemas.
+Codex, Claude Code, Kimi, GLM, DeepSeek, and generic MCP conformance plus measured token benchmarks.
+
+## M9 — 1.0 release
+
+Signed cross-platform releases, stable public schemas, installation guides, upgrade policy, and long-term support documentation.

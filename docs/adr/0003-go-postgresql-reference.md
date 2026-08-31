@@ -17,7 +17,7 @@ claiming support for Blueprint selections that are not implemented yet.
 4. Passwords use self-describing PBKDF2-SHA256 hashes. Raw session and API tokens are returned once; only SHA-256 digests are persisted.
 5. Browser sessions use HttpOnly, SameSite=Lax cookies. Secure cookies are enabled by default and may be disabled explicitly for local HTTP.
 6. Security-relevant login and token-creation outcomes are written as audit events. A session or token is removed when its success audit cannot be recorded.
-7. The adapter rejects MySQL, frontends, incomplete authentication selections, capabilities, and business modules until their complete vertical slices exist.
+7. At initial acceptance, the adapter rejected MySQL, frontends, incomplete authentication selections, capabilities, and business modules until their complete vertical slices existed. ADR 0004 through ADR 0007 now govern the completed CRUD, OpenAPI, Vue, and MySQL slices.
 8. The generated dependency graph is pinned with both `go.mod` and `go.sum`.
 9. Roles, permissions, and role-permission assignments are relational data. Protected HTTP handlers require a stable permission code and deny access unless the store confirms that assignment.
 10. Generated integration tests use a random, explicitly created schema and run migrations, identity persistence, RBAC, CRUD, optimistic locking, and transactional audit checks against PostgreSQL 18 in CI.

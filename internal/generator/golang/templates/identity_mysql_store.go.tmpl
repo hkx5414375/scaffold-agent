@@ -1,0 +1,122 @@
+// Package mysql persists identity aggregates in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+// Store is the MySQL identity repository.
+type Store struct {
+	database *sql.DB
+}
+
+// New returns a MySQL identity store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
+}
+
+func (store *Store) CreateUser(ctx context.Context, user identity.User) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into identity_users (id, email, password_hash, role, disabled)
+		values (?, ?, ?, ?, ?)`,
+		user.ID, user.Email, user.PasswordHash, user.Role, user.Disabled,
+	)
+	return wrap("create user", err)
+}
+
+func (store *Store) UserByEmail(ctx context.Context, email string) (identity.User, error) {
+	return scanUser(store.database.QueryRowContext(ctx, `
+		select id, email, password_hash, role, disabled
+		from identity_users where email = ?`, email))
+}
+
+func (store *Store) CreateSession(ctx context.Context, session identity.Session) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into identity_sessions (token_hash, user_id, expires_at)
+		values (?, ?, ?)`, session.TokenHash, session.UserID, session.ExpiresAt)
+	return wrap("create session", err)
+}
+
+func (store *Store) DeleteSession(ctx context.Context, tokenHash []byte) error {
+	_, err := store.database.ExecContext(ctx, `delete from identity_sessions where token_hash = ?`, tokenHash)
+	return wrap("delete session", err)
+}
+
+func (store *Store) UserBySession(ctx context.Context, tokenHash []byte, now time.Time) (identity.User, error) {
+	return scanUser(store.database.QueryRowContext(ctx, `
+		select users.id, users.email, users.password_hash, users.role, users.disabled
+		from identity_sessions sessions
+		join identity_users users on users.id = sessions.user_id
+		where sessions.token_hash = ? and sessions.expires_at > ?`, tokenHash, now))
+}
+
+func (store *Store) CreateAPIToken(ctx context.Context, token identity.APIToken) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into identity_api_tokens (id, token_hash, user_id, name, expires_at)
+		values (?, ?, ?, ?, ?)`, token.ID, token.TokenHash, token.UserID, token.Name, token.ExpiresAt)
+	return wrap("create API token", err)
+}
+
+func (store *Store) DeleteAPIToken(ctx context.Context, id string) error {
+	_, err := store.database.ExecContext(ctx, `delete from identity_api_tokens where id = ?`, id)
+	return wrap("delete API token", err)
+}
+
+func (store *Store) UserByAPIToken(ctx context.Context, tokenHash []byte, now time.Time) (identity.User, error) {
+	return scanUser(store.database.QueryRowContext(ctx, `
+		select users.id, users.email, users.password_hash, users.role, users.disabled
+		from identity_api_tokens tokens
+		join identity_users users on users.id = tokens.user_id
+		where tokens.token_hash = ? and tokens.expires_at > ?`, tokenHash, now))
+}
+
+func (store *Store) HasPermission(ctx context.Context, role, permission string) (bool, error) {
+	var allowed bool
+	if err := store.database.QueryRowContext(ctx, `
+		select exists(
+			select 1 from identity_role_permissions
+			where role_code = ? and permission_code = ?
+		)`, role, permission).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check permission: %w", err)
+	}
+	return allowed, nil
+}
+
+func (store *Store) AppendAudit(ctx context.Context, event identity.AuditEvent) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	return wrap("append audit event", err)
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanUser(row rowScanner) (identity.User, error) {
+	var user identity.User
+	if err := row.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Role, &user.Disabled); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return identity.User{}, identity.ErrNotFound
+		}
+		return identity.User{}, fmt.Errorf("scan user: %w", err)
+	}
+	return user, nil
+}
+
+func wrap(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+var _ identity.Store = (*Store)(nil)

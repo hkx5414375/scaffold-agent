@@ -1,0 +1,227 @@
+package integration_test
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"errors"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+
+	"{{.ModulePath}}/internal/identity"
+	identitymysql "{{.ModulePath}}/internal/identity/mysql"
+	"{{.ModulePath}}/internal/platform/migrate"
+	platformmysql "{{.ModulePath}}/internal/platform/mysql"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	businessmysql "{{.ModulePath}}/internal/{{.Business.ModuleName}}/mysql"
+)
+
+func TestMySQLMigrationsAndStores(t *testing.T) {
+	database := isolatedMySQL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := migrate.Run(ctx, database); err != nil {
+		t.Fatalf("Run(first) error = %v", err)
+	}
+	if err := migrate.Run(ctx, database); err != nil {
+		t.Fatalf("Run(second) error = %v", err)
+	}
+	var migrationCount int
+	if err := database.QueryRowContext(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if migrationCount != 2 {
+		t.Fatalf("migration count = %d, want 2", migrationCount)
+	}
+
+	identityStore := identitymysql.New(database)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	user := identity.User{
+		ID: "integration-user", Email: "integration@example.com",
+		PasswordHash: "integration-only-hash", Role: "admin",
+	}
+	if err := identityStore.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	loadedUser, err := identityStore.UserByEmail(ctx, user.Email)
+	if err != nil || loadedUser.ID != user.ID || loadedUser.Role != "admin" {
+		t.Fatalf("UserByEmail() = %#v, %v", loadedUser, err)
+	}
+
+	sessionHash := []byte("integration-session-digest-00000")
+	if err := identityStore.CreateSession(ctx, identity.Session{TokenHash: sessionHash, UserID: user.ID, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if loadedUser, err = identityStore.UserBySession(ctx, sessionHash, now); err != nil || loadedUser.ID != user.ID {
+		t.Fatalf("UserBySession() = %#v, %v", loadedUser, err)
+	}
+	if err := identityStore.DeleteSession(ctx, sessionHash); err != nil {
+		t.Fatalf("DeleteSession() error = %v", err)
+	}
+	if _, err := identityStore.UserBySession(ctx, sessionHash, now); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("UserBySession(deleted) error = %v, want ErrNotFound", err)
+	}
+
+	apiTokenHash := []byte("integration-api-token-digest0000")
+	if err := identityStore.CreateAPIToken(ctx, identity.APIToken{
+		ID: "integration-token", TokenHash: apiTokenHash, UserID: user.ID,
+		Name: "integration", ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	if loadedUser, err = identityStore.UserByAPIToken(ctx, apiTokenHash, now); err != nil || loadedUser.ID != user.ID {
+		t.Fatalf("UserByAPIToken() = %#v, %v", loadedUser, err)
+	}
+	if err := identityStore.DeleteAPIToken(ctx, "integration-token"); err != nil {
+		t.Fatalf("DeleteAPIToken() error = %v", err)
+	}
+	if _, err := identityStore.UserByAPIToken(ctx, apiTokenHash, now); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("UserByAPIToken(deleted) error = %v, want ErrNotFound", err)
+	}
+
+	allowed, err := identityStore.HasPermission(ctx, "admin", "{{.Business.PermissionPrefix}}:create")
+	if err != nil || !allowed {
+		t.Fatalf("HasPermission() = %t, %v", allowed, err)
+	}
+	allowed, err = identityStore.HasPermission(ctx, "user", "{{.Business.PermissionPrefix}}:create")
+	if err != nil || allowed {
+		t.Fatalf("HasPermission(user) = %t, %v, want denied", allowed, err)
+	}
+
+	duplicateAudit := identity.AuditEvent{
+		ID: "duplicate-audit", UserID: user.ID, Action: "integration:seed",
+		Outcome: "succeeded", Target: "seed", CreatedAt: now,
+	}
+	if err := identityStore.AppendAudit(ctx, duplicateAudit); err != nil {
+		t.Fatalf("AppendAudit() error = %v", err)
+	}
+
+{{- range .Business.Fields}}
+	first{{.GoName}} := {{.SampleOne}}
+	second{{.GoName}} := {{.SampleTwo}}
+{{- end}}
+	rolledBack := business.{{.Business.EntityType}}{
+		ID: "rolled-back", Version: 1, CreatedAt: now, UpdatedAt: now,
+{{- range .Business.Fields}}
+		{{.GoName}}: {{if .Required}}first{{.GoName}}{{else}}&first{{.GoName}}{{end}},
+{{- end}}
+	}
+	businessStore := businessmysql.New(database)
+	if err := businessStore.Create(ctx, rolledBack, duplicateAudit); err == nil {
+		t.Fatal("Create(with duplicate audit) error = nil, want transaction failure")
+	}
+	if _, err := businessStore.Get(ctx, rolledBack.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(rolled-back) error = %v, want ErrNotFound", err)
+	}
+
+	created := rolledBack
+	created.ID = "integration-record"
+	if err := businessStore.Create(ctx, created, audit(user.ID, "{{.Business.PermissionPrefix}}:create", created.ID, now)); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	loaded, err := businessStore.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if loaded.ID != created.ID || loaded.Version != 1 || !loaded.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("Get() = %#v, want created record", loaded)
+	}
+{{- range .Business.Fields}}
+	if !reflect.DeepEqual(loaded.{{.GoName}}, created.{{.GoName}}) {
+		t.Fatalf("Get().{{.GoName}} = %#v, want %#v", loaded.{{.GoName}}, created.{{.GoName}})
+	}
+{{- end}}
+	page, cursor, err := businessStore.List(ctx, "", 20)
+	if err != nil || len(page) != 1 || cursor != "" || page[0].ID != created.ID {
+		t.Fatalf("List() = %#v, %q, %v", page, cursor, err)
+	}
+
+	replacement := loaded
+{{- range .Business.Fields}}
+	replacement.{{.GoName}} = {{if .Required}}second{{.GoName}}{{else}}&second{{.GoName}}{{end}}
+{{- end}}
+	replacement.UpdatedAt = now.Add(time.Minute)
+	updated, err := businessStore.Update(ctx, replacement, audit(user.ID, "{{.Business.PermissionPrefix}}:update", created.ID, replacement.UpdatedAt))
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("Update() = %#v, %v", updated, err)
+	}
+	if _, err := businessStore.Update(ctx, replacement, audit(user.ID, "{{.Business.PermissionPrefix}}:update", created.ID, now)); !errors.Is(err, business.ErrConflict) {
+		t.Fatalf("Update(stale) error = %v, want ErrConflict", err)
+	}
+	if err := businessStore.Delete(ctx, created.ID, updated.Version, audit(user.ID, "{{.Business.PermissionPrefix}}:delete", created.ID, now)); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := businessStore.Get(ctx, created.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
+	}
+	var mutationAuditCount int
+	if err := database.QueryRowContext(ctx, `select count(*) from audit_events where target = ? and action like ?`, created.ID, "{{.Business.PermissionPrefix}}:%").Scan(&mutationAuditCount); err != nil {
+		t.Fatalf("count mutation audit events: %v", err)
+	}
+	if mutationAuditCount != 3 {
+		t.Fatalf("mutation audit count = %d, want 3", mutationAuditCount)
+	}
+}
+
+func isolatedMySQL(t *testing.T) *sql.DB {
+	t.Helper()
+	dataSourceName := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if dataSourceName == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	configuration, err := mysqldriver.ParseDSN(dataSourceName)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	configuration.DBName = ""
+	adminDatabase, err := platformmysql.Open(ctx, configuration.FormatDSN())
+	if err != nil {
+		t.Fatalf("open MySQL administration connection: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := adminDatabase.Close(); err != nil {
+			t.Errorf("close MySQL administration connection: %v", err)
+		}
+	})
+
+	databaseName := "scaffold_test_" + strings.ToLower(rand.Text())
+	quotedDatabase := "`" + databaseName + "`"
+	if _, err := adminDatabase.ExecContext(ctx, "create database "+quotedDatabase+" character set utf8mb4 collate utf8mb4_0900_ai_ci"); err != nil {
+		t.Fatalf("create isolated database: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanupCancel()
+		if _, err := adminDatabase.ExecContext(cleanupContext, "drop database "+quotedDatabase); err != nil {
+			t.Errorf("drop isolated database: %v", err)
+		}
+	})
+
+	configuration.DBName = databaseName
+	database, err := platformmysql.Open(ctx, configuration.FormatDSN())
+	if err != nil {
+		t.Fatalf("open isolated MySQL database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("close isolated MySQL database: %v", err)
+		}
+	})
+	return database
+}
+
+func audit(userID, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: userID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

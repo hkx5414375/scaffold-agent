@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Nuxt storefronts and broader capability packs remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Nuxt storefronts and broader capability packs remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -25,7 +25,7 @@ Scaffold Agent is under active construction. The protocol core, deterministic fi
 query -> plan -> preview -> apply -> verify
 ```
 
-The first end-to-end milestone targets a Go modular monolith with PostgreSQL, session and token authentication, RBAC, audit logging, and one stateful CRUD module.
+The reference workflow generates a Go modular monolith with PostgreSQL or MySQL, session and token authentication, RBAC, audit logging, one stateful CRUD module, and an optional administration UI.
 
 ## Development
 
@@ -44,6 +44,7 @@ go run ./cmd/scaffold-agent doctor --json
 go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-mysql --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

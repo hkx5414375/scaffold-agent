@@ -1,0 +1,140 @@
+// Package migrate applies embedded, ordered MySQL migrations exactly once.
+package migrate
+
+import (
+	"context"
+	"database/sql"
+	"embed"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	migrationLockName = "scaffold_agent_migrations"
+	cleanupTimeout    = 5 * time.Second
+)
+
+//go:embed migrations/*.sql
+var migrations embed.FS
+
+// Run serializes migration execution with a connection-scoped MySQL named lock.
+func Run(ctx context.Context, database *sql.DB) (returnErr error) {
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer connection.Close()
+	var acquired sql.NullInt64
+	if err := connection.QueryRowContext(ctx, `select get_lock(?, 30)`, migrationLockName).Scan(&acquired); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	if !acquired.Valid || acquired.Int64 != 1 {
+		return errors.New("lock migrations: MySQL did not grant the named lock")
+	}
+	defer func() {
+		unlockContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		var released sql.NullInt64
+		if err := connection.QueryRowContext(unlockContext, `select release_lock(?)`, migrationLockName).Scan(&released); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("unlock migrations: %w", err))
+		} else if !released.Valid || released.Int64 != 1 {
+			returnErr = errors.Join(returnErr, errors.New("unlock migrations: MySQL did not release the named lock"))
+		}
+	}()
+	if _, err := connection.ExecContext(ctx, `
+		create table if not exists scaffold_schema_migrations (
+			version varchar(255) primary key,
+			applied_at datetime(6) not null default current_timestamp(6)
+		) engine = InnoDB`); err != nil {
+		return fmt.Errorf("create migration ledger: %w", err)
+	}
+	entries, err := migrations.ReadDir("migrations")
+	if err != nil {
+		return fmt.Errorf("list embedded migrations: %w", err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if err := apply(ctx, connection, entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type executor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func apply(ctx context.Context, connection executor, version string) error {
+	content, err := migrations.ReadFile("migrations/" + version)
+	if err != nil {
+		return fmt.Errorf("read migration %q: %w", version, err)
+	}
+	var applied bool
+	if err := connection.QueryRowContext(ctx, `
+		select exists(select 1 from scaffold_schema_migrations where version = ?)`, version).Scan(&applied); err != nil {
+		return fmt.Errorf("inspect migration %q: %w", version, err)
+	}
+	if applied {
+		return nil
+	}
+	statements, err := splitStatements(string(content))
+	if err != nil {
+		return fmt.Errorf("parse migration %q: %w", version, err)
+	}
+	for index, statement := range statements {
+		if _, err := connection.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("execute migration %q statement %d: %w", version, index+1, err)
+		}
+	}
+	if _, err := connection.ExecContext(ctx, `insert into scaffold_schema_migrations (version) values (?)`, version); err != nil {
+		return fmt.Errorf("record migration %q: %w", version, err)
+	}
+	return nil
+}
+
+func splitStatements(content string) ([]string, error) {
+	statements := make([]string, 0)
+	start := 0
+	var quote byte
+	for index := 0; index < len(content); index++ {
+		current := content[index]
+		if quote != 0 {
+			if current == '\\' {
+				index++
+				continue
+			}
+			if current == quote {
+				if index+1 < len(content) && content[index+1] == quote {
+					index++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch current {
+		case '\'', '"', '`':
+			quote = current
+		case ';':
+			if statement := strings.TrimSpace(content[start:index]); statement != "" {
+				statements = append(statements, statement)
+			}
+			start = index + 1
+		}
+	}
+	if quote != 0 {
+		return nil, errors.New("migration contains an unterminated quoted value")
+	}
+	if statement := strings.TrimSpace(content[start:]); statement != "" {
+		statements = append(statements, statement)
+	}
+	return statements, nil
+}

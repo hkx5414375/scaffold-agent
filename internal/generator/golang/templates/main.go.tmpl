@@ -15,14 +15,14 @@ import (
 
 	"{{.ModulePath}}/internal/identity"
 	"{{.ModulePath}}/internal/identity/httpapi"
-	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
+	identitydatabase "{{.ModulePath}}/internal/identity/{{.Database.PackageName}}"
 	"{{.ModulePath}}/internal/platform/httpserver"
 	"{{.ModulePath}}/internal/platform/migrate"
-	platformpostgres "{{.ModulePath}}/internal/platform/postgres"
+	platformdatabase "{{.ModulePath}}/internal/platform/{{.Database.PackageName}}"
 {{- if .Business}}
 	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	{{.Business.PackageName}}http "{{.ModulePath}}/internal/{{.Business.ModuleName}}/httpapi"
-	{{.Business.PackageName}}postgres "{{.ModulePath}}/internal/{{.Business.ModuleName}}/postgres"
+	{{.Business.PackageName}}database "{{.ModulePath}}/internal/{{.Business.ModuleName}}/{{.Database.PackageName}}"
 {{- end}}
 )
 
@@ -44,7 +44,7 @@ func run() error {
 
 	startupContext, cancelStartup := context.WithTimeout(applicationContext, startupTimeout)
 	defer cancelStartup()
-	pool, err := platformpostgres.Open(startupContext, os.Getenv("DATABASE_URL"))
+	pool, err := platformdatabase.Open(startupContext, os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func run() error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
-	identityService := identity.NewService(identitypostgres.New(pool))
+	identityService := identity.NewService(identitydatabase.New(pool))
 	if err := bootstrapAdmin(startupContext, identityService); err != nil {
 		return err
 	}
@@ -64,7 +64,7 @@ func run() error {
 	identityAPI := httpapi.New(identityService, secureCookies)
 	registerRoutes := identityAPI.Register
 {{- if .Business}}
-	{{.Business.PackageName}}Service := {{.Business.PackageName}}.NewService({{.Business.PackageName}}postgres.New(pool))
+	{{.Business.PackageName}}Service := {{.Business.PackageName}}.NewService({{.Business.PackageName}}database.New(pool))
 	{{.Business.PackageName}}API := {{.Business.PackageName}}http.New({{.Business.PackageName}}Service)
 	registerRoutes = func(mux *http.ServeMux) {
 		identityAPI.Register(mux)
