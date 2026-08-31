@@ -56,6 +56,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java background-jobs 0.1 with scoped idempotency, skip-locked leasing, heartbeat renewal, bounded retry, dead state, and an independent worker mode.
 - [x] Java notifications 0.1 with normalized idempotent enqueue, worker-only SMTP initialization, mandatory TLS, and bounded delivery timeouts.
 - [x] Java file-assets 0.1 with tenant-scoped metadata, bounded multipart streaming, atomic local publication, safe downloads, and mutation compensation.
+- [x] Java application-cache 0.1 with scoped bounded JSON, atomic dialect upsert, strict TTL, idempotent invalidation, and bounded cleanup.
 - [ ] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 

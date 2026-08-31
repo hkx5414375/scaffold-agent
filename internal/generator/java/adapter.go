@@ -36,6 +36,8 @@ const (
 	notificationsVersion    = "0.1.0"
 	filesOwner              = "file-assets"
 	filesVersion            = "0.1.0"
+	cacheOwner              = "application-cache"
+	cacheVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -65,6 +67,7 @@ type databaseData struct {
 	TenancyLifecycleMigrationTemplate string
 	JobsMigrationTemplate             string
 	FilesMigrationTemplate            string
+	CacheMigrationTemplate            string
 }
 
 var databases = map[string]databaseData{
@@ -82,6 +85,7 @@ var databases = map[string]databaseData{
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_postgresql.sql.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_postgresql.sql.tmpl",
 		FilesMigrationTemplate:            "templates/files_postgresql.sql.tmpl",
+		CacheMigrationTemplate:            "templates/cache_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -97,6 +101,7 @@ var databases = map[string]databaseData{
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_mysql.sql.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
 		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
+		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
 	},
 }
 
@@ -117,6 +122,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: filesOwner, Version: filesVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Tenant-aware file metadata and atomic local object storage.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: cacheOwner, Version: cacheVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Bounded cross-instance database TTL cache.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -178,6 +193,7 @@ type templateData struct {
 	Jobs             bool
 	Notifications    bool
 	Files            bool
+	Cache            bool
 	JobAdmin         bool
 	CSVTransfer      bool
 	Approvals        bool
@@ -277,6 +293,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobsEnabled := false
 	notificationsEnabled := false
 	filesEnabled := false
+	cacheEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -294,6 +311,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == filesOwner {
 			filesEnabled = true
+		}
+		if pack.Metadata.Name == cacheOwner {
+			cacheEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -320,6 +340,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if filesEnabled {
 		migrationCount++
 	}
+	if cacheEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -335,6 +358,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Jobs:             jobsEnabled,
 		Notifications:    notificationsEnabled,
 		Files:            filesEnabled,
+		Cache:            cacheEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -347,6 +371,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobsPaths := make(map[string]struct{}, 12)
 	notificationPaths := make(map[string]struct{}, 11)
 	filesPaths := make(map[string]struct{}, 15)
+	cachePaths := make(map[string]struct{}, 9)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -380,6 +405,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		filesPaths[path] = struct{}{}
 		adminPaths[path] = struct{}{}
+	}
+	addCacheTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		cachePaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -516,6 +545,20 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[filesOwner] = filesVersion
 	}
+	if cacheEnabled {
+		addCacheTarget(mainRoot+"/cache/CacheEntry.java", "templates/CacheEntry.java.tmpl")
+		addCacheTarget(mainRoot+"/cache/CacheException.java", "templates/CacheException.java.tmpl")
+		addCacheTarget(mainRoot+"/cache/CacheRepository.java", "templates/CacheRepository.java.tmpl")
+		addCacheTarget(mainRoot+"/cache/JdbcCacheRepository.java", "templates/JdbcCacheRepository.java.tmpl")
+		addCacheTarget(mainRoot+"/cache/CacheService.java", "templates/CacheService.java.tmpl")
+		addCacheTarget(testRoot+"/cache/CacheServiceTest.java", "templates/CacheServiceTest.java.tmpl")
+		addCacheTarget(testRoot+"/cache/CacheDatabaseIntegrationTest.java", "templates/CacheDatabaseIntegrationTest.java.tmpl")
+		addCacheTarget(
+			"src/main/resources/db/migration/V000220__application_cache.sql",
+			database.CacheMigrationTemplate,
+		)
+		capabilityLock[cacheOwner] = cacheVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -578,6 +621,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isFilesPath := filesPaths[path]; isFilesPath {
 			owner = filesOwner
+		}
+		if _, isCachePath := cachePaths[path]; isCachePath {
+			owner = cacheOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

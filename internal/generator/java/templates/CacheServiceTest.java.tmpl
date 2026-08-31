@@ -1,0 +1,129 @@
+package {{.PackageName}}.cache;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
+
+class CacheServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void setsGetsDeletesAndPurgesScopedJson() {
+        MemoryRepository repository = new MemoryRepository();
+        CacheService service = service(repository);
+        String organizationId = {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}};
+
+        service.set(
+                organizationId,
+                " task:1 ",
+                new Value("cached"),
+                Duration.ofHours(1));
+
+        String scope = {{if .Tenancy}}"organization-1"{{else}}"global"{{end}};
+        CacheEntry entry = repository.entries.get(scope + "\0task:1");
+        assertThat(entry.valueJson()).isEqualTo("{\"name\":\"cached\"}");
+        assertThat(entry.expiresAt()).isEqualTo(NOW.plus(Duration.ofHours(1)));
+        assertThat(service.get(organizationId, "task:1", Value.class))
+                .isEqualTo(new Value("cached"));
+
+        service.delete(organizationId, "task:1");
+        assertThatThrownBy(() -> service.getJson(organizationId, "task:1"))
+                .isInstanceOf(CacheException.class)
+                .hasFieldOrPropertyWithValue("kind", CacheException.Kind.MISS);
+        assertThat(service.purgeExpired(100)).isZero();
+    }
+
+    @Test
+    void rejectsInvalidKeysValuesScopesAndTtl() {
+        CacheService service = service(new MemoryRepository());
+        String organizationId = {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}};
+
+        assertThatThrownBy(
+                        () -> service.set(organizationId, "", "value", Duration.ofMinutes(1)))
+                .isInstanceOf(CacheException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.set(
+                                        organizationId,
+                                        "unsafe\nkey",
+                                        "value",
+                                        Duration.ofMinutes(1)))
+                .isInstanceOf(CacheException.class);
+        assertThatThrownBy(
+                        () -> service.set(organizationId, "key", "value", Duration.ZERO))
+                .isInstanceOf(CacheException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.set(
+                                        organizationId,
+                                        "key",
+                                        "value",
+                                        CacheService.MAXIMUM_TTL.plusSeconds(1)))
+                .isInstanceOf(CacheException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.set(
+                                        organizationId,
+                                        "key",
+                                        "x".repeat(CacheService.MAXIMUM_VALUE_BYTES + 1),
+                                        Duration.ofMinutes(1)))
+                .isInstanceOf(CacheException.class);
+{{- if .Tenancy}}
+        assertThatThrownBy(
+                        () -> service.set("", "key", "value", Duration.ofMinutes(1)))
+                .isInstanceOf(CacheException.class);
+{{- end}}
+        assertThatThrownBy(() -> service.purgeExpired(10_001))
+                .isInstanceOf(CacheException.class);
+    }
+
+    private static CacheService service(CacheRepository repository) {
+        return new CacheService(
+                repository,
+                new ObjectMapper(),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private record Value(String name) {}
+
+    private static final class MemoryRepository implements CacheRepository {
+
+        private final Map<String, CacheEntry> entries = new HashMap<>();
+
+        @Override
+        public void set(CacheEntry entry) {
+            entries.put(entry.scopeKey() + "\0" + entry.key(), entry);
+        }
+
+        @Override
+        public Optional<CacheEntry> get(String scopeKey, String key, Instant now) {
+            CacheEntry entry = entries.get(scopeKey + "\0" + key);
+            if (entry == null || !entry.expiresAt().isAfter(now)) {
+                return Optional.empty();
+            }
+            return Optional.of(entry);
+        }
+
+        @Override
+        public void delete(String scopeKey, String key) {
+            entries.remove(scopeKey + "\0" + key);
+        }
+
+        @Override
+        public int purgeExpired(Instant now, int limit) {
+            int before = entries.size();
+            entries.entrySet().removeIf(entry -> !entry.getValue().expiresAt().isAfter(now));
+            return Math.min(before - entries.size(), limit);
+        }
+    }
+}

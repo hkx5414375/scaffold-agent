@@ -355,6 +355,18 @@ func TestJavaMySQLTenantFilesPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaFilesReference(t, "mysql", true, true, "0.3.0")
 }
 
+func TestJavaPostgreSQLCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCacheReference(t, "postgresql", true, false, "")
+}
+
+func TestJavaPostgreSQLTenantCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCacheReference(t, "postgresql", true, false, "0.3.0")
+}
+
+func TestJavaMySQLTenantCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCacheReference(t, "mysql", true, false, "0.3.0")
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -615,28 +627,35 @@ func runGeneratedJavaReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false)
 }
 
 func runGeneratedJavaJobsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false, false)
 }
 
 func runGeneratedJavaNotificationsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false, false)
 }
 
 func runGeneratedJavaFilesReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true, false)
+}
+
+func runGeneratedJavaCacheReference(
+	t *testing.T, database string, business, admin bool, tenancyVersion string,
+) {
+	t.Helper()
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, true)
 }
 
 func runGeneratedJavaCapabilities(
@@ -648,6 +667,7 @@ func runGeneratedJavaCapabilities(
 	jobs bool,
 	notifications bool,
 	files bool,
+	cache bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -704,6 +724,14 @@ MODULES
 			capabilities = "  capabilities:\n"
 		}
 		capabilities += `    - name: file-assets
+      version: 0.1.0
+`
+	}
+	if cache {
+		if capabilities == "" {
+			capabilities = "  capabilities:\n"
+		}
+		capabilities += `    - name: application-cache
       version: 0.1.0
 `
 	}
@@ -769,6 +797,9 @@ MODULES
 			wantChanges++
 		}
 	}
+	if cache {
+		wantChanges += 8
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -792,6 +823,9 @@ MODULES
 	}
 	if files && plannedData.CapabilityLock["file-assets"] != "0.1.0" {
 		t.Fatalf("Plan() file assets lock = %#v", plannedData.CapabilityLock)
+	}
+	if cache && plannedData.CapabilityLock["application-cache"] != "0.1.0" {
+		t.Fatalf("Plan() application cache lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

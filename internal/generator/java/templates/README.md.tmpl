@@ -95,6 +95,20 @@ serialized. A production multi-instance deployment must mount the same durable v
 or replace `BlobStore` with an adapter that preserves the same create-only, bounded,
 streaming, and compensation contract.
 {{end}}
+{{if .Cache}}
+
+## Application cache
+
+`CacheService` stores replica-coherent JSON in {{.Database.DisplayName}} with a
+tenant or global scope, a 191-byte key bound, a 256 KiB value bound, and a maximum
+30-day TTL. Missing, expired, and cross-tenant keys return the same miss result.
+Deletes are idempotent, and `purgeExpired` accepts at most 10,000 rows per call.
+
+Namespace keys by feature, choose a stable TTL, and invalidate on authoritative
+mutations. Do not cache secrets or expose a generic cache HTTP endpoint. A Redis
+repository may replace the JDBC adapter only if it preserves the same scope, size,
+expiry, miss, and bounded-cleanup semantics.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

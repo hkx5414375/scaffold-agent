@@ -1,0 +1,112 @@
+package {{.PackageName}}.cache;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public final class JdbcCacheRepository implements CacheRepository {
+
+    private final JdbcTemplate jdbc;
+    private final RowMapper<CacheEntry> mapper = this::map;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "The Spring JDBC collaborator is a process-scoped dependency")
+    public JdbcCacheRepository(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    @Override
+    public void set(CacheEntry entry) {
+        jdbc.update(
+{{- if eq .Database.Engine "postgresql"}}
+                """
+                insert into application_cache
+                    (scope_key, cache_key, organization_id, value_json, expires_at, updated_at)
+                values (?, ?, ?, cast(? as jsonb), ?, now())
+                on conflict (scope_key, cache_key) do update set
+                    value_json = excluded.value_json,
+                    expires_at = excluded.expires_at,
+                    updated_at = now()
+                """,
+{{- else}}
+                """
+                insert into application_cache
+                    (scope_key, cache_key, organization_id, value_json, expires_at, updated_at)
+                values (?, ?, ?, cast(? as json), ?, utc_timestamp(6))
+                on duplicate key update
+                    value_json = values(value_json),
+                    expires_at = values(expires_at),
+                    updated_at = utc_timestamp(6)
+                """,
+{{- end}}
+                entry.scopeKey(),
+                entry.key(),
+                {{if .Tenancy}}entry.scopeKey(){{else}}null{{end}},
+                entry.valueJson(),
+                Timestamp.from(entry.expiresAt()));
+    }
+
+    @Override
+    public Optional<CacheEntry> get(String scopeKey, String key, Instant now) {
+        List<CacheEntry> entries =
+                jdbc.query(
+                        """
+                        select scope_key, cache_key, value_json, expires_at
+                        from application_cache
+                        where scope_key = ? and cache_key = ? and expires_at > ?
+                        """,
+                        mapper,
+                        scopeKey,
+                        key,
+                        Timestamp.from(now));
+        return entries.stream().findFirst();
+    }
+
+    @Override
+    public void delete(String scopeKey, String key) {
+        jdbc.update(
+                "delete from application_cache where scope_key = ? and cache_key = ?",
+                scopeKey,
+                key);
+    }
+
+    @Override
+    public int purgeExpired(Instant now, int limit) {
+{{- if eq .Database.Engine "postgresql"}}
+        return jdbc.update(
+                """
+                delete from application_cache where ctid in (
+                    select ctid from application_cache
+                    where expires_at <= ? order by expires_at limit ?
+                )
+                """,
+                Timestamp.from(now),
+                limit);
+{{- else}}
+        return jdbc.update(
+                """
+                delete from application_cache
+                where expires_at <= ? order by expires_at limit ?
+                """,
+                Timestamp.from(now),
+                limit);
+{{- end}}
+    }
+
+    private CacheEntry map(ResultSet result, int rowNumber) throws SQLException {
+        return new CacheEntry(
+                result.getString("scope_key"),
+                result.getString("cache_key"),
+                result.getString("value_json"),
+                result.getTimestamp("expires_at").toInstant());
+    }
+}

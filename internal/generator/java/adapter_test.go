@@ -578,6 +578,73 @@ func TestGenerateTenantFileAdministration(t *testing.T) {
 	}
 }
 
+func TestGenerateApplicationCacheForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: cacheOwner, Version: cacheVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 39 || result.CapabilityLock[cacheOwner] != cacheVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/cache/CacheService.java",
+				"src/main/java/com/scaffold/generated/demoservice/cache/JdbcCacheRepository.java",
+				"src/test/java/com/scaffold/generated/demoservice/cache/CacheDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000220__application_cache.sql",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != cacheOwner {
+					t.Errorf("Generate() cache output %s is missing or has the wrong owner", path)
+				}
+			}
+			migration := string(outputContent(
+				result, "src/main/resources/db/migration/V000220__application_cache.sql",
+			))
+			if !strings.Contains(migration, "application_cache") ||
+				!strings.Contains(migration, "expires_at") {
+				t.Fatalf("generated cache migration is incomplete:\n%s", migration)
+			}
+			if strings.Contains(string(outputContent(result, "api/openapi.yaml")), "application_cache") {
+				t.Fatal("generated application cache exposes a generic HTTP endpoint")
+			}
+		})
+	}
+}
+
+func TestGenerateTenantScopedApplicationCache(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: cacheOwner, Version: cacheVersion},
+	}
+	result, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(result.Outputs) != 64 {
+		t.Fatalf("Generate() output count = %d, want 64", len(result.Outputs))
+	}
+	migration := string(outputContent(
+		result, "src/main/resources/db/migration/V000220__application_cache.sql",
+	))
+	if !strings.Contains(migration, "organization_id text not null") ||
+		!strings.Contains(migration, "references organizations") {
+		t.Fatalf("generated cache is not tenant scoped:\n%s", migration)
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

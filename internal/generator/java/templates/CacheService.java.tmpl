@@ -1,0 +1,130 @@
+package {{.PackageName}}.cache;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.DateTimeException;
+import java.time.Duration;
+import java.time.Instant;
+import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
+
+@Service
+public final class CacheService {
+
+    public static final int MAXIMUM_VALUE_BYTES = 256 << 10;
+    public static final Duration MAXIMUM_TTL = Duration.ofDays(30);
+
+    private final CacheRepository repository;
+    private final ObjectMapper objectMapper;
+    private final Clock clock;
+
+    public CacheService(CacheRepository repository, ObjectMapper objectMapper) {
+        this(repository, objectMapper, Clock.systemUTC());
+    }
+
+    CacheService(CacheRepository repository, ObjectMapper objectMapper, Clock clock) {
+        this.repository = repository;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    public void set(
+            String organizationId,
+            String key,
+            Object value,
+            Duration ttl) {
+        ScopeKey validated = validate(organizationId, key);
+        if (value == null
+                || ttl == null
+                || ttl.isZero()
+                || ttl.isNegative()
+                || ttl.compareTo(MAXIMUM_TTL) > 0) {
+            throw invalid();
+        }
+        String encoded;
+        try {
+            encoded = objectMapper.writeValueAsString(value);
+        } catch (Exception exception) {
+            throw invalid();
+        }
+        if (encoded.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_VALUE_BYTES) {
+            throw invalid();
+        }
+        Instant expiresAt;
+        try {
+            expiresAt = clock.instant().plus(ttl);
+        } catch (DateTimeException | ArithmeticException exception) {
+            throw invalid();
+        }
+        repository.set(
+                new CacheEntry(
+                        validated.scope,
+                        validated.key,
+                        encoded,
+                        expiresAt));
+    }
+
+    public String getJson(String organizationId, String key) {
+        ScopeKey validated = validate(organizationId, key);
+        return repository.get(validated.scope, validated.key, clock.instant())
+                .map(CacheEntry::valueJson)
+                .orElseThrow(CacheService::miss);
+    }
+
+    public <T> T get(String organizationId, String key, Class<T> type) {
+        if (type == null) {
+            throw invalid();
+        }
+        try {
+            return objectMapper.readValue(getJson(organizationId, key), type);
+        } catch (CacheException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw invalid();
+        }
+    }
+
+    public void delete(String organizationId, String key) {
+        ScopeKey validated = validate(organizationId, key);
+        repository.delete(validated.scope, validated.key);
+    }
+
+    public int purgeExpired(int limit) {
+        if (limit < 1 || limit > 10_000) {
+            throw invalid();
+        }
+        return repository.purgeExpired(clock.instant(), limit);
+    }
+
+    private static ScopeKey validate(String organizationId, String key) {
+        String normalizedKey = key == null ? "" : key.trim();
+        if (!validText(normalizedKey)) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        String scope = organizationId == null ? "" : organizationId.trim();
+        if (!validText(scope)) {
+            throw invalid();
+        }
+{{- else}}
+        String scope = "global";
+{{- end}}
+        return new ScopeKey(scope, normalizedKey);
+    }
+
+    private static boolean validText(String value) {
+        return !value.isEmpty()
+                && value.getBytes(StandardCharsets.UTF_8).length <= 191
+                && value.chars().noneMatch(Character::isISOControl);
+    }
+
+    private static CacheException invalid() {
+        return new CacheException(CacheException.Kind.INVALID, "cache input is invalid");
+    }
+
+    private static CacheException miss() {
+        return new CacheException(CacheException.Kind.MISS, "cache entry was not found");
+    }
+
+    private record ScopeKey(String scope, String key) {}
+}

@@ -1,0 +1,16 @@
+create table application_cache (
+    scope_key text not null,
+    cache_key text not null,
+    organization_id text{{if .Tenancy}} not null references organizations (id) on delete cascade{{end}},
+    value_json jsonb not null,
+    expires_at timestamptz not null,
+    updated_at timestamptz not null,
+    primary key (scope_key, cache_key),
+    constraint application_cache_scope_length check (octet_length(scope_key) <= 191),
+    constraint application_cache_key_length check (octet_length(cache_key) <= 191)
+);
+
+create index application_cache_expiry_idx on application_cache (expires_at);
+{{if .Tenancy}}
+create index application_cache_organization_idx on application_cache (organization_id, cache_key);
+{{end}}

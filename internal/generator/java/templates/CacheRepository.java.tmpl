@@ -1,0 +1,15 @@
+package {{.PackageName}}.cache;
+
+import java.time.Instant;
+import java.util.Optional;
+
+public interface CacheRepository {
+
+    void set(CacheEntry entry);
+
+    Optional<CacheEntry> get(String scopeKey, String key, Instant now);
+
+    void delete(String scopeKey, String key);
+
+    int purgeExpired(Instant now, int limit);
+}

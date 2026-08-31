@@ -88,11 +88,12 @@ create-only publication, SHA-256 metadata, compensation, and not-found behavior
 for cross-tenant identifiers.
 
 Selecting `application-cache` version `0.1.0` generates a cross-instance database
-TTL cache with bounded JSON values. Feature code should namespace keys, select a
-stable TTL, and treat `cache.ErrMiss` as the common missing, expired, or
-cross-tenant result. Agents must not add a generic cache HTTP endpoint, place
+TTL cache with bounded JSON values. Feature code uses `cache.Service` in Go or
+`CacheService` in Java, should namespace keys, select a stable TTL, and treat a
+miss as the common missing, expired, or cross-tenant result. Agents must not add a
+generic cache HTTP endpoint, place
 secrets in cached values, bypass organization scope, or run unbounded cleanup.
-`cache.Service.PurgeExpired` accepts a bounded maintenance batch; a later store
+The generated purge method accepts a bounded maintenance batch; a later store
 adapter may use Redis while preserving the same service contract.
 
 Selecting `job-administration` version `0.1.0` automatically resolves

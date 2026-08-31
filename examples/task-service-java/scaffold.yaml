@@ -21,6 +21,8 @@ spec:
       version: 0.1.0
     - name: file-assets
       version: 0.1.0
+    - name: application-cache
+      version: 0.1.0
   modules:
     - name: tasks
       entities:
