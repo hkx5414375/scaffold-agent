@@ -9,13 +9,13 @@ public interface {{.Business.EntityClass}}Repository {
 
     void create({{.Business.EntityClass}} value, AuditEvent auditEvent);
 
-    Optional<{{.Business.EntityClass}}> get(String id);
+    Optional<{{.Business.EntityClass}}> get({{if .Tenancy}}String organizationId, {{end}}String id);
 
-    PageResult list(String cursor, int limit);
+    PageResult list({{if .Tenancy}}String organizationId, {{end}}String cursor, int limit);
 
     {{.Business.EntityClass}} update({{.Business.EntityClass}} value, AuditEvent auditEvent);
 
-    void delete(String id, long version, AuditEvent auditEvent);
+    void delete({{if .Tenancy}}String organizationId, {{end}}String id, long version, AuditEvent auditEvent);
 
     @SuppressFBWarnings(
             value = "EI_EXPOSE_REP",

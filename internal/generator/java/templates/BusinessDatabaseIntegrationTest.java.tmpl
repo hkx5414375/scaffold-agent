@@ -8,6 +8,11 @@ import {{.PackageName}}.identity.JdbcIdentityRepository;
 import {{.PackageName}}.identity.PasswordHasher;
 import {{.PackageName}}.identity.Principal;
 import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -45,7 +50,7 @@ class {{.Business.EntityClass}}DatabaseIntegrationTest {
             DriverManagerDataSource dataSource =
                     new DriverManagerDataSource(applicationUrl, username, password);
             Flyway flyway = Flyway.configure().dataSource(dataSource).load();
-            assertThat(flyway.migrate().migrationsExecuted).isEqualTo(2);
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{if .Tenancy}}3{{else}}2{{end}});
             assertThat(flyway.migrate().migrationsExecuted).isZero();
 
             JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -57,7 +62,7 @@ class {{.Business.EntityClass}}DatabaseIntegrationTest {
                             new PasswordHasher(),
                             new TokenCodec());
             identityService.ensureAdmin("admin@example.com", "correct horse battery staple");
-            Principal actor =
+            Principal baseActor =
                     identityService
                             .login(
                                     "admin@example.com",
@@ -65,6 +70,20 @@ class {{.Business.EntityClass}}DatabaseIntegrationTest {
                                     "127.0.0.1",
                                     "integration-test")
                             .principal();
+{{- if .Tenancy}}
+            TenancyService tenancyService =
+                    new TenancyService(new JdbcTenancyRepository(jdbcTemplate, transactions));
+            Organization organization = tenancyService.create("Acme", baseActor);
+            Principal actor =
+                    tenancyService.authorize(
+                            baseActor,
+                            organization.id(),
+                            "{{.Business.PermissionPrefix}}:create",
+                            "127.0.0.1",
+                            "integration-test");
+{{- else}}
+            Principal actor = baseActor;
+{{- end}}
 
             {{.Business.EntityClass}}Service service =
                     new {{.Business.EntityClass}}Service(

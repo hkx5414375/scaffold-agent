@@ -1,0 +1,49 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/v1/organizations")
+public final class OrganizationController {
+
+    private final TenancyService service;
+
+    public OrganizationController(TenancyService service) {
+        this.service = service;
+    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public Organization create(
+            @Valid @RequestBody CreateOrganizationRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.create(input.name(), actor);
+    }
+
+    @GetMapping
+    public OrganizationPage list(
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return new OrganizationPage(service.list(actor));
+    }
+
+    public record CreateOrganizationRequest(@NotBlank @Size(max = 120) String name) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Organization lists are immutable snapshots created by the service")
+    public record OrganizationPage(List<Organization> items) {}
+}

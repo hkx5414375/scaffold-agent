@@ -19,7 +19,8 @@ class {{.Business.EntityClass}}ServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
     private static final Principal ACTOR =
-            new Principal("administrator", "admin@example.com", "admin", "session");
+            new Principal(
+                    "administrator", "admin@example.com", "admin", "session"{{if .Tenancy}}, "organization"{{end}});
 
     @Test
     void validatesAndRunsAuditedOptimisticCrud() {
@@ -90,6 +91,9 @@ class {{.Business.EntityClass}}ServiceTest {
         {{.Business.EntityClass}} value =
                 new {{.Business.EntityClass}}(
                         "entity-id",
+{{- if .Tenancy}}
+                        ACTOR.organizationId(),
+{{- end}}
 {{- range .Business.Fields}}
                         {{.SampleOne}},
 {{- end}}
@@ -136,14 +140,22 @@ class {{.Business.EntityClass}}ServiceTest {
         }
 
         @Override
-        public Optional<{{.Business.EntityClass}}> get(String id) {
+        public Optional<{{.Business.EntityClass}}> get({{if .Tenancy}}String organizationId, {{end}}String id) {
             return value != null && value.id().equals(id)
+{{- if .Tenancy}}
+                            && value.organizationId().equals(organizationId)
+{{- end}}
                     ? Optional.of(value)
                     : Optional.empty();
         }
 
         @Override
-        public PageResult list(String cursor, int limit) {
+        public PageResult list({{if .Tenancy}}String organizationId, {{end}}String cursor, int limit) {
+{{- if .Tenancy}}
+            if (value != null && !value.organizationId().equals(organizationId)) {
+                return new PageResult(List.of(), "");
+            }
+{{- end}}
             return new PageResult(value == null ? List.of() : List.of(value), "");
         }
 
@@ -159,6 +171,9 @@ class {{.Business.EntityClass}}ServiceTest {
             value =
                     new {{.Business.EntityClass}}(
                             candidate.id(),
+{{- if .Tenancy}}
+                            candidate.organizationId(),
+{{- end}}
 {{- range .Business.Fields}}
                             candidate.{{.JavaName}}(),
 {{- end}}
@@ -170,11 +185,15 @@ class {{.Business.EntityClass}}ServiceTest {
         }
 
         @Override
-        public void delete(String id, long version, AuditEvent auditEvent) {
+        public void delete({{if .Tenancy}}String organizationId, {{end}}String id, long version, AuditEvent auditEvent) {
             if (value == null) {
                 throw missing();
             }
-            if (!value.id().equals(id) || value.version() != version) {
+            if (!value.id().equals(id)
+{{- if .Tenancy}}
+                    || !value.organizationId().equals(organizationId)
+{{- end}}
+                    || value.version() != version) {
                 throw conflict();
             }
             value = null;

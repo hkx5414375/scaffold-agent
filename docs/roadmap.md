@@ -50,6 +50,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java session/token identity, permission RBAC, transactional audit, dialect migrations, and live-database CI gates.
 - [x] Java Blueprint CRUD parity with keyset pagination, optimistic concurrency, transactional audit, and PostgreSQL/MySQL generation gates.
 - [x] Java OpenAPI and shared Vue/Element Plus administration parity with locked frontend build gates.
+- [x] Java organization-tenancy 0.1 with atomic organization creation, membership RBAC, tenant-scoped CRUD, and administration selection.
 - [ ] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 

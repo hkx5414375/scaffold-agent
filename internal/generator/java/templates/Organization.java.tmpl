@@ -1,0 +1,6 @@
+package {{.PackageName}}.tenancy;
+
+import java.time.Instant;
+
+public record Organization(
+        String id, String name, String role, Instant createdAt) {}

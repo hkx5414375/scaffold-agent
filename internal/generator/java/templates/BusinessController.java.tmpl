@@ -31,7 +31,7 @@ public final class {{.Business.EntityClass}}Controller {
     }
 
     @PostMapping
-    @RequirePermission("{{.Business.PermissionPrefix}}:create")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:create"{{if .Tenancy}}, tenantScoped = true{{end}})
     public ResponseEntity<{{.Business.EntityClass}}> create(
             @RequestBody {{.Business.EntityClass}}Service.WriteInput input,
             @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
@@ -39,7 +39,7 @@ public final class {{.Business.EntityClass}}Controller {
     }
 
     @GetMapping("/{id}")
-    @RequirePermission("{{.Business.PermissionPrefix}}:read")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:read"{{if .Tenancy}}, tenantScoped = true{{end}})
     public {{.Business.EntityClass}} get(
             @PathVariable String id,
             @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
@@ -47,7 +47,7 @@ public final class {{.Business.EntityClass}}Controller {
     }
 
     @GetMapping
-    @RequirePermission("{{.Business.PermissionPrefix}}:read")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:read"{{if .Tenancy}}, tenantScoped = true{{end}})
     public {{.Business.EntityClass}}Service.Page list(
             @RequestParam(defaultValue = "") String cursor,
             @RequestParam(defaultValue = "20") int limit,
@@ -56,7 +56,7 @@ public final class {{.Business.EntityClass}}Controller {
     }
 
     @PutMapping("/{id}")
-    @RequirePermission("{{.Business.PermissionPrefix}}:update")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:update"{{if .Tenancy}}, tenantScoped = true{{end}})
     public {{.Business.EntityClass}} update(
             @PathVariable String id,
             @RequestBody {{.Business.EntityClass}}Service.UpdateInput input,
@@ -65,7 +65,7 @@ public final class {{.Business.EntityClass}}Controller {
     }
 
     @DeleteMapping("/{id}")
-    @RequirePermission("{{.Business.PermissionPrefix}}:delete")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:delete"{{if .Tenancy}}, tenantScoped = true{{end}})
     public ResponseEntity<Void> delete(
             @PathVariable String id,
             @RequestParam Long version,

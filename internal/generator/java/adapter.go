@@ -11,6 +11,7 @@ import (
 	"text/template"
 	"unicode"
 
+	"github.com/hkx5414375/scaffold-agent/internal/capability"
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
@@ -25,6 +26,8 @@ const (
 	businessVersion = "0.1.0"
 	adminOwner      = adminui.Owner
 	adminVersion    = adminui.Version
+	tenancyOwner    = "organization-tenancy"
+	tenancyVersion  = "0.1.0"
 )
 
 //go:embed all:templates
@@ -49,6 +52,7 @@ type databaseData struct {
 	FlywayArtifactID          string
 	IdentityMigrationTemplate string
 	BusinessMigrationTemplate string
+	TenancyMigrationTemplate  string
 }
 
 var databases = map[string]databaseData{
@@ -61,6 +65,7 @@ var databases = map[string]databaseData{
 		FlywayArtifactID:          "flyway-database-postgresql",
 		IdentityMigrationTemplate: "templates/identity_postgresql.sql.tmpl",
 		BusinessMigrationTemplate: "templates/business_postgresql.sql.tmpl",
+		TenancyMigrationTemplate:  "templates/tenancy_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                    "mysql",
@@ -71,8 +76,20 @@ var databases = map[string]databaseData{
 		FlywayArtifactID:          "flyway-mysql",
 		IdentityMigrationTemplate: "templates/identity_mysql.sql.tmpl",
 		BusinessMigrationTemplate: "templates/business_mysql.sql.tmpl",
+		TenancyMigrationTemplate:  "templates/tenancy_mysql.sql.tmpl",
 	},
 }
+
+var javaCapabilityCatalog = capability.NewCatalog(spec.CapabilityPack{
+	APIVersion: spec.APIVersionV1Alpha1,
+	Kind:       spec.KindCapabilityPack,
+	Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
+	Spec: spec.CapabilityPackSpec{
+		Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+		Backends:    []string{backend},
+		Databases:   []string{"postgresql", "mysql"},
+	},
+})
 
 type templateData struct {
 	ProjectName      string
@@ -162,8 +179,27 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Java adapter requires both session and token authentication")
 	}
-	if len(project.Spec.Capabilities) > 0 {
-		return generator.Result{}, fmt.Errorf("Java capability packs are not available in the foundation slice")
+	resolvedCapabilities, diagnostics := capability.Resolve(
+		javaCapabilityCatalog, project.Spec.Capabilities,
+	)
+	if len(diagnostics) > 0 {
+		return generator.Result{}, fmt.Errorf(
+			"resolve Java capabilities: %s", diagnostics[0].Message,
+		)
+	}
+	for _, selection := range project.Spec.Capabilities {
+		if len(selection.Config) > 0 {
+			return generator.Result{}, fmt.Errorf(
+				"Java capability %q does not accept configuration in this version",
+				selection.Name,
+			)
+		}
+	}
+	tenancyEnabled := false
+	for _, pack := range resolvedCapabilities {
+		if pack.Metadata.Name == tenancyOwner {
+			tenancyEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
 	if err != nil {
@@ -179,6 +215,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Database:    database,
 		Business:    business,
 		Admin:       adminEnabled,
+		Tenancy:     tenancyEnabled,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
 	for path, templatePath := range outputTemplates {
@@ -186,6 +223,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	businessPaths := make(map[string]struct{}, 9)
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
+	tenancyPaths := make(map[string]struct{}, 9)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -193,6 +231,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addAdminTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		adminPaths[path] = struct{}{}
+	}
+	addTenancyTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		tenancyPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -221,6 +263,21 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	targets[testRoot+"/architecture/ArchitectureTest.java"] = "templates/ArchitectureTest.java.tmpl"
 	targets["src/main/resources/db/migration/V000001__identity.sql"] = database.IdentityMigrationTemplate
 	capabilityLock := map[string]string{baseOwner: baseVersion}
+	if tenancyEnabled {
+		addTenancyTarget(mainRoot+"/tenancy/Organization.java", "templates/Organization.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyException.java", "templates/TenancyException.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyRepository.java", "templates/TenancyRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyService.java", "templates/TenancyService.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/JdbcTenancyRepository.java", "templates/JdbcTenancyRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/OrganizationController.java", "templates/OrganizationController.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyServiceTest.java", "templates/TenancyServiceTest.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyDatabaseIntegrationTest.java", "templates/TenancyDatabaseIntegrationTest.java.tmpl")
+		addTenancyTarget(
+			"src/main/resources/db/migration/V000050__organization_tenancy.sql",
+			database.TenancyMigrationTemplate,
+		)
+		capabilityLock[tenancyOwner] = tenancyVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -271,6 +328,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isAdminPath := adminPaths[path]; isAdminPath {
 			owner = adminOwner
+		}
+		if _, isTenancyPath := tenancyPaths[path]; isTenancyPath {
+			owner = tenancyOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

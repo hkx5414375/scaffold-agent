@@ -20,7 +20,7 @@ public final class Jdbc{{.Business.EntityClass}}Repository
         implements {{.Business.EntityClass}}Repository {
 
     private static final String SELECT_COLUMNS =
-            "id"
+            "id{{if .Tenancy}}, organization_id{{end}}"
 {{- range .Business.Fields}}
                     + ", {{javaSQL .Name}}"
 {{- end}}
@@ -45,13 +45,16 @@ public final class Jdbc{{.Business.EntityClass}}Repository
                     status -> {
                         jdbcTemplate.update(
                                 "insert into {{javaSQL .Business.TableName}} "
-                                        + "(id"
+                                        + "(id{{if .Tenancy}}, organization_id{{end}}"
 {{- range .Business.Fields}}
                                         + ", {{javaSQL .Name}}"
 {{- end}}
                                         + ", version, created_at, updated_at) "
-                                        + "values (?{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)",
+                                        + "values (?{{if .Tenancy}}, ?{{end}}{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)",
                                 value.id(),
+{{- if .Tenancy}}
+                                value.organizationId(),
+{{- end}}
 {{- range .Business.Fields}}
                                 value.{{.JavaName}}(),
 {{- end}}
@@ -66,20 +69,23 @@ public final class Jdbc{{.Business.EntityClass}}Repository
     }
 
     @Override
-    public Optional<{{.Business.EntityClass}}> get(String id) {
-        return getInternal(id);
+    public Optional<{{.Business.EntityClass}}> get({{if .Tenancy}}String organizationId, {{end}}String id) {
+        return getInternal({{if .Tenancy}}organizationId, {{end}}id);
     }
 
     @Override
-    public PageResult list(String cursor, int limit) {
+    public PageResult list({{if .Tenancy}}String organizationId, {{end}}String cursor, int limit) {
         List<{{.Business.EntityClass}}> values =
                 new ArrayList<>(
                         jdbcTemplate.query(
                                 "select "
                                         + SELECT_COLUMNS
                                         + " from {{javaSQL .Business.TableName}} "
-                                        + "where (? = '' or id > ?) order by id limit ?",
+                                        + "where {{if .Tenancy}}organization_id = ? and {{end}}(? = '' or id > ?) order by id limit ?",
                                 Jdbc{{.Business.EntityClass}}Repository::mapValue,
+{{- if .Tenancy}}
+                                organizationId,
+{{- end}}
                                 cursor,
                                 cursor,
                                 limit + 1));
@@ -108,18 +114,21 @@ public final class Jdbc{{.Business.EntityClass}}Repository
                                                         + "{{javaSQL $field.Name}} = ?"
 {{- end}}
                                                         + ", version = version + 1, updated_at = ? "
-                                                        + "where id = ? and version = ?",
+                                                        + "where id = ?{{if .Tenancy}} and organization_id = ?{{end}} and version = ?",
 {{- range .Business.Fields}}
                                                 value.{{.JavaName}}(),
 {{- end}}
                                                 Timestamp.from(value.updatedAt()),
                                                 value.id(),
+{{- if .Tenancy}}
+                                                value.organizationId(),
+{{- end}}
                                                 value.version());
                                 if (changed != 1) {
-                                    throw missingOrConflict(value.id());
+                                    throw missingOrConflict({{if .Tenancy}}value.organizationId(), {{end}}value.id());
                                 }
                                 appendAudit(auditEvent);
-                                return getInternal(value.id())
+                                return getInternal({{if .Tenancy}}value.organizationId(), {{end}}value.id())
                                         .orElseThrow(() -> missing(value.id()));
                             }));
         } catch (DataIntegrityViolationException exception) {
@@ -128,38 +137,41 @@ public final class Jdbc{{.Business.EntityClass}}Repository
     }
 
     @Override
-    public void delete(String id, long version, AuditEvent auditEvent) {
+    public void delete({{if .Tenancy}}String organizationId, {{end}}String id, long version, AuditEvent auditEvent) {
         transactionTemplate.executeWithoutResult(
                 status -> {
                     int changed =
                             jdbcTemplate.update(
-                                    "delete from {{javaSQL .Business.TableName}} where id = ? and version = ?",
+                                    "delete from {{javaSQL .Business.TableName}} where id = ?{{if .Tenancy}} and organization_id = ?{{end}} and version = ?",
                                     id,
+{{- if .Tenancy}}
+                                    organizationId,
+{{- end}}
                                     version);
                     if (changed != 1) {
-                        throw missingOrConflict(id);
+                        throw missingOrConflict({{if .Tenancy}}organizationId, {{end}}id);
                     }
                     appendAudit(auditEvent);
                 });
     }
 
-    private Optional<{{.Business.EntityClass}}> getInternal(String id) {
+    private Optional<{{.Business.EntityClass}}> getInternal({{if .Tenancy}}String organizationId, {{end}}String id) {
         List<{{.Business.EntityClass}}> values =
                 jdbcTemplate.query(
                         "select "
                                 + SELECT_COLUMNS
-                                + " from {{javaSQL .Business.TableName}} where id = ?",
+                                + " from {{javaSQL .Business.TableName}} where id = ?{{if .Tenancy}} and organization_id = ?{{end}}",
                         Jdbc{{.Business.EntityClass}}Repository::mapValue,
-                        id);
+                        id{{if .Tenancy}}, organizationId{{end}});
         return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
     }
 
-    private RuntimeException missingOrConflict(String id) {
+    private RuntimeException missingOrConflict({{if .Tenancy}}String organizationId, {{end}}String id) {
         Integer count =
                 jdbcTemplate.queryForObject(
-                        "select count(*) from {{javaSQL .Business.TableName}} where id = ?",
+                        "select count(*) from {{javaSQL .Business.TableName}} where id = ?{{if .Tenancy}} and organization_id = ?{{end}}",
                         Integer.class,
-                        id);
+                        id{{if .Tenancy}}, organizationId{{end}});
         return count == null || count == 0 ? missing(id) : conflict("version is stale", null);
     }
 
@@ -182,6 +194,9 @@ public final class Jdbc{{.Business.EntityClass}}Repository
             throws SQLException {
         return new {{.Business.EntityClass}}(
                 resultSet.getString("id"),
+{{- if .Tenancy}}
+                resultSet.getString("organization_id"),
+{{- end}}
 {{- range .Business.Fields}}
 {{- if eq .JavaType "String"}}
                 resultSet.getString("{{.Name}}"),

@@ -4,6 +4,9 @@ import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.util.Arrays;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
 import org.springframework.stereotype.Component;
 import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
@@ -13,14 +16,24 @@ public final class AuthenticationInterceptor implements HandlerInterceptor {
 
     public static final String PRINCIPAL_ATTRIBUTE = "scaffoldPrincipal";
     public static final String SESSION_COOKIE = "scaffold_session";
+{{- if .Tenancy}}
+    public static final String ORGANIZATION_HEADER = "X-Organization-ID";
+{{- end}}
 
     private static final int MAXIMUM_CREDENTIAL_LENGTH = 512;
     private static final int MAXIMUM_AUDIT_VALUE_LENGTH = 512;
 
     private final IdentityService identityService;
+{{- if .Tenancy}}
+    private final TenancyService tenancyService;
+{{- end}}
 
-    public AuthenticationInterceptor(IdentityService identityService) {
+    public AuthenticationInterceptor(
+            IdentityService identityService{{if .Tenancy}}, TenancyService tenancyService{{end}}) {
         this.identityService = identityService;
+{{- if .Tenancy}}
+        this.tenancyService = tenancyService;
+{{- end}}
     }
 
     @Override
@@ -37,11 +50,25 @@ public final class AuthenticationInterceptor implements HandlerInterceptor {
             required = handlerMethod.getBeanType().getAnnotation(RequirePermission.class);
         }
         if (required != null) {
+{{- if .Tenancy}}
+            if (required.tenantScoped()) {
+                principal =
+                        tenancyService.authorize(
+                                principal,
+                                request.getHeader(ORGANIZATION_HEADER),
+                                required.value(),
+                                auditValue(request.getRemoteAddr()),
+                                auditValue(request.getHeader("User-Agent")));
+            } else {
+{{- end}}
             identityService.authorize(
                     principal,
                     required.value(),
                     auditValue(request.getRemoteAddr()),
                     auditValue(request.getHeader("User-Agent")));
+{{- if .Tenancy}}
+            }
+{{- end}}
         }
         request.setAttribute(PRINCIPAL_ATTRIBUTE, principal);
         return true;

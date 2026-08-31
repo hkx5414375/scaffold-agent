@@ -1,0 +1,137 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class TenancyService {
+
+    private static final int MAXIMUM_NAME_LENGTH = 120;
+
+    private final TenancyRepository repository;
+    private final Clock clock;
+
+    public TenancyService(TenancyRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    TenancyService(TenancyRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public Organization create(String name, Principal actor) {
+        requireActor(actor);
+        String normalizedName = name == null ? "" : name.trim();
+        if (normalizedName.isEmpty()
+                || normalizedName.length() > MAXIMUM_NAME_LENGTH
+                || normalizedName.chars().anyMatch(Character::isISOControl)) {
+            throw new TenancyException("organization name must contain 1 to 120 safe characters");
+        }
+        Instant now = clock.instant();
+        Organization organization =
+                new Organization(newId(), normalizedName, "admin", now);
+        repository.createOrganization(
+                organization,
+                actor.userId(),
+                "admin",
+                now,
+                audit(actor.userId(), "tenancy.organization:create", organization.id(), now));
+        return organization;
+    }
+
+    public List<Organization> list(Principal actor) {
+        requireActor(actor);
+        return List.copyOf(repository.listOrganizations(actor.userId()));
+    }
+
+    public Principal authorize(
+            Principal actor,
+            String organizationId,
+            String permission,
+            String ipAddress,
+            String userAgent) {
+        requireActor(actor);
+        String normalizedOrganizationId =
+                organizationId == null ? "" : organizationId.trim();
+        if (normalizedOrganizationId.isEmpty()
+                || normalizedOrganizationId.length() > 191
+                || permission == null
+                || permission.isBlank()) {
+            throw forbidden();
+        }
+        Optional<String> membership =
+                repository.membershipRole(normalizedOrganizationId, actor.userId());
+        if (membership.isEmpty()
+                || !repository.hasPermission(membership.orElseThrow(), permission)) {
+            repository.appendAudit(
+                    audit(
+                            actor.userId(),
+                            "tenancy.authorization",
+                            normalizedOrganizationId + ":" + permission,
+                            safe(ipAddress),
+                            safe(userAgent),
+                            clock.instant(),
+                            "denied"));
+            throw forbidden();
+        }
+        return new Principal(
+                actor.userId(),
+                actor.email(),
+                membership.orElseThrow(),
+                actor.method(),
+                normalizedOrganizationId);
+    }
+
+    private static void requireActor(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank()) {
+            throw new IdentityException(
+                    IdentityException.Kind.INVALID_CREDENTIALS,
+                    "valid session or bearer credentials are required");
+        }
+    }
+
+    private static AuditEvent audit(
+            String userId, String action, String target, Instant now) {
+        return audit(userId, action, target, "", "", now, "succeeded");
+    }
+
+    private static AuditEvent audit(
+            String userId,
+            String action,
+            String target,
+            String ipAddress,
+            String userAgent,
+            Instant now,
+            String outcome) {
+        return new AuditEvent(
+                newId(), userId, action, outcome, target, ipAddress, userAgent, now);
+    }
+
+    private static String safe(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.chars()
+                .filter(character -> !Character.isISOControl(character))
+                .limit(512)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+    }
+
+    private static IdentityException forbidden() {
+        return new IdentityException(
+                IdentityException.Kind.FORBIDDEN, "organization membership and permission are required");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+}

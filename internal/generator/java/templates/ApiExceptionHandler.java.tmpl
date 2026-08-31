@@ -4,6 +4,9 @@ import {{.PackageName}}.identity.IdentityException;
 {{- if .Business}}
 import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}}Exception;
 {{- end}}
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.TenancyException;
+{{- end}}
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -44,6 +47,12 @@ public final class ApiExceptionHandler {
             case CONFLICT ->
                     response(HttpStatus.CONFLICT, "{{.Business.ModuleName}}.conflict", exception.getMessage());
         };
+    }
+{{- end}}
+{{- if .Tenancy}}
+    @ExceptionHandler(TenancyException.class)
+    public ResponseEntity<ApiError> tenancy(TenancyException exception) {
+        return response(HttpStatus.BAD_REQUEST, "tenancy.invalid", exception.getMessage());
     }
 {{- end}}
 

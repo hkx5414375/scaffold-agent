@@ -36,21 +36,21 @@ silently rounds database identifiers or counters. Before accepting a generated
 administration change, run its locked install, lint, unit tests, type check,
 production build, and format check as documented in the generated README.
 
-Selecting `organization-tenancy` version `0.1.0` adds organization creation and
+Selecting `organization-tenancy` version `0.1.0` on Go or Java adds organization creation and
 discovery, membership-scoped permission checks, dialect-specific persistence,
 tenant-aware administration state, and organization predicates on every generated
 business mutation and query. Agents should select an organization once and send
 its identifier through `X-Organization-ID`; they do not need to rediscover the
 tenant propagation rules from handlers or SQL stores.
 
-Version `0.2.0` additionally generates organization member discovery, 72-hour
+The Go `0.2.0` version additionally generates organization member discovery, 72-hour
 email-bound invitation tokens, invitation acceptance, role changes, removals,
 last-administrator protection, additive database migrations, OpenAPI operations,
 and a member administration view. The raw invitation token is returned once for
 delivery; agents must not search the database for it because only its digest is
 stored.
 
-Version `0.3.0` adds an explicit owner, organization rename, atomic ownership
+The Go `0.3.0` version adds an explicit owner, organization rename, atomic ownership
 transfer, reversible deactivation, and reactivation. Transfer only targets an
 existing member and promotes that identity to administrator. Agents must not add
 a destructive organization-delete shortcut or bypass owner protection. An

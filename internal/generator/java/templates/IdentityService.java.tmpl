@@ -203,7 +203,7 @@ public final class IdentityService {
     }
 
     private static Principal principal(User user, String method) {
-        return new Principal(user.id(), user.email(), user.role(), method);
+        return new Principal(user.id(), user.email(), user.role(), method{{if .Tenancy}}, ""{{end}});
     }
 
     private static String normalizeEmail(String email) {

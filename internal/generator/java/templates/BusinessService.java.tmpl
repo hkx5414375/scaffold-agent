@@ -32,6 +32,9 @@ public final class {{.Business.EntityClass}}Service {
         {{.Business.EntityClass}} value =
                 new {{.Business.EntityClass}}(
                         newId(),
+{{- if .Tenancy}}
+                        actor.organizationId(),
+{{- end}}
 {{- range .Business.Fields}}
                         input.{{.JavaName}}(),
 {{- end}}
@@ -46,7 +49,7 @@ public final class {{.Business.EntityClass}}Service {
         requireActor(actor);
         String normalizedId = requireId(id);
         return repository
-                .get(normalizedId)
+                .get({{if .Tenancy}}actor.organizationId(), {{end}}normalizedId)
                 .orElseThrow(() -> notFound(normalizedId));
     }
 
@@ -57,7 +60,7 @@ public final class {{.Business.EntityClass}}Service {
         }
         String normalizedCursor = cursor == null ? "" : cursor.trim();
         {{.Business.EntityClass}}Repository.PageResult result =
-                repository.list(normalizedCursor, limit);
+                repository.list({{if .Tenancy}}actor.organizationId(), {{end}}normalizedCursor, limit);
         return new Page(result.items(), result.nextCursor());
     }
 
@@ -78,6 +81,9 @@ public final class {{.Business.EntityClass}}Service {
         {{.Business.EntityClass}} value =
                 new {{.Business.EntityClass}}(
                         normalizedId,
+{{- if .Tenancy}}
+                        actor.organizationId(),
+{{- end}}
 {{- range .Business.Fields}}
                         input.{{.JavaName}}(),
 {{- end}}
@@ -96,6 +102,9 @@ public final class {{.Business.EntityClass}}Service {
             throw invalid("version must be a positive decimal string");
         }
         repository.delete(
+{{- if .Tenancy}}
+                actor.organizationId(),
+{{- end}}
                 normalizedId,
                 version,
                 audit(actor, "{{.Business.PermissionPrefix}}:delete", normalizedId, clock.instant()));
@@ -129,7 +138,11 @@ public final class {{.Business.EntityClass}}Service {
     }
 
     private static void requireActor(Principal actor) {
-        if (actor == null || actor.userId() == null || actor.userId().isBlank()) {
+        if (actor == null
+                || actor.userId() == null
+                || actor.userId().isBlank(){{if .Tenancy}}
+                || actor.organizationId() == null
+                || actor.organizationId().isBlank(){{end}}) {
             throw invalid("authenticated actor is required");
         }
     }

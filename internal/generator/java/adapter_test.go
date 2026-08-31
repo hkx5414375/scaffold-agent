@@ -70,7 +70,7 @@ func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "requires both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
 			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "observability", Version: "0.1.0"}}
-		}, want: "capability packs"},
+		}, want: "not present in the catalog"},
 		{name: "module", mutate: func(project *spec.Project) { project.Spec.Modules = []spec.Module{{Name: "tasks"}} }, want: "exactly one entity"},
 	}
 	for _, test := range tests {
@@ -114,6 +114,62 @@ func TestGenerateSharedAdministrationProject(t *testing.T) {
 	if !strings.Contains(types, "priority?: string") ||
 		!strings.Contains(types, "version: string") {
 		t.Fatalf("generated administration types lose the decimal-string contract:\n%s", types)
+	}
+}
+
+func TestGenerateOrganizationTenancyForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyVersion,
+			}}
+			project.Spec.Modules = []spec.Module{businessModule()}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 69 ||
+				result.CapabilityLock[tenancyOwner] != tenancyVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/TenancyService.java",
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/OrganizationController.java",
+				"src/test/java/com/scaffold/generated/demoservice/tenancy/TenancyDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000050__organization_tenancy.sql",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != tenancyOwner {
+					t.Errorf("Generate() tenancy output %s is missing or has the wrong owner", path)
+				}
+			}
+			businessMigration := string(outputContent(
+				result, "src/main/resources/db/migration/V000100__tasks_task.sql",
+			))
+			if !strings.Contains(businessMigration, "organization_id") ||
+				!strings.Contains(businessMigration, "organizations") {
+				t.Fatalf("generated business migration is not tenant scoped:\n%s", businessMigration)
+			}
+			client := string(outputContent(result, "web/admin/src/api/client.ts"))
+			if !strings.Contains(client, "X-Organization-ID") {
+				t.Fatalf("generated administration client is not tenant aware:\n%s", client)
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated tenant OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/organizations:") ||
+				!strings.Contains(string(openAPI), "OrganizationHeader") {
+				t.Fatalf("generated OpenAPI is not tenant aware:\n%s", openAPI)
+			}
+		})
 	}
 }
 

@@ -6,6 +6,9 @@ import tools.jackson.databind.ser.std.ToStringSerializer;
 
 public record {{.Business.EntityClass}}(
         String id,
+{{- if .Tenancy}}
+        String organizationId,
+{{- end}}
 {{- range .Business.Fields}}
 {{- if eq .JavaType "Long"}}
         @JsonSerialize(using = ToStringSerializer.class) {{.EntityType}} {{.JavaName}},

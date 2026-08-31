@@ -41,6 +41,15 @@ cookie, while automation uses `Authorization: Bearer <token>`. Raw session and A
 tokens are returned only to their owners and only SHA-256 digests are persisted.
 Database errors are never returned to clients. The HTTP contract is
 `api/openapi.yaml`.
+{{if .Tenancy}}
+
+Authenticated users create and discover organizations through
+`POST /api/v1/organizations` and `GET /api/v1/organizations`. Every business
+request must send the selected organization in `X-Organization-ID`. Authorization
+uses that user's membership role, and every business query and mutation includes
+the same organization predicate; never bypass the generated tenant service or
+repository methods.
+{{end}}
 {{if .Admin}}
 
 ## Administration UI

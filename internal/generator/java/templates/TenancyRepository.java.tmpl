@@ -1,0 +1,24 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface TenancyRepository {
+
+    void createOrganization(
+            Organization organization,
+            String userId,
+            String role,
+            Instant createdAt,
+            AuditEvent auditEvent);
+
+    List<Organization> listOrganizations(String userId);
+
+    Optional<String> membershipRole(String organizationId, String userId);
+
+    boolean hasPermission(String role, String permission);
+
+    void appendAudit(AuditEvent auditEvent);
+}

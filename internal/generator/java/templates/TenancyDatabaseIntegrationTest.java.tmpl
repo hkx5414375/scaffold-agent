@@ -1,13 +1,18 @@
-package {{.PackageName}}.identity;
+package {{.PackageName}}.tenancy;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Clock;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Assumptions;
@@ -18,16 +23,16 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
-class IdentityDatabaseIntegrationTest {
+class TenancyDatabaseIntegrationTest {
 
     @Test
     @Timeout(30)
-    void migratesAndPersistsIdentitySecurityTransactions() throws SQLException {
+    void migratesAndEnforcesMembershipScopedAuthorization() throws SQLException {
         String adminUrl = environment("TEST_DATABASE_URL");
         Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
         String username = environment("TEST_DATABASE_USER");
         String password = environment("TEST_DATABASE_PASSWORD");
-        String scope = "scaffold_java_" + UUID.randomUUID().toString().replace("-", "");
+        String scope = "scaffold_java_tenancy_" + UUID.randomUUID().toString().replace("-", "");
         String applicationUrl;
 {{- if eq .Database.Engine "postgresql"}}
         execute(adminUrl, username, password, "create schema " + scope);
@@ -40,63 +45,53 @@ class IdentityDatabaseIntegrationTest {
             DriverManagerDataSource dataSource =
                     new DriverManagerDataSource(applicationUrl, username, password);
             Flyway flyway = Flyway.configure().dataSource(dataSource).load();
-            assertThat(flyway.migrate().migrationsExecuted)
-                    .isEqualTo({{if .Business}}{{if .Tenancy}}3{{else}}2{{end}}{{else}}{{if .Tenancy}}2{{else}}1{{end}}{{end}});
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{if .Business}}3{{else}}2{{end}});
             assertThat(flyway.migrate().migrationsExecuted).isZero();
 
             JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
-            JdbcIdentityRepository repository =
-                    new JdbcIdentityRepository(
-                            jdbcTemplate,
-                            new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
-            IdentityService service =
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identityService =
                     new IdentityService(
-                            repository,
+                            new JdbcIdentityRepository(jdbcTemplate, transactions),
                             new PasswordHasher(),
-                            new TokenCodec(),
-                            Clock.systemUTC());
-            String passwordValue = "correct horse battery staple";
-            service.ensureAdmin("admin@example.com", passwordValue);
-            IdentityService.LoginResult login =
-                    service.login(
-                            "admin@example.com", passwordValue, "127.0.0.1", "integration-test");
-            assertThat(service.authenticate(login.token(), "").userId())
-                    .isEqualTo(login.principal().userId());
+                            new TokenCodec());
+            identityService.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal actor =
+                    identityService
+                            .login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
 
-            service.authorize(
-                    login.principal(),
-                    "identity:token:create",
-                    "127.0.0.1",
-                    "integration-test");
-            IdentityService.ApiTokenResult apiToken =
-                    service.createApiToken(login.principal(), "integration");
-            assertThat(service.authenticate("", apiToken.token()).method()).isEqualTo("token");
-
+            TenancyService service =
+                    new TenancyService(new JdbcTenancyRepository(jdbcTemplate, transactions));
+            Organization organization = service.create("Acme", actor);
+            assertThat(service.list(actor)).containsExactly(organization);
+            Principal scoped =
+                    service.authorize(
+                            actor,
+                            organization.id(),
+                            "identity:token:create",
+                            "127.0.0.1",
+                            "integration-test");
+            assertThat(scoped.organizationId()).isEqualTo(organization.id());
             assertThatThrownBy(
                             () ->
-                                    service.login(
-                                            "admin@example.com",
-                                            "incorrect password",
+                                    service.authorize(
+                                            actor,
+                                            "unknown",
+                                            "identity:token:create",
                                             "127.0.0.1",
                                             "integration-test"))
                     .isInstanceOf(IdentityException.class);
-            Integer auditCount =
-                    jdbcTemplate.queryForObject(
-                            "select count(*) from audit_events where action like 'identity.%'",
-                            Integer.class);
-            assertThat(auditCount).isEqualTo(3);
             assertThat(
                             jdbcTemplate.queryForObject(
-                                    "select count(*) from identity_sessions where token_hash = ?",
-                                    Integer.class,
-                                    login.token()))
-                    .isZero();
-            assertThat(
-                            jdbcTemplate.queryForObject(
-                                    "select count(*) from identity_api_tokens where token_hash = ?",
-                                    Integer.class,
-                                    apiToken.token()))
-                    .isZero();
+                                    "select count(*) from audit_events where action like 'tenancy.%'",
+                                    Integer.class))
+                    .isEqualTo(2);
         } finally {
 {{- if eq .Database.Engine "postgresql"}}
             execute(adminUrl, username, password, "drop schema " + scope + " cascade");

@@ -272,27 +272,35 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 }
 
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", false, false)
+	runGeneratedJavaReference(t, "postgresql", false, false, false)
 }
 
 func TestJavaMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", false, false)
+	runGeneratedJavaReference(t, "mysql", false, false, false)
 }
 
 func TestJavaPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true, false)
+	runGeneratedJavaReference(t, "postgresql", true, false, false)
 }
 
 func TestJavaMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true, false)
+	runGeneratedJavaReference(t, "mysql", true, false, false)
 }
 
 func TestJavaPostgreSQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true, true)
+	runGeneratedJavaReference(t, "postgresql", true, true, false)
 }
 
 func TestJavaMySQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true, true)
+	runGeneratedJavaReference(t, "mysql", true, true, false)
+}
+
+func TestJavaPostgreSQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql", true, true, true)
+}
+
+func TestJavaMySQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql", true, true, true)
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -551,7 +559,7 @@ WORKFLOWS
 	}
 }
 
-func runGeneratedJavaReference(t *testing.T, database string, business, admin bool) {
+func runGeneratedJavaReference(t *testing.T, database string, business, admin, tenancy bool) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -569,6 +577,7 @@ spec:
     engine: DATABASE_ENGINE
   auth:
     modes: [session, token]
+CAPABILITIES
 MODULES
 `
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
@@ -577,6 +586,14 @@ MODULES
 		adminUI = "element-plus"
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
+	capabilities := ""
+	if tenancy {
+		capabilities = `  capabilities:
+    - name: organization-tenancy
+      version: 0.1.0
+`
+	}
+	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
 	if business {
 		modules = `  modules:
@@ -611,6 +628,9 @@ MODULES
 	if admin {
 		wantChanges += 20
 	}
+	if tenancy {
+		wantChanges += 9
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -619,6 +639,9 @@ MODULES
 	}
 	if admin && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
+	}
+	if tenancy && plannedData.CapabilityLock["organization-tenancy"] != "0.1.0" {
+		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

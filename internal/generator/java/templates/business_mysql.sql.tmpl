@@ -12,11 +12,23 @@ insert into identity_role_permissions (role_code, permission_code) values
 
 create table {{sql .Business.TableName}} (
     id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- end}}
 {{- range .Business.Fields}}
-    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
+    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if and .Unique (not $.Tenancy)}} unique{{end}},
 {{- end}}
     version bigint not null default 1 check (version > 0),
     created_at datetime(6) not null,
     updated_at datetime(6) not null,
-    index business_created_at_idx (created_at desc, id)
+{{- if .Tenancy}}
+    constraint business_organization_fk foreign key (organization_id)
+        references organizations (id) on delete cascade,
+{{- range .Business.Fields}}
+{{- if .Unique}}
+    unique (organization_id, {{sql .Name}}),
+{{- end}}
+{{- end}}
+{{- end}}
+    index business_created_at_idx ({{if .Tenancy}}organization_id, {{end}}created_at desc, id)
 ) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

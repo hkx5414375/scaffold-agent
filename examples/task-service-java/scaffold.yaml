@@ -14,6 +14,9 @@ spec:
     modes:
       - session
       - token
+  capabilities:
+    - name: organization-tenancy
+      version: 0.1.0
   modules:
     - name: tasks
       entities:

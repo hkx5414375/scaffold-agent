@@ -69,7 +69,8 @@ class IdentityServiceTest {
                 .isEqualTo(IdentityException.Kind.INVALID_CREDENTIALS);
 
         User user = repository.usersByEmail.get("admin@example.com");
-        Principal principal = new Principal(user.id(), user.email(), user.role(), "session");
+        Principal principal =
+                new Principal(user.id(), user.email(), user.role(), "session"{{if .Tenancy}}, ""{{end}});
         assertThatThrownBy(
                         () ->
                                 service.authorize(

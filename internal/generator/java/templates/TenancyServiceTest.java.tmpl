@@ -1,0 +1,114 @@
+package {{.PackageName}}.tenancy;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class TenancyServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final Principal ACTOR =
+            new Principal("user-1", "owner@example.com", "user", "session", "");
+
+    @Test
+    void createsListsAndAuthorizesOrganizationMembership() {
+        FakeRepository repository = new FakeRepository();
+        TenancyService service =
+                new TenancyService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        Organization organization = service.create(" Acme ", ACTOR);
+        assertThat(organization.name()).isEqualTo("Acme");
+        assertThat(organization.role()).isEqualTo("admin");
+        assertThat(service.list(ACTOR)).containsExactly(organization);
+
+        Principal authorized =
+                service.authorize(
+                        ACTOR,
+                        organization.id(),
+                        "identity:token:create",
+                        "127.0.0.1",
+                        "test");
+        assertThat(authorized.organizationId()).isEqualTo(organization.id());
+        assertThat(authorized.role()).isEqualTo("admin");
+        assertThat(repository.audits)
+                .extracting(AuditEvent::action)
+                .containsExactly("tenancy.organization:create");
+    }
+
+    @Test
+    void deniesUnknownMembershipAndAuditsWithoutLeakingExistence() {
+        FakeRepository repository = new FakeRepository();
+        TenancyService service =
+                new TenancyService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(
+                        () ->
+                                service.authorize(
+                                        ACTOR,
+                                        "unknown",
+                                        "tasks:task:read",
+                                        "127.0.0.1",
+                                        "test"))
+                .isInstanceOf(IdentityException.class);
+        assertThat(repository.audits.getLast().outcome()).isEqualTo("denied");
+        assertThat(repository.audits.getLast().target())
+                .isEqualTo("unknown:tasks:task:read");
+    }
+
+    private static final class FakeRepository implements TenancyRepository {
+
+        private Organization organization;
+        private String userId;
+        private String role;
+        private final List<AuditEvent> audits = new ArrayList<>();
+
+        @Override
+        public void createOrganization(
+                Organization value,
+                String memberUserId,
+                String memberRole,
+                Instant createdAt,
+                AuditEvent auditEvent) {
+            organization = value;
+            userId = memberUserId;
+            role = memberRole;
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public List<Organization> listOrganizations(String memberUserId) {
+            return organization != null && userId.equals(memberUserId)
+                    ? List.of(organization)
+                    : List.of();
+        }
+
+        @Override
+        public Optional<String> membershipRole(String organizationId, String memberUserId) {
+            return organization != null
+                            && organization.id().equals(organizationId)
+                            && userId.equals(memberUserId)
+                    ? Optional.of(role)
+                    : Optional.empty();
+        }
+
+        @Override
+        public boolean hasPermission(String memberRole, String permission) {
+            return role.equals(memberRole) && "identity:token:create".equals(permission);
+        }
+
+        @Override
+        public void appendAudit(AuditEvent auditEvent) {
+            audits.add(auditEvent);
+        }
+    }
+}
