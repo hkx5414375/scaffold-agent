@@ -39,6 +39,8 @@ const (
 	cacheVersion            = "0.1.0"
 	jobAdminCapability      = "job-administration"
 	jobAdminVersion         = "0.1.0"
+	observabilityCapability = "observability"
+	observabilityVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -262,6 +264,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: observabilityCapability, Version: observabilityVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Request correlation, safe access logs, HTTP metrics, and database readiness",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -322,6 +334,11 @@ var jobAdminTemplates = map[string]string{
 	"internal/jobadmin/service_test.go":         "templates/jobadmin_test.go.tmpl",
 	"internal/jobadmin/httpapi/handler.go":      "templates/jobadmin_handler.go.tmpl",
 	"internal/jobadmin/httpapi/handler_test.go": "templates/jobadmin_handler_test.go.tmpl",
+}
+
+var observabilityTemplates = map[string]string{
+	"internal/platform/observability/observability.go":      "templates/observability.go.tmpl",
+	"internal/platform/observability/observability_test.go": "templates/observability_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -393,6 +410,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	filesEnabled := false
 	cacheEnabled := false
 	jobAdminEnabled := false
+	observabilityEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -419,6 +437,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == jobAdminCapability {
 			jobAdminEnabled = true
 		}
+		if pack.Metadata.Name == observabilityCapability {
+			observabilityEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
@@ -438,6 +459,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Files:            filesEnabled,
 		Cache:            cacheEnabled,
 		JobAdmin:         jobAdminEnabled,
+		Observability:    observabilityEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -597,6 +619,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if observabilityEnabled {
+		for path, templatePath := range observabilityTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: observabilityCapability}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -661,6 +688,7 @@ type templateData struct {
 	Files            bool
 	Cache            bool
 	JobAdmin         bool
+	Observability    bool
 	MigrationCount   int
 }
 

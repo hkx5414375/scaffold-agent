@@ -31,6 +31,10 @@ storage, tenant-aware keys, bounded JSON values, and explicit TTL cleanup.
 It also contains `job-administration` with payload-free status inspection and
 audited dead-job retry. Only administrators receive its permissions.
 {{end}}
+{{if .Observability}}
+It also contains `observability` with request correlation, safe structured access
+logs, low-cardinality Prometheus metrics, and bounded database readiness.
+{{end}}
 
 ## Requirements
 
@@ -101,6 +105,9 @@ runtime secret store; queued message bodies are sensitive database content.
 ## HTTP API
 
 - `GET /healthz`
+{{if .Observability}}- `GET /readyz`
+- `GET /metrics`
+{{end}}
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/logout`
 - `GET /api/v1/auth/me`
@@ -142,6 +149,13 @@ runtime secret store; queued message bodies are sensitive database content.
 
 Browser authentication uses an HttpOnly, SameSite=Lax cookie. Automation uses
 `Authorization: Bearer <token>`. Only token digests and password hashes are stored.
+{{if .Observability}}
+Every response includes a validated or generated `X-Request-ID`. Access logs omit
+query strings and bodies. `/readyz` waits at most two seconds for the database and
+returns only a generic status; `/metrics` exposes aggregate process counters with
+no user-derived labels. Protect these operational endpoints at the deployment
+boundary when they are not intended for public network access.
+{{end}}
 {{if .Tenancy}}
 Create an organization after signing in, then send its identifier in
 `X-Organization-ID` for every protected business request. The generated stores

@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器。生成项目已包含安全认证、权限码 RBAC、事务审计、Blueprint 驱动的 CRUD、OpenAPI 3.1，以及经过真实构建验证的 Vue/Element Plus 管理端。版本化能力包现已提供租户隔离、安全组织生命周期、可靠后台 Worker、带审计的死信任务管理、幂等且强制 TLS 的邮件通知、带原子本地存储的租户文件资产，以及跨实例一致的数据库 TTL 缓存。Nuxt 商城和更广的能力包仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器。生成项目已包含安全认证、权限码 RBAC、事务审计、Blueprint 驱动的 CRUD、OpenAPI 3.1，以及经过真实构建验证的 Vue/Element Plus 管理端。版本化能力包现已提供租户隔离、安全组织生命周期、可靠后台 Worker、带审计的死信任务管理、幂等且强制 TLS 的邮件通知、带原子本地存储的租户文件资产、跨实例一致的数据库 TTL 缓存，以及包含数据库就绪检查的安全 HTTP 可观测性。Nuxt 商城和更广的能力包仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 
@@ -51,6 +51,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/notification-task
 go run ./cmd/scaffold-agent validate --project-root ./examples/file-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/cache-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/job-admin-task-service --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/observability-task-service --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

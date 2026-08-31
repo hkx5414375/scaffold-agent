@@ -13,21 +13,30 @@ const defaultReadHeaderTimeout = 5 * time.Second
 // RegisterRoutes adds one feature's routes to the application mux.
 type RegisterRoutes func(*http.ServeMux)
 
+// Middleware wraps the complete routing tree.
+type Middleware func(http.Handler) http.Handler
+
 // NewHandler returns the complete HTTP routing tree.
-func NewHandler(register RegisterRoutes) http.Handler {
+func NewHandler(register RegisterRoutes, middlewares ...Middleware) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
 	if register != nil {
 		register(mux)
 	}
-	return mux
+	var handler http.Handler = mux
+	for index := len(middlewares) - 1; index >= 0; index-- {
+		if middlewares[index] != nil {
+			handler = middlewares[index](handler)
+		}
+	}
+	return handler
 }
 
 // New returns a production-safe HTTP server with bounded header reads.
-func New(address string, register RegisterRoutes) *http.Server {
+func New(address string, register RegisterRoutes, middlewares ...Middleware) *http.Server {
 	return &http.Server{
 		Addr:              address,
-		Handler:           NewHandler(register),
+		Handler:           NewHandler(register, middlewares...),
 		ReadHeaderTimeout: defaultReadHeaderTimeout,
 	}
 }

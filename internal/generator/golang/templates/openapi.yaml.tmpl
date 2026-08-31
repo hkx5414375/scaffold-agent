@@ -22,6 +22,44 @@ paths:
                   status:
                     type: string
                     const: ok
+{{if .Observability}}
+  /readyz:
+    get:
+      operationId: getReadiness
+      responses:
+        "200":
+          description: Process and database are ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ready
+        "503":
+          description: Database is unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: unavailable
+  /metrics:
+    get:
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Low-cardinality Prometheus process metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+{{end}}
   /api/v1/auth/login:
     post:
       operationId: login

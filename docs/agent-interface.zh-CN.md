@@ -40,6 +40,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 选择 `job-administration` `0.1.0` 会自动解析 `background-jobs` `0.1.x`。管理员可以查看有界的任务元数据，并且只能重试死信任务。所有公开类型都故意排除了载荷和幂等键。AI 不得增加载荷查看或编辑、重试运行中任务、绕过组织范围，或在生成的事务服务之外直接更新任务表。
 
+选择 `observability` `0.1.0` 后，生成项目会加入经过校验或自动生成的请求 ID、不记录查询字符串与正文的结构化访问日志、低基数 Prometheus 计数器，以及最多等待两秒的数据库就绪检查。`GET /metrics` 只暴露进程聚合值；`GET /readyz` 在数据库不可用时只返回通用 503，不会泄露数据库错误。AI 应在已有 `X-Request-ID` 时继续传递，但不得把用户输入放进指标标签，也不得把请求正文、凭据、查询字符串或 Panic 内容写入日志。
+
 ## STDIO 协议
 
 启动服务：

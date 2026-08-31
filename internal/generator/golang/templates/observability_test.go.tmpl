@@ -1,0 +1,80 @@
+package observability
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func TestMiddlewareCorrelatesAndCountsRequests(t *testing.T) {
+	observer := New()
+	handler := observer.Middleware(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if RequestID(request.Context()) != "request_123" {
+			t.Fatalf("RequestID() = %q", RequestID(request.Context()))
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/resource?secret=hidden", nil)
+	request.Header.Set(requestIDHeader, "request_123")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || response.Header().Get(requestIDHeader) != "request_123" {
+		t.Fatalf("response = %d, request ID = %q", response.Code, response.Header().Get(requestIDHeader))
+	}
+
+	metrics := httptest.NewRecorder()
+	observer.Metrics(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metrics.Body.String(), "scaffold_http_requests_total 1") ||
+		!strings.Contains(metrics.Body.String(), "scaffold_http_requests_in_flight 0") ||
+		!strings.Contains(metrics.Body.String(), "scaffold_http_request_duration_seconds_count 1") {
+		t.Fatalf("metrics = %s", metrics.Body.String())
+	}
+}
+
+func TestMiddlewareReplacesUnsafeIDAndRecoversPanic(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	observer := New()
+	handler := observer.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("do not expose this panic value")
+	}))
+	request := httptest.NewRequest(http.MethodGet, "/panic?token=hidden", nil)
+	request.Header.Set(requestIDHeader, "unsafe header\nvalue")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "panic value") {
+		t.Fatalf("panic response = %d, %s", response.Code, response.Body.String())
+	}
+	if value := response.Header().Get(requestIDHeader); !validRequestID(value) || value == "unsafe header\nvalue" {
+		t.Fatalf("replacement request ID = %q", value)
+	}
+	metrics := httptest.NewRecorder()
+	observer.Metrics(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metrics.Body.String(), "scaffold_http_failures_total 1") {
+		t.Fatalf("metrics = %s", metrics.Body.String())
+	}
+	if strings.Contains(logs.String(), "do not expose") || strings.Contains(logs.String(), "token=hidden") {
+		t.Fatalf("logs exposed private request data: %s", logs.String())
+	}
+}
+
+func TestReadyHidesCheckFailure(t *testing.T) {
+	success := httptest.NewRecorder()
+	Ready(func(context.Context) error { return nil }).ServeHTTP(success, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if success.Code != http.StatusOK || !strings.Contains(success.Body.String(), `"ready"`) {
+		t.Fatalf("ready response = %d, %s", success.Code, success.Body.String())
+	}
+	failure := httptest.NewRecorder()
+	Ready(func(context.Context) error { return errors.New("database secret must stay hidden") }).ServeHTTP(failure, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if failure.Code != http.StatusServiceUnavailable || strings.Contains(failure.Body.String(), "database secret") {
+		t.Fatalf("failure response = %d, %s", failure.Code, failure.Body.String())
+	}
+}

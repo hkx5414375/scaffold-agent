@@ -223,6 +223,22 @@ func TestGoNotificationsAndJobAdministrationCompose(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", notificationsJobAdminSelection, "0.3.0", 88, false)
 }
 
+func TestGoTenantObservabilityPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyObservabilitySelection, "0.3.0", 69, false)
+}
+
+func TestGoTenantObservabilityMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyObservabilitySelection, "0.3.0", 70, false)
+}
+
+func TestGoObservabilityWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", observabilitySelection, "", 49, false)
+}
+
+func TestGoObservabilityWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", observabilitySelection, "", 50, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -307,6 +323,18 @@ const notificationsJobAdminSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyObservabilitySelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: observability
+      version: 0.1.0
+`
+
+const observabilitySelection = `  capabilities:
+    - name: observability
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -379,6 +407,9 @@ CAPABILITIES
 		if plannedData.CapabilityLock["job-administration"] != "0.1.0" || plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
 			t.Fatalf("Plan() job administration lock = %#v", plannedData.CapabilityLock)
 		}
+	}
+	if strings.Contains(capabilities, "observability") && plannedData.CapabilityLock["observability"] != "0.1.0" {
+		t.Fatalf("Plan() observability lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

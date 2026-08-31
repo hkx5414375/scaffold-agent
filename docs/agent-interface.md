@@ -99,6 +99,14 @@ all public types. Agents must not add payload viewing or editing, retry running
 jobs, bypass organization scope, or update queue rows outside the generated
 transactional service.
 
+Selecting `observability` version `0.1.0` adds validated or generated request IDs,
+structured access logs without query strings or bodies, low-cardinality
+Prometheus counters, and a two-second database readiness probe. `GET /metrics`
+contains only aggregate process values; `GET /readyz` returns a generic 503 and
+never exposes a database error. Agents should propagate `X-Request-ID` when it is
+available, keep user-derived values out of metric labels, and must not add request
+bodies, credentials, query strings, or panic values to logs.
+
 ## STDIO protocol
 
 Run the server with:

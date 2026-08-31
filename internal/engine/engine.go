@@ -84,6 +84,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"tenant-aware-file-assets",
 				"cross-instance-application-cache",
 				"background-job-administration",
+				"http-observability-and-readiness",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

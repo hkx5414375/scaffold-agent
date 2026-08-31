@@ -1,0 +1,177 @@
+// Package observability provides low-cardinality HTTP telemetry and readiness.
+package observability
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+const (
+	requestIDHeader = "X-Request-ID"
+	readinessTimeout = 2 * time.Second
+)
+
+type requestIDContextKey struct{}
+
+// Observer owns process-local HTTP counters and correlation middleware.
+type Observer struct {
+	requests            atomic.Int64
+	inFlight            atomic.Int64
+	failures            atomic.Int64
+	durationNanoseconds atomic.Int64
+}
+
+// New returns an empty process observer.
+func New() *Observer {
+	return &Observer{}
+}
+
+// Middleware adds request correlation, panic isolation, counters, and safe access logs.
+func (observer *Observer) Middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestID := strings.TrimSpace(request.Header.Get(requestIDHeader))
+		if !validRequestID(requestID) {
+			requestID = rand.Text()
+		}
+		response.Header().Set(requestIDHeader, requestID)
+		request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, requestID))
+		recorder := &statusRecorder{ResponseWriter: response, status: http.StatusOK}
+		started := time.Now()
+		observer.inFlight.Add(1)
+		defer func() {
+			recovered := recover()
+			if recovered != nil {
+				observer.failures.Add(1)
+				if !recorder.wroteHeader {
+					recorder.Header().Set("Content-Type", "application/json; charset=utf-8")
+					recorder.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(recorder, `{"error":{"code":"internal.error","message":"the request could not be completed"}}`+"\n")
+				} else {
+					recorder.status = http.StatusInternalServerError
+				}
+				slog.Error("recovered HTTP panic", "request_id", requestID)
+			}
+			duration := time.Since(started)
+			observer.requests.Add(1)
+			observer.inFlight.Add(-1)
+			observer.durationNanoseconds.Add(duration.Nanoseconds())
+			if recorder.status >= http.StatusInternalServerError && recovered == nil {
+				observer.failures.Add(1)
+			}
+			slog.Info("HTTP request",
+				"request_id", requestID,
+				"method", request.Method,
+				"path", request.URL.Path,
+				"status", recorder.status,
+				"duration_ms", duration.Milliseconds(),
+			)
+		}()
+		next.ServeHTTP(recorder, request)
+	})
+}
+
+// Metrics writes a Prometheus text snapshot without labels derived from user input.
+func (observer *Observer) Metrics(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	durationSeconds := float64(observer.durationNanoseconds.Load()) / float64(time.Second)
+	_, _ = fmt.Fprintf(response, "# TYPE scaffold_http_requests_total counter\nscaffold_http_requests_total %d\n", observer.requests.Load())
+	_, _ = fmt.Fprintf(response, "# TYPE scaffold_http_requests_in_flight gauge\nscaffold_http_requests_in_flight %d\n", observer.inFlight.Load())
+	_, _ = fmt.Fprintf(response, "# TYPE scaffold_http_failures_total counter\nscaffold_http_failures_total %d\n", observer.failures.Load())
+	_, _ = fmt.Fprintf(response, "# TYPE scaffold_http_request_duration_seconds summary\nscaffold_http_request_duration_seconds_sum %s\nscaffold_http_request_duration_seconds_count %d\n",
+		strconv.FormatFloat(durationSeconds, 'f', 6, 64), observer.requests.Load())
+}
+
+// Ready returns a bounded database-backed readiness handler.
+func Ready(check func(context.Context) error) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		if check == nil {
+			writeStatus(response, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
+		ctx, cancel := context.WithTimeout(request.Context(), readinessTimeout)
+		defer cancel()
+		if err := check(ctx); err != nil {
+			writeStatus(response, http.StatusServiceUnavailable, "unavailable")
+			return
+		}
+		writeStatus(response, http.StatusOK, "ready")
+	}
+}
+
+// RequestID returns the verified correlation identifier from request context.
+func RequestID(ctx context.Context) string {
+	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	return value
+}
+
+func writeStatus(response http.ResponseWriter, status int, value string) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.WriteHeader(status)
+	_, _ = fmt.Fprintf(response, `{"status":%q}`+"\n", value)
+}
+
+func validRequestID(value string) bool {
+	if len(value) < 8 || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '-' || character == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status         int
+	wroteHeader    bool
+}
+
+func (recorder *statusRecorder) WriteHeader(status int) {
+	if recorder.wroteHeader {
+		return
+	}
+	recorder.status, recorder.wroteHeader = status, true
+	recorder.ResponseWriter.WriteHeader(status)
+}
+
+func (recorder *statusRecorder) Write(content []byte) (int, error) {
+	if !recorder.wroteHeader {
+		recorder.WriteHeader(http.StatusOK)
+	}
+	return recorder.ResponseWriter.Write(content)
+}
+
+func (recorder *statusRecorder) Unwrap() http.ResponseWriter {
+	return recorder.ResponseWriter
+}
+
+func (recorder *statusRecorder) Flush() {
+	_ = http.NewResponseController(recorder.ResponseWriter).Flush()
+}
+
+func (recorder *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(recorder.ResponseWriter).Hijack()
+}
+
+func (recorder *statusRecorder) ReadFrom(source io.Reader) (int64, error) {
+	if !recorder.wroteHeader {
+		recorder.WriteHeader(http.StatusOK)
+	}
+	if destination, ok := recorder.ResponseWriter.(io.ReaderFrom); ok {
+		return destination.ReadFrom(source)
+	}
+	return io.Copy(recorder.ResponseWriter, source)
+}

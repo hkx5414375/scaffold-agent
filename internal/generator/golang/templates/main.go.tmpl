@@ -25,6 +25,9 @@ import (
 	"{{.ModulePath}}/internal/files/local"
 	filesdatabase "{{.ModulePath}}/internal/files/{{.Database.PackageName}}"
 {{- end}}
+{{- if .Observability}}
+	"{{.ModulePath}}/internal/platform/observability"
+{{- end}}
 {{- if .JobAdmin}}
 	"{{.ModulePath}}/internal/jobadmin"
 	jobadminhttp "{{.ModulePath}}/internal/jobadmin/httpapi"
@@ -93,6 +96,16 @@ func run() error {
 	jobAdminService := jobadmin.NewService(jobsdatabase.New(pool))
 	jobAdminAPI := jobadminhttp.New(jobAdminService)
 {{- end}}
+{{- if .Observability}}
+	observer := observability.New()
+	readiness := observability.Ready(func(ctx context.Context) error {
+{{- if eq .Database.Engine "postgresql"}}
+		return pool.Ping(ctx)
+{{- else}}
+		return pool.PingContext(ctx)
+{{- end}}
+	})
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -113,6 +126,10 @@ func run() error {
 	{{- end}}
 	registerRoutes := func(mux *http.ServeMux) {
 		identityAPI.Register(mux)
+{{- if .Observability}}
+		mux.HandleFunc("GET /metrics", observer.Metrics)
+		mux.HandleFunc("GET /readyz", readiness)
+{{- end}}
 {{- if .Files}}
 		fileAPI.Register(mux, identityAPI)
 {{- end}}
@@ -136,7 +153,7 @@ func run() error {
 	if address == "" {
 		address = ":8080"
 	}
-	server := httpserver.New(address, registerRoutes)
+	server := httpserver.New(address, registerRoutes{{if .Observability}}, observer.Middleware{{end}})
 	serveError := make(chan error, 1)
 	go func() {
 		slog.Info("start HTTP server", "address", address)

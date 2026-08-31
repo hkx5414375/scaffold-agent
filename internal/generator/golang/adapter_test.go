@@ -610,6 +610,38 @@ func TestGenerateJobAdministrationResolvesBackgroundJobs(t *testing.T) {
 	}
 }
 
+func TestGenerateObservabilityCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: observabilityCapability, Version: observabilityVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[observabilityCapability] != observabilityVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, path := range []string{
+		"internal/platform/observability/observability.go",
+		"internal/platform/observability/observability_test.go",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	mainSource := string(outputContent(generated, "cmd/server/main.go"))
+	openAPI := string(outputContent(generated, "api/openapi.yaml"))
+	if !strings.Contains(mainSource, `mux.HandleFunc("GET /readyz", readiness)`) ||
+		!strings.Contains(openAPI, "/metrics:") || !strings.Contains(openAPI, "/readyz:") {
+		t.Fatal("Generate() did not wire observability routes and readiness")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated observability OpenAPI is invalid YAML: %v", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 
