@@ -30,7 +30,7 @@ func TestGenerateFoundationForBothDatabases(t *testing.T) {
 			if !reflect.DeepEqual(first, second) {
 				t.Fatal("Generate() is not deterministic")
 			}
-			if first.CapabilityLock[baseOwner] != baseVersion || len(first.Outputs) != 11 {
+			if first.CapabilityLock[baseOwner] != baseVersion || len(first.Outputs) != 31 {
 				t.Fatalf("Generate() result = %#v", first)
 			}
 			for _, path := range []string{
@@ -38,6 +38,9 @@ func TestGenerateFoundationForBothDatabases(t *testing.T) {
 				"api/openapi.yaml",
 				"src/main/java/com/scaffold/generated/demoservice/Application.java",
 				"src/main/java/com/scaffold/generated/demoservice/http/HealthController.java",
+				"src/main/java/com/scaffold/generated/demoservice/http/AuthController.java",
+				"src/main/java/com/scaffold/generated/demoservice/identity/IdentityService.java",
+				"src/main/resources/db/migration/V000001__identity.sql",
 				"src/test/java/com/scaffold/generated/demoservice/architecture/ArchitectureTest.java",
 			} {
 				if outputContent(first, path) == nil {

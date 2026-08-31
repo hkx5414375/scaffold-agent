@@ -1,0 +1,259 @@
+package {{.PackageName}}.identity;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class IdentityService {
+
+    private static final Duration SESSION_LIFETIME = Duration.ofHours(24);
+    private static final Duration API_TOKEN_LIFETIME = Duration.ofDays(90);
+    private static final int MAXIMUM_AUDIT_VALUE_LENGTH = 512;
+    private static final Pattern EMAIL_PATTERN =
+            Pattern.compile(
+                    "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+                            + "(?:[a-z0-9-]{0,61}[a-z0-9])?"
+                            + "(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$");
+
+    private final IdentityRepository repository;
+    private final PasswordHasher passwordHasher;
+    private final TokenCodec tokenCodec;
+    private final Clock clock;
+
+    public IdentityService(
+            IdentityRepository repository, PasswordHasher passwordHasher, TokenCodec tokenCodec) {
+        this(repository, passwordHasher, tokenCodec, Clock.systemUTC());
+    }
+
+    IdentityService(
+            IdentityRepository repository,
+            PasswordHasher passwordHasher,
+            TokenCodec tokenCodec,
+            Clock clock) {
+        this.repository = repository;
+        this.passwordHasher = passwordHasher;
+        this.tokenCodec = tokenCodec;
+        this.clock = clock;
+    }
+
+    public void ensureAdmin(String email, String password) {
+        String normalizedEmail = normalizeEmail(email);
+        Optional<User> existing = repository.findUserByEmail(normalizedEmail);
+        if (existing.isPresent()) {
+            requireUsableAdmin(existing.get());
+            return;
+        }
+        User administrator =
+                new User(
+                        newId(),
+                        normalizedEmail,
+                        passwordHasher.hash(password),
+                        "admin",
+                        false);
+        try {
+            repository.createUser(administrator);
+        } catch (RuntimeException exception) {
+            Optional<User> concurrent = repository.findUserByEmail(normalizedEmail);
+            if (concurrent.isPresent()) {
+                requireUsableAdmin(concurrent.get());
+                return;
+            }
+            throw exception;
+        }
+    }
+
+    public LoginResult login(String email, String password, String ipAddress, String userAgent) {
+        String normalizedEmail;
+        try {
+            normalizedEmail = normalizeEmail(email);
+        } catch (IdentityException exception) {
+            passwordHasher.verify(PasswordHasher.DUMMY_HASH, password);
+            denyLogin("", ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        Optional<User> candidate = repository.findUserByEmail(normalizedEmail);
+        if (candidate.isEmpty()) {
+            passwordHasher.verify(PasswordHasher.DUMMY_HASH, password);
+            denyLogin("", ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        User user = candidate.get();
+        if (user.disabled() || !passwordHasher.verify(user.passwordHash(), password)) {
+            denyLogin(user.id(), ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        String rawToken = tokenCodec.newToken();
+        Instant now = clock.instant();
+        repository.createSession(
+                tokenCodec.digest(rawToken),
+                user.id(),
+                now.plus(SESSION_LIFETIME),
+                audit(user.id(), "identity.login", "succeeded", "", ipAddress, userAgent, now));
+        return new LoginResult(rawToken, principal(user, "session"));
+    }
+
+    public Principal authenticate(String sessionToken, String bearerToken) {
+        Instant now = clock.instant();
+        Optional<User> user;
+        String method;
+        if (bearerToken != null && !bearerToken.isBlank()) {
+            user = repository.findUserByApiTokenHash(tokenCodec.digest(bearerToken), now);
+            method = "token";
+        } else if (sessionToken != null && !sessionToken.isBlank()) {
+            user = repository.findUserBySessionHash(tokenCodec.digest(sessionToken), now);
+            method = "session";
+        } else {
+            throw invalidCredentials();
+        }
+        if (user.isEmpty() || user.get().disabled()) {
+            throw invalidCredentials();
+        }
+        return principal(user.get(), method);
+    }
+
+    public void authorize(Principal actor, String permission, String ipAddress, String userAgent) {
+        if (actor == null || permission == null || permission.isBlank()) {
+            throw forbidden();
+        }
+        if (repository.hasPermission(actor.role(), permission)) {
+            return;
+        }
+        repository.appendAudit(
+                audit(
+                        actor.userId(),
+                        "identity.authorization",
+                        "denied",
+                        permission,
+                        ipAddress,
+                        userAgent,
+                        clock.instant()));
+        throw forbidden();
+    }
+
+    public void logout(String sessionToken) {
+        if (sessionToken != null && !sessionToken.isBlank()) {
+            repository.deleteSession(tokenCodec.digest(sessionToken));
+        }
+    }
+
+    public ApiTokenResult createApiToken(Principal owner, String name) {
+        if (owner == null || owner.userId().isBlank()) {
+            throw invalidCredentials();
+        }
+        String normalizedName = name == null ? "" : name.trim();
+        if (normalizedName.isEmpty() || normalizedName.length() > 80 || hasControl(normalizedName)) {
+            throw new IdentityException(
+                    IdentityException.Kind.INVALID_INPUT, "API token name is invalid");
+        }
+        String rawToken = tokenCodec.newToken();
+        String id = newId();
+        Instant now = clock.instant();
+        repository.createApiToken(
+                id,
+                tokenCodec.digest(rawToken),
+                owner.userId(),
+                normalizedName,
+                now.plus(API_TOKEN_LIFETIME),
+                audit(
+                        owner.userId(),
+                        "identity.api_token.create",
+                        "succeeded",
+                        id,
+                        "",
+                        "",
+                        now));
+        return new ApiTokenResult(rawToken);
+    }
+
+    private void denyLogin(String userId, String ipAddress, String userAgent) {
+        repository.appendAudit(
+                audit(
+                        userId,
+                        "identity.login",
+                        "denied",
+                        "",
+                        ipAddress,
+                        userAgent,
+                        clock.instant()));
+    }
+
+    private static AuditEvent audit(
+            String userId,
+            String action,
+            String outcome,
+            String target,
+            String ipAddress,
+            String userAgent,
+            Instant now) {
+        return new AuditEvent(
+                newId(),
+                safeAuditValue(userId),
+                action,
+                outcome,
+                safeAuditValue(target),
+                safeAuditValue(ipAddress),
+                safeAuditValue(userAgent),
+                now);
+    }
+
+    private static Principal principal(User user, String method) {
+        return new Principal(user.id(), user.email(), user.role(), method);
+    }
+
+    private static String normalizeEmail(String email) {
+        String normalized = email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
+        if (normalized.length() > 254 || !EMAIL_PATTERN.matcher(normalized).matches()) {
+            throw new IdentityException(
+                    IdentityException.Kind.INVALID_INPUT, "email address is invalid");
+        }
+        return normalized;
+    }
+
+    private static void requireUsableAdmin(User user) {
+        if (!"admin".equals(user.role()) || user.disabled()) {
+            throw new IdentityException(
+                    IdentityException.Kind.INVALID_INPUT,
+                    "bootstrap email belongs to a non-administrator or disabled account");
+        }
+    }
+
+    private static boolean hasControl(String value) {
+        return value.chars().anyMatch(character -> Character.isISOControl(character));
+    }
+
+    private static String safeAuditValue(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.chars()
+                .filter(character -> !Character.isISOControl(character))
+                .limit(MAXIMUM_AUDIT_VALUE_LENGTH)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+    }
+
+    private static IdentityException invalidCredentials() {
+        return new IdentityException(
+                IdentityException.Kind.INVALID_CREDENTIALS,
+                "email or password is incorrect");
+    }
+
+    private static IdentityException forbidden() {
+        return new IdentityException(
+                IdentityException.Kind.FORBIDDEN, "permission is required");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record LoginResult(String token, Principal principal) {}
+
+    public record ApiTokenResult(String token) {}
+}

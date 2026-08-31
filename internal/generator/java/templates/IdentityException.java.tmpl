@@ -1,0 +1,21 @@
+package {{.PackageName}}.identity;
+
+public final class IdentityException extends RuntimeException {
+
+    public enum Kind {
+        INVALID_CREDENTIALS,
+        FORBIDDEN,
+        INVALID_INPUT
+    }
+
+    private final Kind kind;
+
+    public IdentityException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

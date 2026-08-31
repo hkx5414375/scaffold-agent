@@ -1,0 +1,71 @@
+create table identity_roles (
+    code text primary key,
+    display_name text not null
+);
+
+create table identity_permissions (
+    code text primary key,
+    description text not null
+);
+
+create table identity_role_permissions (
+    role_code text not null references identity_roles (code) on delete cascade,
+    permission_code text not null references identity_permissions (code) on delete cascade,
+    primary key (role_code, permission_code)
+);
+
+insert into identity_roles (code, display_name) values
+    ('admin', 'Administrator'),
+    ('user', 'User');
+
+insert into identity_permissions (code, description) values
+    ('identity:token:create', 'Create a personal API token');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'identity:token:create'),
+    ('user', 'identity:token:create');
+
+create table identity_users (
+    id text primary key,
+    email varchar(254) not null unique,
+    password_hash text not null,
+    role text not null references identity_roles (code),
+    disabled boolean not null default false,
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+
+create table identity_sessions (
+    token_hash char(64) primary key,
+    user_id text not null references identity_users (id) on delete cascade,
+    expires_at timestamptz not null,
+    created_at timestamptz not null
+);
+
+create index identity_sessions_expiry_idx on identity_sessions (expires_at);
+
+create table identity_api_tokens (
+    id text primary key,
+    token_hash char(64) not null unique,
+    user_id text not null references identity_users (id) on delete cascade,
+    name varchar(80) not null,
+    expires_at timestamptz not null,
+    created_at timestamptz not null
+);
+
+create index identity_api_tokens_user_idx on identity_api_tokens (user_id);
+create index identity_api_tokens_expiry_idx on identity_api_tokens (expires_at);
+
+create table audit_events (
+    id text primary key,
+    user_id text references identity_users (id) on delete set null,
+    action text not null,
+    outcome text not null,
+    target text,
+    ip_address varchar(512),
+    user_agent varchar(512),
+    created_at timestamptz not null
+);
+
+create index audit_events_user_time_idx on audit_events (user_id, created_at desc);
+create index audit_events_action_time_idx on audit_events (action, created_at desc);

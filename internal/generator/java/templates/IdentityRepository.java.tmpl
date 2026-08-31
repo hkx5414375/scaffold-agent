@@ -1,0 +1,32 @@
+package {{.PackageName}}.identity;
+
+import java.time.Instant;
+import java.util.Optional;
+
+public interface IdentityRepository {
+
+    Optional<User> findUserByEmail(String email);
+
+    Optional<User> findUserBySessionHash(String tokenHash, Instant now);
+
+    Optional<User> findUserByApiTokenHash(String tokenHash, Instant now);
+
+    boolean hasPermission(String role, String permission);
+
+    void createUser(User user);
+
+    void createSession(
+            String tokenHash, String userId, Instant expiresAt, AuditEvent auditEvent);
+
+    void deleteSession(String tokenHash);
+
+    void createApiToken(
+            String id,
+            String tokenHash,
+            String userId,
+            String name,
+            Instant expiresAt,
+            AuditEvent auditEvent);
+
+    void appendAudit(AuditEvent auditEvent);
+}

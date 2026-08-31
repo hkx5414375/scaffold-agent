@@ -1,0 +1,94 @@
+package {{.PackageName}}.identity;
+
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.util.Arrays;
+import org.springframework.stereotype.Component;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.servlet.HandlerInterceptor;
+
+@Component
+public final class AuthenticationInterceptor implements HandlerInterceptor {
+
+    public static final String PRINCIPAL_ATTRIBUTE = "scaffoldPrincipal";
+    public static final String SESSION_COOKIE = "scaffold_session";
+
+    private static final int MAXIMUM_CREDENTIAL_LENGTH = 512;
+    private static final int MAXIMUM_AUDIT_VALUE_LENGTH = 512;
+
+    private final IdentityService identityService;
+
+    public AuthenticationInterceptor(IdentityService identityService) {
+        this.identityService = identityService;
+    }
+
+    @Override
+    public boolean preHandle(
+            HttpServletRequest request, HttpServletResponse response, Object handler) {
+        if (!(handler instanceof HandlerMethod handlerMethod)) {
+            return true;
+        }
+        String bearerToken = bearerToken(request.getHeader("Authorization"));
+        String sessionToken = sessionToken(request.getCookies());
+        Principal principal = identityService.authenticate(sessionToken, bearerToken);
+        RequirePermission required = handlerMethod.getMethodAnnotation(RequirePermission.class);
+        if (required == null) {
+            required = handlerMethod.getBeanType().getAnnotation(RequirePermission.class);
+        }
+        if (required != null) {
+            identityService.authorize(
+                    principal,
+                    required.value(),
+                    auditValue(request.getRemoteAddr()),
+                    auditValue(request.getHeader("User-Agent")));
+        }
+        request.setAttribute(PRINCIPAL_ATTRIBUTE, principal);
+        return true;
+    }
+
+    private static String bearerToken(String header) {
+        if (header == null || header.isBlank()) {
+            return "";
+        }
+        if (!header.startsWith("Bearer ")) {
+            throw invalidCredentials();
+        }
+        String token = header.substring("Bearer ".length()).trim();
+        if (token.isEmpty() || token.length() > MAXIMUM_CREDENTIAL_LENGTH) {
+            throw invalidCredentials();
+        }
+        return token;
+    }
+
+    private static String sessionToken(Cookie[] cookies) {
+        if (cookies == null) {
+            return "";
+        }
+        return Arrays.stream(cookies)
+                .filter(cookie -> SESSION_COOKIE.equals(cookie.getName()))
+                .map(Cookie::getValue)
+                .filter(value -> value != null && value.length() <= MAXIMUM_CREDENTIAL_LENGTH)
+                .findFirst()
+                .orElse("");
+    }
+
+    private static String auditValue(String value) {
+        if (value == null) {
+            return "";
+        }
+        String sanitized =
+                value.chars()
+                        .filter(character -> !Character.isISOControl(character))
+                        .limit(MAXIMUM_AUDIT_VALUE_LENGTH)
+                        .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                        .toString();
+        return sanitized;
+    }
+
+    private static IdentityException invalidCredentials() {
+        return new IdentityException(
+                IdentityException.Kind.INVALID_CREDENTIALS,
+                "valid session or bearer credentials are required");
+    }
+}

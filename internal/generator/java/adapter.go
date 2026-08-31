@@ -19,7 +19,7 @@ import (
 const (
 	backend     = "java"
 	baseOwner   = "java-service"
-	baseVersion = "0.1.0"
+	baseVersion = "0.2.0"
 )
 
 //go:embed all:templates
@@ -36,30 +36,33 @@ var outputTemplates = map[string]string{
 }
 
 type databaseData struct {
-	Engine           string
-	DisplayName      string
-	DriverGroupID    string
-	DriverArtifactID string
-	FlywayGroupID    string
-	FlywayArtifactID string
+	Engine                    string
+	DisplayName               string
+	DriverGroupID             string
+	DriverArtifactID          string
+	FlywayGroupID             string
+	FlywayArtifactID          string
+	IdentityMigrationTemplate string
 }
 
 var databases = map[string]databaseData{
 	"postgresql": {
-		Engine:           "postgresql",
-		DisplayName:      "PostgreSQL",
-		DriverGroupID:    "org.postgresql",
-		DriverArtifactID: "postgresql",
-		FlywayGroupID:    "org.flywaydb",
-		FlywayArtifactID: "flyway-database-postgresql",
+		Engine:                    "postgresql",
+		DisplayName:               "PostgreSQL",
+		DriverGroupID:             "org.postgresql",
+		DriverArtifactID:          "postgresql",
+		FlywayGroupID:             "org.flywaydb",
+		FlywayArtifactID:          "flyway-database-postgresql",
+		IdentityMigrationTemplate: "templates/identity_postgresql.sql.tmpl",
 	},
 	"mysql": {
-		Engine:           "mysql",
-		DisplayName:      "MySQL",
-		DriverGroupID:    "com.mysql",
-		DriverArtifactID: "mysql-connector-j",
-		FlywayGroupID:    "org.flywaydb",
-		FlywayArtifactID: "flyway-mysql",
+		Engine:                    "mysql",
+		DisplayName:               "MySQL",
+		DriverGroupID:             "com.mysql",
+		DriverArtifactID:          "mysql-connector-j",
+		FlywayGroupID:             "org.flywaydb",
+		FlywayArtifactID:          "flyway-mysql",
+		IdentityMigrationTemplate: "templates/identity_mysql.sql.tmpl",
 	},
 }
 
@@ -117,16 +120,36 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		PackagePath: "com/scaffold/generated/" + packageSegment,
 		Database:    database,
 	}
-	targets := make(map[string]string, len(outputTemplates)+4)
+	targets := make(map[string]string, len(outputTemplates)+20)
 	for path, templatePath := range outputTemplates {
 		targets[path] = templatePath
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
 	targets[mainRoot+"/Application.java"] = "templates/Application.java.tmpl"
+	targets[mainRoot+"/config/BootstrapAdmin.java"] = "templates/BootstrapAdmin.java.tmpl"
+	targets[mainRoot+"/config/WebConfiguration.java"] = "templates/WebConfiguration.java.tmpl"
+	targets[mainRoot+"/http/ApiError.java"] = "templates/ApiError.java.tmpl"
+	targets[mainRoot+"/http/ApiExceptionHandler.java"] = "templates/ApiExceptionHandler.java.tmpl"
+	targets[mainRoot+"/http/AuthController.java"] = "templates/AuthController.java.tmpl"
 	targets[mainRoot+"/http/HealthController.java"] = "templates/HealthController.java.tmpl"
+	targets[mainRoot+"/identity/AuditEvent.java"] = "templates/AuditEvent.java.tmpl"
+	targets[mainRoot+"/identity/AuthenticationInterceptor.java"] = "templates/AuthenticationInterceptor.java.tmpl"
+	targets[mainRoot+"/identity/IdentityException.java"] = "templates/IdentityException.java.tmpl"
+	targets[mainRoot+"/identity/IdentityRepository.java"] = "templates/IdentityRepository.java.tmpl"
+	targets[mainRoot+"/identity/IdentityService.java"] = "templates/IdentityService.java.tmpl"
+	targets[mainRoot+"/identity/JdbcIdentityRepository.java"] = "templates/JdbcIdentityRepository.java.tmpl"
+	targets[mainRoot+"/identity/PasswordHasher.java"] = "templates/PasswordHasher.java.tmpl"
+	targets[mainRoot+"/identity/Principal.java"] = "templates/Principal.java.tmpl"
+	targets[mainRoot+"/identity/RequirePermission.java"] = "templates/RequirePermission.java.tmpl"
+	targets[mainRoot+"/identity/TokenCodec.java"] = "templates/TokenCodec.java.tmpl"
+	targets[mainRoot+"/identity/User.java"] = "templates/User.java.tmpl"
 	targets[testRoot+"/http/HealthControllerTest.java"] = "templates/HealthControllerTest.java.tmpl"
+	targets[testRoot+"/identity/IdentityServiceTest.java"] = "templates/IdentityServiceTest.java.tmpl"
+	targets[testRoot+"/identity/IdentityDatabaseIntegrationTest.java"] = "templates/IdentityDatabaseIntegrationTest.java.tmpl"
+	targets[testRoot+"/identity/PasswordHasherTest.java"] = "templates/PasswordHasherTest.java.tmpl"
 	targets[testRoot+"/architecture/ArchitectureTest.java"] = "templates/ArchitectureTest.java.tmpl"
+	targets["src/main/resources/db/migration/V000001__identity.sql"] = database.IdentityMigrationTemplate
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {

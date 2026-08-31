@@ -1,0 +1,79 @@
+create table identity_roles (
+    code varchar(191) primary key,
+    display_name varchar(191) not null
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table identity_permissions (
+    code varchar(191) primary key,
+    description varchar(512) not null
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table identity_role_permissions (
+    role_code varchar(191) not null,
+    permission_code varchar(191) not null,
+    primary key (role_code, permission_code),
+    constraint identity_role_permission_role_fk foreign key (role_code)
+        references identity_roles (code) on delete cascade,
+    constraint identity_role_permission_permission_fk foreign key (permission_code)
+        references identity_permissions (code) on delete cascade
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+insert into identity_roles (code, display_name) values
+    ('admin', 'Administrator'),
+    ('user', 'User');
+
+insert into identity_permissions (code, description) values
+    ('identity:token:create', 'Create a personal API token');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'identity:token:create'),
+    ('user', 'identity:token:create');
+
+create table identity_users (
+    id varchar(191) primary key,
+    email varchar(254) not null unique,
+    password_hash varchar(512) not null,
+    role varchar(191) not null,
+    disabled boolean not null default false,
+    created_at datetime(6) not null,
+    updated_at datetime(6) not null,
+    constraint identity_user_role_fk foreign key (role) references identity_roles (code)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table identity_sessions (
+    token_hash char(64) primary key,
+    user_id varchar(191) not null,
+    expires_at datetime(6) not null,
+    created_at datetime(6) not null,
+    constraint identity_session_user_fk foreign key (user_id)
+        references identity_users (id) on delete cascade,
+    index identity_sessions_expiry_idx (expires_at)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table identity_api_tokens (
+    id varchar(191) primary key,
+    token_hash char(64) not null unique,
+    user_id varchar(191) not null,
+    name varchar(80) not null,
+    expires_at datetime(6) not null,
+    created_at datetime(6) not null,
+    constraint identity_api_token_user_fk foreign key (user_id)
+        references identity_users (id) on delete cascade,
+    index identity_api_tokens_user_idx (user_id),
+    index identity_api_tokens_expiry_idx (expires_at)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table audit_events (
+    id varchar(191) primary key,
+    user_id varchar(191) null,
+    action varchar(191) not null,
+    outcome varchar(32) not null,
+    target varchar(512) null,
+    ip_address varchar(512) null,
+    user_agent varchar(512) null,
+    created_at datetime(6) not null,
+    constraint audit_event_user_fk foreign key (user_id)
+        references identity_users (id) on delete set null,
+    index audit_events_user_time_idx (user_id, created_at desc),
+    index audit_events_action_time_idx (action, created_at desc)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

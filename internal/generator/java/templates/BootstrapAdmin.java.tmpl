@@ -1,0 +1,32 @@
+package {{.PackageName}}.config;
+
+import {{.PackageName}}.identity.IdentityService;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Component;
+
+@Component
+public final class BootstrapAdmin implements ApplicationRunner {
+
+    private final IdentityService identityService;
+    private final Environment environment;
+
+    public BootstrapAdmin(IdentityService identityService, Environment environment) {
+        this.identityService = identityService;
+        this.environment = environment;
+    }
+
+    @Override
+    public void run(ApplicationArguments arguments) {
+        String email = environment.getProperty("BOOTSTRAP_ADMIN_EMAIL", "").trim();
+        String password = environment.getProperty("BOOTSTRAP_ADMIN_PASSWORD", "");
+        if (email.isEmpty() != password.isEmpty()) {
+            throw new IllegalStateException(
+                    "BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must be set together");
+        }
+        if (!email.isEmpty()) {
+            identityService.ensureAdmin(email, password);
+        }
+    }
+}

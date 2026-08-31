@@ -89,6 +89,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"atomic-bounded-csv-import-export",
 				"portable-approval-workflows",
 				"java-spring-boot-foundation",
+				"java-session-token-identity",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

@@ -1,0 +1,159 @@
+package {{.PackageName}}.identity;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class IdentityServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void bootstrapsLogsInAuthenticatesAndCreatesApiTokens() {
+        MemoryRepository repository = new MemoryRepository();
+        IdentityService service = service(repository);
+        service.ensureAdmin("ADMIN@Example.com", "correct horse battery staple");
+
+        IdentityService.LoginResult login =
+                service.login(
+                        "admin@example.com",
+                        "correct horse battery staple",
+                        "127.0.0.1",
+                        "test-agent");
+
+        assertThat(login.principal().role()).isEqualTo("admin");
+        assertThat(service.authenticate(login.token(), "")).isEqualTo(login.principal());
+
+        repository.permissions.put("admin:identity:token:create", true);
+        service.authorize(
+                login.principal(), "identity:token:create", "127.0.0.1", "test-agent");
+        IdentityService.ApiTokenResult apiToken =
+                service.createApiToken(login.principal(), "automation");
+        Principal tokenPrincipal = service.authenticate("", apiToken.token());
+
+        assertThat(tokenPrincipal.userId()).isEqualTo(login.principal().userId());
+        assertThat(tokenPrincipal.method()).isEqualTo("token");
+        assertThat(repository.audits)
+                .extracting(AuditEvent::action)
+                .contains("identity.login", "identity.api_token.create");
+
+        service.logout(login.token());
+        assertThatThrownBy(() -> service.authenticate(login.token(), ""))
+                .isInstanceOf(IdentityException.class);
+    }
+
+    @Test
+    void deniesBadCredentialsAndUnauthorizedPermissionsWithAuditEvidence() {
+        MemoryRepository repository = new MemoryRepository();
+        IdentityService service = service(repository);
+        service.ensureAdmin("admin@example.com", "correct horse battery staple");
+
+        assertThatThrownBy(
+                        () ->
+                                service.login(
+                                        "admin@example.com",
+                                        "incorrect password",
+                                        "127.0.0.1",
+                                        "test-agent"))
+                .isInstanceOf(IdentityException.class)
+                .extracting(exception -> ((IdentityException) exception).kind())
+                .isEqualTo(IdentityException.Kind.INVALID_CREDENTIALS);
+
+        User user = repository.usersByEmail.get("admin@example.com");
+        Principal principal = new Principal(user.id(), user.email(), user.role(), "session");
+        assertThatThrownBy(
+                        () ->
+                                service.authorize(
+                                        principal, "missing:permission", "127.0.0.1", "test-agent"))
+                .isInstanceOf(IdentityException.class);
+        assertThat(repository.audits)
+                .extracting(AuditEvent::outcome)
+                .contains("denied");
+    }
+
+    private static IdentityService service(MemoryRepository repository) {
+        return new IdentityService(
+                repository,
+                new PasswordHasher(),
+                new TokenCodec(),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static final class MemoryRepository implements IdentityRepository {
+        private final Map<String, User> usersByEmail = new HashMap<>();
+        private final Map<String, User> sessions = new HashMap<>();
+        private final Map<String, User> apiTokens = new HashMap<>();
+        private final Map<String, Boolean> permissions = new HashMap<>();
+        private final List<AuditEvent> audits = new ArrayList<>();
+
+        @Override
+        public Optional<User> findUserByEmail(String email) {
+            return Optional.ofNullable(usersByEmail.get(email));
+        }
+
+        @Override
+        public Optional<User> findUserBySessionHash(String tokenHash, Instant now) {
+            return Optional.ofNullable(sessions.get(tokenHash));
+        }
+
+        @Override
+        public Optional<User> findUserByApiTokenHash(String tokenHash, Instant now) {
+            return Optional.ofNullable(apiTokens.get(tokenHash));
+        }
+
+        @Override
+        public boolean hasPermission(String role, String permission) {
+            return permissions.getOrDefault(role + ":" + permission, false);
+        }
+
+        @Override
+        public void createUser(User user) {
+            usersByEmail.put(user.email(), user);
+        }
+
+        @Override
+        public void createSession(
+                String tokenHash, String userId, Instant expiresAt, AuditEvent auditEvent) {
+            sessions.put(tokenHash, userById(userId));
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public void deleteSession(String tokenHash) {
+            sessions.remove(tokenHash);
+        }
+
+        @Override
+        public void createApiToken(
+                String id,
+                String tokenHash,
+                String userId,
+                String name,
+                Instant expiresAt,
+                AuditEvent auditEvent) {
+            apiTokens.put(tokenHash, userById(userId));
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public void appendAudit(AuditEvent auditEvent) {
+            audits.add(auditEvent);
+        }
+
+        private User userById(String userId) {
+            return usersByEmail.values().stream()
+                    .filter(user -> user.id().equals(userId))
+                    .findFirst()
+                    .orElseThrow();
+        }
+    }
+}

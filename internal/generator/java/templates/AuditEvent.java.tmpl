@@ -1,0 +1,13 @@
+package {{.PackageName}}.identity;
+
+import java.time.Instant;
+
+public record AuditEvent(
+        String id,
+        String userId,
+        String action,
+        String outcome,
+        String target,
+        String ipAddress,
+        String userAgent,
+        Instant createdAt) {}

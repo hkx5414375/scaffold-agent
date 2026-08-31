@@ -1,0 +1,175 @@
+package {{.PackageName}}.identity;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcIdentityRepository implements IdentityRepository {
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcIdentityRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public Optional<User> findUserByEmail(String email) {
+        return oneUser(
+                "select id, email, password_hash, role, disabled "
+                        + "from identity_users where email = ?",
+                email);
+    }
+
+    @Override
+    public Optional<User> findUserBySessionHash(String tokenHash, Instant now) {
+        return oneUser(
+                "select identity_users.id, identity_users.email, identity_users.password_hash, "
+                        + "identity_users.role, identity_users.disabled "
+                        + "from identity_sessions join identity_users "
+                        + "on identity_users.id = identity_sessions.user_id "
+                        + "where identity_sessions.token_hash = ? "
+                        + "and identity_sessions.expires_at > ?",
+                tokenHash,
+                Timestamp.from(now));
+    }
+
+    @Override
+    public Optional<User> findUserByApiTokenHash(String tokenHash, Instant now) {
+        return oneUser(
+                "select identity_users.id, identity_users.email, identity_users.password_hash, "
+                        + "identity_users.role, identity_users.disabled "
+                        + "from identity_api_tokens join identity_users "
+                        + "on identity_users.id = identity_api_tokens.user_id "
+                        + "where identity_api_tokens.token_hash = ? "
+                        + "and identity_api_tokens.expires_at > ?",
+                tokenHash,
+                Timestamp.from(now));
+    }
+
+    @Override
+    public boolean hasPermission(String role, String permission) {
+        Integer count =
+                jdbcTemplate.queryForObject(
+                        "select count(*) from identity_role_permissions "
+                                + "where role_code = ? and permission_code = ?",
+                        Integer.class,
+                        role,
+                        permission);
+        return count != null && count == 1;
+    }
+
+    @Override
+    public void createUser(User user) {
+        jdbcTemplate.update(
+                "insert into identity_users "
+                        + "(id, email, password_hash, role, disabled, created_at, updated_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?)",
+                user.id(),
+                user.email(),
+                user.passwordHash(),
+                user.role(),
+                user.disabled(),
+                Timestamp.from(Instant.now()),
+                Timestamp.from(Instant.now()));
+    }
+
+    @Override
+    public void createSession(
+            String tokenHash, String userId, Instant expiresAt, AuditEvent auditEvent) {
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    jdbcTemplate.update(
+                            "insert into identity_sessions "
+                                    + "(token_hash, user_id, expires_at, created_at) values (?, ?, ?, ?)",
+                            tokenHash,
+                            userId,
+                            Timestamp.from(expiresAt),
+                            Timestamp.from(auditEvent.createdAt()));
+                    appendAuditInternal(auditEvent);
+                });
+    }
+
+    @Override
+    public void deleteSession(String tokenHash) {
+        jdbcTemplate.update("delete from identity_sessions where token_hash = ?", tokenHash);
+    }
+
+    @Override
+    public void createApiToken(
+            String id,
+            String tokenHash,
+            String userId,
+            String name,
+            Instant expiresAt,
+            AuditEvent auditEvent) {
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    jdbcTemplate.update(
+                            "insert into identity_api_tokens "
+                                    + "(id, token_hash, user_id, name, expires_at, created_at) "
+                                    + "values (?, ?, ?, ?, ?, ?)",
+                            id,
+                            tokenHash,
+                            userId,
+                            name,
+                            Timestamp.from(expiresAt),
+                            Timestamp.from(auditEvent.createdAt()));
+                    appendAuditInternal(auditEvent);
+                });
+    }
+
+    @Override
+    public void appendAudit(AuditEvent auditEvent) {
+        appendAuditInternal(auditEvent);
+    }
+
+    private Optional<User> oneUser(String sql, Object... arguments) {
+        List<User> users = jdbcTemplate.query(sql, JdbcIdentityRepository::mapUser, arguments);
+        if (users.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(users.getFirst());
+    }
+
+    private void appendAuditInternal(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static User mapUser(ResultSet resultSet, int rowNumber) throws SQLException {
+        return new User(
+                resultSet.getString("id"),
+                resultSet.getString("email"),
+                resultSet.getString("password_hash"),
+                resultSet.getString("role"),
+                resultSet.getBoolean("disabled"));
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+}

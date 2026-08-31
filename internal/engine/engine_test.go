@@ -271,12 +271,12 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", approvalsSelection, "", 55, false)
 }
 
-func TestJavaPostgreSQLFoundationPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaFoundation(t, "postgresql")
+func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql")
 }
 
-func TestJavaMySQLFoundationPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaFoundation(t, "mysql")
+func TestJavaMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql")
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -535,7 +535,7 @@ WORKFLOWS
 	}
 }
 
-func runGeneratedJavaFoundation(t *testing.T, database string) {
+func runGeneratedJavaReference(t *testing.T, database string) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -562,7 +562,7 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 12 || plannedData.CapabilityLock["java-service"] != "0.1.0" {
+	if plannedData.ChangeCount != 32 || plannedData.CapabilityLock["java-service"] != "0.2.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

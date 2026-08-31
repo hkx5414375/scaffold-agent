@@ -1,0 +1,51 @@
+package {{.PackageName}}.http;
+
+import {{.PackageName}}.identity.IdentityException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+@RestControllerAdvice
+public final class ApiExceptionHandler {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    @ExceptionHandler(IdentityException.class)
+    public ResponseEntity<ApiError> identity(IdentityException exception) {
+        return switch (exception.kind()) {
+            case INVALID_CREDENTIALS ->
+                    response(
+                            HttpStatus.UNAUTHORIZED,
+                            "identity.invalid_credentials",
+                            exception.getMessage());
+            case FORBIDDEN ->
+                    response(HttpStatus.FORBIDDEN, "identity.forbidden", exception.getMessage());
+            case INVALID_INPUT ->
+                    response(HttpStatus.BAD_REQUEST, "request.invalid", exception.getMessage());
+        };
+    }
+
+    @ExceptionHandler({MethodArgumentNotValidException.class, HttpMessageNotReadableException.class})
+    public ResponseEntity<ApiError> invalidRequest(Exception exception) {
+        return response(HttpStatus.BAD_REQUEST, "request.invalid", "request data is invalid");
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ApiError> internal(Exception exception) {
+        LOGGER.error("request failed: {}", exception.getClass().getName());
+        return response(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "internal.error",
+                "the request could not be completed");
+    }
+
+    private static ResponseEntity<ApiError> response(
+            HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status).body(new ApiError(code, message));
+    }
+}
