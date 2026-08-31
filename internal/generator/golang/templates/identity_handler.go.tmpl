@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	maximumRequestBytes = 1 << 20
-	sessionCookieName   = "scaffold_session"
-	sessionMaxAge       = 24 * 60 * 60
+	maximumRequestBytes   = 1 << 20
+	sessionCookieName     = "scaffold_session"
+	sessionMaxAge         = 24 * 60 * 60
+	createTokenPermission = "identity:token:create"
 )
 
 // Handler maps HTTP requests to the identity application service.
@@ -34,8 +35,8 @@ func New(service *identity.Service, secureCookies bool) *Handler {
 func (handler *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", handler.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", handler.logout)
-	mux.HandleFunc("GET /api/v1/auth/me", handler.me)
-	mux.HandleFunc("POST /api/v1/auth/tokens", handler.createAPIToken)
+	mux.HandleFunc("GET /api/v1/auth/me", handler.authenticated(handler.me))
+	mux.HandleFunc("POST /api/v1/auth/tokens", handler.authorized(createTokenPermission, handler.createAPIToken))
 }
 
 func (handler *Handler) login(response http.ResponseWriter, request *http.Request) {
@@ -86,19 +87,11 @@ func (handler *Handler) logout(response http.ResponseWriter, request *http.Reque
 	response.WriteHeader(http.StatusNoContent)
 }
 
-func (handler *Handler) me(response http.ResponseWriter, request *http.Request) {
-	principal, ok := handler.authenticate(response, request)
-	if !ok {
-		return
-	}
+func (handler *Handler) me(response http.ResponseWriter, _ *http.Request, principal identity.Principal) {
 	writeJSON(response, http.StatusOK, map[string]any{"principal": principal})
 }
 
-func (handler *Handler) createAPIToken(response http.ResponseWriter, request *http.Request) {
-	principal, ok := handler.authenticate(response, request)
-	if !ok {
-		return
-	}
+func (handler *Handler) createAPIToken(response http.ResponseWriter, request *http.Request, principal identity.Principal) {
 	var input struct {
 		Name string `json:"name"`
 	}
@@ -117,6 +110,34 @@ func (handler *Handler) createAPIToken(response http.ResponseWriter, request *ht
 		return
 	}
 	writeJSON(response, http.StatusCreated, map[string]string{"token": token})
+}
+
+type principalHandler func(http.ResponseWriter, *http.Request, identity.Principal)
+
+func (handler *Handler) authenticated(next principalHandler) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		principal, ok := handler.authenticate(response, request)
+		if !ok {
+			return
+		}
+		next(response, request, principal)
+	}
+}
+
+func (handler *Handler) authorized(permission string, next principalHandler) http.HandlerFunc {
+	return handler.authenticated(func(response http.ResponseWriter, request *http.Request, principal identity.Principal) {
+		err := handler.service.Authorize(request.Context(), principal, permission, clientIP(request), request.UserAgent())
+		if errors.Is(err, identity.ErrForbidden) {
+			writeError(response, http.StatusForbidden, "identity.forbidden", "permission is required")
+			return
+		}
+		if err != nil {
+			slog.Error("authorize request", "permission", permission, "error", err)
+			writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+			return
+		}
+		next(response, request, principal)
+	})
 }
 
 func (handler *Handler) authenticate(response http.ResponseWriter, request *http.Request) (identity.Principal, bool) {

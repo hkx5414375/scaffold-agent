@@ -78,11 +78,23 @@ func (store *Store) UserByAPIToken(ctx context.Context, tokenHash []byte, now ti
 		where tokens.token_hash = $1 and tokens.expires_at > $2`, tokenHash, now))
 }
 
+func (store *Store) HasPermission(ctx context.Context, role, permission string) (bool, error) {
+	var allowed bool
+	if err := store.pool.QueryRow(ctx, `
+		select exists(
+			select 1 from identity_role_permissions
+			where role_code = $1 and permission_code = $2
+		)`, role, permission).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check permission: %w", err)
+	}
+	return allowed, nil
+}
+
 func (store *Store) AppendAudit(ctx context.Context, event identity.AuditEvent) error {
 	_, err := store.pool.Exec(ctx, `
-		insert into audit_events (id, user_id, action, outcome, ip_address, user_agent, created_at)
-		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), $7)`,
-		event.ID, event.UserID, event.Action, event.Outcome, event.IPAddress, event.UserAgent, event.CreatedAt,
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
 	)
 	return wrap("append audit event", err)
 }

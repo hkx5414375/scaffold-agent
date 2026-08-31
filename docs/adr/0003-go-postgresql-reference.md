@@ -19,10 +19,11 @@ claiming support for Blueprint selections that are not implemented yet.
 6. Security-relevant login and token-creation outcomes are written as audit events. A session or token is removed when its success audit cannot be recorded.
 7. The adapter rejects MySQL, frontends, incomplete authentication selections, capabilities, and business modules until their complete vertical slices exist.
 8. The generated dependency graph is pinned with both `go.mod` and `go.sum`.
+9. Roles, permissions, and role-permission assignments are relational data. Protected HTTP handlers require a stable permission code and deny access unless the store confirms that assignment.
 
 ## Consequences
 
 - The minimal Blueprint now generates a compilable, testable identity service rather than a health endpoint alone.
 - PostgreSQL must be available to run the generated service, but unit tests remain database-independent.
-- RBAC, stateful CRUD, OpenAPI, Vue administration, and live PostgreSQL integration tests remain explicit M4 work.
+- Stateful CRUD, OpenAPI, Vue administration, and live PostgreSQL integration tests remain explicit M4 work.
 - MySQL, Java, and Python cannot accidentally appear successful through partial output.

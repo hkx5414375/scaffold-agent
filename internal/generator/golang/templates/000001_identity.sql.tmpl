@@ -1,8 +1,35 @@
+create table identity_roles (
+    code text primary key,
+    display_name text not null
+);
+
+create table identity_permissions (
+    code text primary key,
+    description text not null
+);
+
+create table identity_role_permissions (
+    role_code text not null references identity_roles (code) on delete cascade,
+    permission_code text not null references identity_permissions (code) on delete cascade,
+    primary key (role_code, permission_code)
+);
+
+insert into identity_roles (code, display_name) values
+    ('admin', 'Administrator'),
+    ('user', 'User');
+
+insert into identity_permissions (code, description) values
+    ('identity:token:create', 'Create a personal API token');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'identity:token:create'),
+    ('user', 'identity:token:create');
+
 create table identity_users (
     id text primary key,
     email text not null unique,
     password_hash text not null,
-    role text not null check (role in ('admin', 'user')),
+    role text not null references identity_roles (code),
     disabled boolean not null default false,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -34,6 +61,7 @@ create table audit_events (
     user_id text references identity_users (id) on delete set null,
     action text not null,
     outcome text not null,
+    target text,
     ip_address text,
     user_agent text,
     created_at timestamptz not null

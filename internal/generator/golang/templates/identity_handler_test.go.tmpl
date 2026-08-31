@@ -61,6 +61,8 @@ func (emptyStore) UserByAPIToken(context.Context, []byte, time.Time) (identity.U
 	return identity.User{}, identity.ErrNotFound
 }
 
+func (emptyStore) HasPermission(context.Context, string, string) (bool, error) { return false, nil }
+
 func (emptyStore) AppendAudit(context.Context, identity.AuditEvent) error { return nil }
 
 var _ identity.Store = emptyStore{}

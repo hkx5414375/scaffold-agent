@@ -77,7 +77,7 @@ func (service *Service) Login(ctx context.Context, email, password, ipAddress, u
 	if err := service.store.CreateSession(ctx, Session{TokenHash: digest, UserID: user.ID, ExpiresAt: service.now().UTC().Add(sessionLifetime)}); err != nil {
 		return "", Principal{}, fmt.Errorf("create session: %w", err)
 	}
-	if err := service.audit(ctx, user.ID, "identity.login", "succeeded", ipAddress, userAgent); err != nil {
+	if err := service.audit(ctx, user.ID, "identity.login", "succeeded", "", ipAddress, userAgent); err != nil {
 		if rollbackErr := service.store.DeleteSession(ctx, digest); rollbackErr != nil {
 			return "", Principal{}, errors.Join(
 				fmt.Errorf("record successful login: %w", err),
@@ -101,6 +101,24 @@ func (service *Service) Authenticate(ctx context.Context, sessionToken, bearerTo
 	}
 	user, err := service.store.UserBySession(ctx, tokenDigest(sessionToken), now)
 	return authenticated(user, err, "session")
+}
+
+// Authorize checks one stable permission code and records denied attempts.
+func (service *Service) Authorize(ctx context.Context, actor Principal, permission, ipAddress, userAgent string) error {
+	if actor.UserID == "" || actor.Role == "" || permission == "" {
+		return ErrForbidden
+	}
+	allowed, err := service.store.HasPermission(ctx, actor.Role, permission)
+	if err != nil {
+		return fmt.Errorf("check authorization: %w", err)
+	}
+	if allowed {
+		return nil
+	}
+	if err := service.audit(ctx, actor.UserID, "identity.authorization", "denied", permission, ipAddress, userAgent); err != nil {
+		return fmt.Errorf("record denied authorization: %w", err)
+	}
+	return ErrForbidden
 }
 
 // Logout revokes one browser session.
@@ -131,7 +149,7 @@ func (service *Service) CreateAPIToken(ctx context.Context, owner Principal, nam
 	if err := service.store.CreateAPIToken(ctx, value); err != nil {
 		return "", fmt.Errorf("create API token: %w", err)
 	}
-	if err := service.audit(ctx, owner.UserID, "identity.api_token.create", "succeeded", "", ""); err != nil {
+	if err := service.audit(ctx, owner.UserID, "identity.api_token.create", "succeeded", value.ID, "", ""); err != nil {
 		if rollbackErr := service.store.DeleteAPIToken(ctx, value.ID); rollbackErr != nil {
 			return "", errors.Join(
 				fmt.Errorf("record API token creation: %w", err),
@@ -144,15 +162,15 @@ func (service *Service) CreateAPIToken(ctx context.Context, owner Principal, nam
 }
 
 func (service *Service) denyLogin(ctx context.Context, userID, ipAddress, userAgent string) error {
-	if err := service.audit(ctx, userID, "identity.login", "denied", ipAddress, userAgent); err != nil {
+	if err := service.audit(ctx, userID, "identity.login", "denied", "", ipAddress, userAgent); err != nil {
 		return fmt.Errorf("record denied login: %w", err)
 	}
 	return ErrInvalidCredentials
 }
 
-func (service *Service) audit(ctx context.Context, userID, action, outcome, ipAddress, userAgent string) error {
+func (service *Service) audit(ctx context.Context, userID, action, outcome, target, ipAddress, userAgent string) error {
 	return service.store.AppendAudit(ctx, AuditEvent{
-		ID: newID(), UserID: userID, Action: action, Outcome: outcome,
+		ID: newID(), UserID: userID, Action: action, Outcome: outcome, Target: target,
 		IPAddress: ipAddress, UserAgent: userAgent, CreatedAt: service.now().UTC(),
 	})
 }

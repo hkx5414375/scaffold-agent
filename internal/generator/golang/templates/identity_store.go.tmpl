@@ -13,6 +13,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrInvalidTokenName identifies a user-correctable API token name.
 	ErrInvalidTokenName = errors.New("token name must contain 1 to 80 characters")
+	// ErrForbidden hides authorization policy details from callers.
+	ErrForbidden = errors.New("permission denied")
 )
 
 // User is the authenticated account aggregate.
@@ -54,6 +56,7 @@ type AuditEvent struct {
 	UserID    string
 	Action    string
 	Outcome   string
+	Target    string
 	IPAddress string
 	UserAgent string
 	CreatedAt time.Time
@@ -69,5 +72,6 @@ type Store interface {
 	CreateAPIToken(context.Context, APIToken) error
 	DeleteAPIToken(context.Context, string) error
 	UserByAPIToken(context.Context, []byte, time.Time) (User, error)
+	HasPermission(context.Context, string, string) (bool, error)
 	AppendAudit(context.Context, AuditEvent) error
 }

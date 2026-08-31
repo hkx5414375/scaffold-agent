@@ -37,6 +37,12 @@ func TestLoginAndDualAuthentication(t *testing.T) {
 	if err != nil || fromToken.Method != "token" {
 		t.Fatalf("Authenticate(token) = %#v, %v", fromToken, err)
 	}
+	if err := service.Authorize(context.Background(), fromToken, "identity:token:create", "", ""); err != nil {
+		t.Fatalf("Authorize(allowed) error = %v", err)
+	}
+	if err := service.Authorize(context.Background(), fromToken, "identity:user:delete", "", ""); err != ErrForbidden {
+		t.Fatalf("Authorize(denied) error = %v, want ErrForbidden", err)
+	}
 }
 
 type memoryStore struct {
@@ -100,6 +106,10 @@ func (store *memoryStore) UserByAPIToken(_ context.Context, tokenHash []byte, no
 		return User{}, ErrNotFound
 	}
 	return store.user, nil
+}
+
+func (store *memoryStore) HasPermission(_ context.Context, role, permission string) (bool, error) {
+	return role == "admin" && permission == "identity:token:create", nil
 }
 
 func (store *memoryStore) AppendAudit(_ context.Context, event AuditEvent) error {

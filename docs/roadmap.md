@@ -22,7 +22,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Bounded PostgreSQL pool and serialized embedded migrations.
 - [x] PBKDF2 password hashing, administrator bootstrap, browser sessions, API tokens, and audit events.
 - [x] Generated-module formatting, dependency, unit-test, vet, apply, and ownership verification.
-- [ ] Permission-based RBAC with deny-by-default HTTP middleware.
+- [x] Permission-based RBAC with deny-by-default HTTP wrappers.
 - [ ] One stateful CRUD module with optimistic concurrency and audit coverage.
 - [ ] OpenAPI contract and Vue/Element Plus administration UI.
 - [ ] PostgreSQL integration tests against an ephemeral database.
