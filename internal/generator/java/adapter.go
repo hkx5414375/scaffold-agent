@@ -32,6 +32,8 @@ const (
 	tenancyLifecycleVersion = "0.3.0"
 	jobsOwner               = "background-jobs"
 	jobsVersion             = "0.1.0"
+	notificationsOwner      = "notifications"
+	notificationsVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -117,6 +119,17 @@ var javaCapabilityCatalog = capability.NewCatalog(
 	spec.CapabilityPack{
 		APIVersion: spec.APIVersionV1Alpha1,
 		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: notificationsOwner, Version: notificationsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Idempotent email notifications delivered by reliable background jobs.",
+			Requires:    []spec.PackDependency{{Name: jobsOwner, Constraint: "^0.1.0"}},
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyMembersVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization invitations, member administration, and tenant data isolation.",
@@ -148,6 +161,7 @@ type templateData struct {
 	TenancyMembers   bool
 	TenancyLifecycle bool
 	Jobs             bool
+	Notifications    bool
 	Files            bool
 	JobAdmin         bool
 	CSVTransfer      bool
@@ -246,6 +260,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyMembersEnabled := false
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
+	notificationsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -257,6 +272,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == jobsOwner {
 			jobsEnabled = true
+		}
+		if pack.Metadata.Name == notificationsOwner {
+			notificationsEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -293,6 +311,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyMembers:   tenancyMembersEnabled,
 		TenancyLifecycle: tenancyLifecycleEnabled,
 		Jobs:             jobsEnabled,
+		Notifications:    notificationsEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -303,6 +322,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
 	tenancyPaths := make(map[string]struct{}, 27)
 	jobsPaths := make(map[string]struct{}, 12)
+	notificationPaths := make(map[string]struct{}, 11)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -323,6 +343,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addJobsTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		jobsPaths[path] = struct{}{}
+	}
+	addNotificationTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		notificationPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -421,6 +445,20 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		)
 		capabilityLock[jobsOwner] = jobsVersion
 	}
+	if notificationsEnabled {
+		addNotificationTarget(mainRoot+"/notifications/NotificationEmail.java", "templates/NotificationEmail.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/EmailNotificationPayload.java", "templates/EmailNotificationPayload.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/NotificationException.java", "templates/NotificationException.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/NotificationService.java", "templates/NotificationService.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/EmailSender.java", "templates/EmailSender.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/SmtpEmailSender.java", "templates/SmtpEmailSender.java.tmpl")
+		addNotificationTarget(mainRoot+"/notifications/EmailNotificationHandler.java", "templates/EmailNotificationHandler.java.tmpl")
+		addNotificationTarget(testRoot+"/notifications/NotificationServiceTest.java", "templates/NotificationServiceTest.java.tmpl")
+		addNotificationTarget(testRoot+"/notifications/EmailNotificationHandlerTest.java", "templates/EmailNotificationHandlerTest.java.tmpl")
+		addNotificationTarget(testRoot+"/notifications/SmtpEmailSenderTest.java", "templates/SmtpEmailSenderTest.java.tmpl")
+		addNotificationTarget(testRoot+"/notifications/NotificationDatabaseIntegrationTest.java", "templates/NotificationDatabaseIntegrationTest.java.tmpl")
+		capabilityLock[notificationsOwner] = notificationsVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -477,6 +515,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isJobsPath := jobsPaths[path]; isJobsPath {
 			owner = jobsOwner
+		}
+		if _, isNotificationPath := notificationPaths[path]; isNotificationPath {
+			owner = notificationsOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

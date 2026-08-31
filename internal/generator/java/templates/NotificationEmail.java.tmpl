@@ -1,0 +1,7 @@
+package {{.PackageName}}.notifications;
+
+public record NotificationEmail(
+        String to,
+        String subject,
+        String textBody,
+        String htmlBody) {}

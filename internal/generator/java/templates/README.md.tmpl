@@ -58,6 +58,27 @@ Set `WORKER_ID` to a stable unique process name when desired. Add Spring beans t
 implement `JobWorker.Handler`; handlers must honor thread interruption and must not
 log payload contents. The web process leaves the worker disabled by default.
 {{end}}
+{{if .Notifications}}
+
+## Email notifications
+
+Feature code calls `NotificationService.enqueueEmail` with a stable idempotency key;
+there is deliberately no generic email HTTP endpoint. The worker requires the
+following runtime-only configuration:
+
+```bash
+export SMTP_ADDRESS='smtp.example.com:587'
+export SMTP_FROM='Example <app@example.com>'
+export SMTP_TLS_MODE='starttls' # starttls or tls
+export SMTP_USERNAME='mailer'  # optional only as a pair
+export SMTP_PASSWORD='replace-me'
+```
+
+TLS 1.2 or newer, certificate hostname verification, and bounded connection/read/write
+timeouts are mandatory. Queued email bodies remain sensitive database payloads until
+your retention policy removes them; never log payloads or place SMTP credentials in
+source, Blueprints, or AI context.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

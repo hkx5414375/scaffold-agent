@@ -1,0 +1,62 @@
+package {{.PackageName}}.notifications;
+
+import {{.PackageName}}.jobs.Job;
+import {{.PackageName}}.jobs.JobWorker;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
+
+@Component
+@ConditionalOnProperty(name = "scaffold.worker.enabled", havingValue = "true")
+public final class EmailNotificationHandler implements JobWorker.Handler {
+
+    private final ObjectMapper objectMapper;
+    private final EmailSender sender;
+
+    @Autowired
+    public EmailNotificationHandler(ObjectMapper objectMapper) {
+        this(objectMapper, SmtpEmailSender.fromEnvironment());
+    }
+
+    EmailNotificationHandler(ObjectMapper objectMapper, EmailSender sender) {
+        this.objectMapper = objectMapper;
+        this.sender = sender;
+    }
+
+    @Override
+    public String type() {
+        return NotificationService.EMAIL_JOB_TYPE;
+    }
+
+    @Override
+    public void handle(Job job) {
+        if (job == null || !type().equals(job.type())) {
+            throw invalid();
+        }
+        try {
+            EmailNotificationPayload payload =
+                    objectMapper
+                            .readerFor(EmailNotificationPayload.class)
+                            .with(
+                                    DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                                    DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                            .readValue(job.payloadJson());
+            if (payload.version() != 1 || payload.email() == null) {
+                throw invalid();
+            }
+            sender.send(NotificationService.validate(payload.email()));
+        } catch (NotificationException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw invalid();
+        }
+    }
+
+    private static NotificationException invalid() {
+        return new NotificationException(
+                NotificationException.Kind.INVALID,
+                "queued email notification is invalid");
+    }
+}

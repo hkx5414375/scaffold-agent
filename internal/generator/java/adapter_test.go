@@ -427,6 +427,73 @@ func TestGenerateTenantScopedBackgroundJobs(t *testing.T) {
 	}
 }
 
+func TestGenerateEmailNotificationsResolvesBackgroundJobs(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: notificationsOwner, Version: notificationsVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 53 ||
+				result.CapabilityLock[notificationsOwner] != notificationsVersion ||
+				result.CapabilityLock[jobsOwner] != jobsVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/notifications/NotificationService.java",
+				"src/main/java/com/scaffold/generated/demoservice/notifications/SmtpEmailSender.java",
+				"src/main/java/com/scaffold/generated/demoservice/notifications/EmailNotificationHandler.java",
+				"src/test/java/com/scaffold/generated/demoservice/notifications/NotificationDatabaseIntegrationTest.java",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != notificationsOwner {
+					t.Errorf("Generate() notification output %s is missing or has the wrong owner", path)
+				}
+			}
+			pom := string(outputContent(result, "pom.xml"))
+			if !strings.Contains(pom, "spring-boot-starter-mail") {
+				t.Fatalf("generated notification project lacks its mail dependency:\n%s", pom)
+			}
+			openAPI := string(outputContent(result, "api/openapi.yaml"))
+			if strings.Contains(openAPI, "notifications.email.deliver") {
+				t.Fatal("generated notification capability exposes an arbitrary email endpoint")
+			}
+		})
+	}
+}
+
+func TestGenerateTenantScopedEmailNotifications(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: notificationsOwner, Version: notificationsVersion},
+	}
+	result, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(result.Outputs) != 78 {
+		t.Fatalf("Generate() output count = %d, want 78", len(result.Outputs))
+	}
+	databaseTest := string(outputContent(
+		result,
+		"src/test/java/com/scaffold/generated/demoservice/notifications/NotificationDatabaseIntegrationTest.java",
+	))
+	if !strings.Contains(databaseTest, "organization.id()") {
+		t.Fatalf("generated notification integration does not use tenant scope:\n%s", databaseTest)
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

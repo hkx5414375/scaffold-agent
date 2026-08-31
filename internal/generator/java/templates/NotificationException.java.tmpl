@@ -1,0 +1,20 @@
+package {{.PackageName}}.notifications;
+
+public final class NotificationException extends RuntimeException {
+
+    private final Kind kind;
+
+    public NotificationException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+
+    public enum Kind {
+        INVALID,
+        DELIVERY
+    }
+}

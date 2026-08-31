@@ -1,0 +1,108 @@
+package {{.PackageName}}.notifications;
+
+import {{.PackageName}}.jobs.Job;
+import {{.PackageName}}.jobs.JobService;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import jakarta.mail.internet.AddressException;
+import jakarta.mail.internet.InternetAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
+
+@Service
+public final class NotificationService {
+
+    public static final String EMAIL_JOB_TYPE = "notifications.email.deliver";
+
+    private static final int PAYLOAD_VERSION = 1;
+    private static final int MAXIMUM_BODY_BYTES = 512 << 10;
+
+    private final JobService jobs;
+    private final ObjectMapper objectMapper;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring collaborators are intentionally retained for constructor injection")
+    public NotificationService(JobService jobs, ObjectMapper objectMapper) {
+        this.jobs = jobs;
+        this.objectMapper = objectMapper;
+    }
+
+    public Job enqueueEmail(
+            String organizationId,
+            String idempotencyKey,
+            NotificationEmail email) {
+        String normalizedKey = idempotencyKey == null ? "" : idempotencyKey.trim();
+        if (normalizedKey.isEmpty() || normalizedKey.length() > 128) {
+            throw invalid();
+        }
+        NotificationEmail validated = validate(email);
+        String payload;
+        try {
+            payload =
+                    objectMapper.writeValueAsString(
+                            new EmailNotificationPayload(PAYLOAD_VERSION, validated));
+        } catch (Exception exception) {
+            throw new NotificationException(
+                    NotificationException.Kind.INVALID,
+                    "email notification could not be queued");
+        }
+        return jobs.enqueue(
+                organizationId,
+                EMAIL_JOB_TYPE,
+                payload,
+                normalizedKey,
+                0,
+                0);
+    }
+
+    public static NotificationEmail validate(NotificationEmail email) {
+        if (email == null) {
+            throw invalid();
+        }
+        String recipient = email.to() == null ? "" : email.to().trim().toLowerCase(Locale.ROOT);
+        String subject = email.subject() == null ? "" : email.subject().trim();
+        String textBody = email.textBody() == null ? "" : email.textBody();
+        String htmlBody = email.htmlBody() == null ? "" : email.htmlBody();
+        if (!validMailbox(recipient)
+                || subject.isEmpty()
+                || subject.length() > 200
+                || containsNewline(subject)
+                || textBody.isEmpty() && htmlBody.isEmpty()
+                || (long) textBody.length() + htmlBody.length() > MAXIMUM_BODY_BYTES
+                || bodyBytes(textBody, htmlBody) > MAXIMUM_BODY_BYTES) {
+            throw invalid();
+        }
+        return new NotificationEmail(recipient, subject, textBody, htmlBody);
+    }
+
+    private static boolean validMailbox(String mailbox) {
+        if (mailbox.isEmpty() || mailbox.length() > 254 || containsNewline(mailbox)) {
+            return false;
+        }
+        try {
+            InternetAddress address = new InternetAddress(mailbox, true);
+            address.validate();
+            return address.getPersonal() == null && mailbox.equals(address.getAddress());
+        } catch (AddressException exception) {
+            return false;
+        }
+    }
+
+    private static int bodyBytes(String textBody, String htmlBody) {
+        long bytes = textBody.getBytes(StandardCharsets.UTF_8).length;
+        bytes += htmlBody.getBytes(StandardCharsets.UTF_8).length;
+        return bytes > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) bytes;
+    }
+
+    private static boolean containsNewline(String value) {
+        return value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0;
+    }
+
+    private static NotificationException invalid() {
+        return new NotificationException(
+                NotificationException.Kind.INVALID,
+                "email notification input is invalid");
+    }
+}

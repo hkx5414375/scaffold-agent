@@ -17,7 +17,7 @@ spec:
   capabilities:
     - name: organization-tenancy
       version: 0.3.0
-    - name: background-jobs
+    - name: notifications
       version: 0.1.0
   modules:
     - name: tasks

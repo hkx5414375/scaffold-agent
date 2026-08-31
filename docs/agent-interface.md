@@ -70,8 +70,9 @@ must never log the payload. Retry, lease renewal, dead-letter decisions, and
 expired-lease recovery are Engine-provided behavior, not code for an agent to copy.
 
 Selecting `notifications` version `0.1.0` automatically resolves
-`background-jobs` `0.1.x`. Feature code calls `notifications.Service.EnqueueEmail`
-with a stable idempotency key; it must not expose a generic unauthorised email
+`background-jobs` `0.1.x`. Feature code calls the generated notification service
+(`notifications.Service.EnqueueEmail` in Go or `NotificationService.enqueueEmail`
+in Java) with a stable idempotency key; it must not expose a generic unauthorised email
 endpoint. The worker requires TLS-only SMTP environment configuration. Agents
 must treat queued message bodies as sensitive persisted data and must never put
 SMTP credentials in a Blueprint, source file, job payload, or model context.

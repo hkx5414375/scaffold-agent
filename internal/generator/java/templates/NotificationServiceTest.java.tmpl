@@ -1,0 +1,118 @@
+package {{.PackageName}}.notifications;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import {{.PackageName}}.jobs.Job;
+import {{.PackageName}}.jobs.JobService;
+import java.time.Instant;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import tools.jackson.databind.ObjectMapper;
+
+class NotificationServiceTest {
+
+    @Test
+    void normalizesAndQueuesIdempotentEmail() throws Exception {
+        JobService jobs = mock(JobService.class);
+        ObjectMapper objectMapper = new ObjectMapper();
+        Job expected = job();
+        when(jobs.enqueue(
+                        nullable(String.class),
+                        eq(NotificationService.EMAIL_JOB_TYPE),
+                        nullable(String.class),
+                        eq("request-1"),
+                        eq(0),
+                        eq(0)))
+                .thenReturn(expected);
+        NotificationService service = new NotificationService(jobs, objectMapper);
+        String organizationId = {{if .Tenancy}}"organization-1"{{else}}""{{end}};
+
+        Job queued =
+                service.enqueueEmail(
+                        organizationId,
+                        " request-1 ",
+                        new NotificationEmail(
+                                " Person@Example.com ",
+                                " Welcome ",
+                                "Hello",
+                                "<p>Hello</p>"));
+
+        assertThat(queued).isSameAs(expected);
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(jobs)
+                .enqueue(
+                        eq(organizationId),
+                        eq(NotificationService.EMAIL_JOB_TYPE),
+                        payload.capture(),
+                        eq("request-1"),
+                        eq(0),
+                        eq(0));
+        EmailNotificationPayload decoded =
+                objectMapper.readValue(payload.getValue(), EmailNotificationPayload.class);
+        assertThat(decoded.version()).isEqualTo(1);
+        assertThat(decoded.email().to()).isEqualTo("person@example.com");
+        assertThat(decoded.email().subject()).isEqualTo("Welcome");
+    }
+
+    @Test
+    void rejectsInvalidAddressHeadersBodiesAndIdempotencyKeys() {
+        NotificationService service =
+                new NotificationService(mock(JobService.class), new ObjectMapper());
+
+        assertThatThrownBy(
+                        () ->
+                                service.enqueueEmail(
+                                        "",
+                                        "request",
+                                        new NotificationEmail(
+                                                "invalid", "Welcome", "Hello", "")))
+                .isInstanceOf(NotificationException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.enqueueEmail(
+                                        "",
+                                        "request",
+                                        new NotificationEmail(
+                                                "person@example.com",
+                                                "Welcome\r\nBcc: attacker@example.com",
+                                                "Hello",
+                                                "")))
+                .isInstanceOf(NotificationException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.enqueueEmail(
+                                        "",
+                                        "",
+                                        new NotificationEmail(
+                                                "person@example.com", "Welcome", "", "")))
+                .isInstanceOf(NotificationException.class);
+    }
+
+    private static Job job() {
+        Instant now = Instant.parse("2026-09-01T00:00:00Z");
+        return new Job(
+                "job-1",
+                null,
+                NotificationService.EMAIL_JOB_TYPE,
+                "{}",
+                "queued",
+                0,
+                0,
+                8,
+                now,
+                null,
+                null,
+                null,
+                now,
+                now,
+                null,
+                "global",
+                "key:request-1");
+    }
+}

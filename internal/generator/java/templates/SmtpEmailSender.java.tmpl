@@ -1,0 +1,233 @@
+package {{.PackageName}}.notifications;
+
+import jakarta.mail.Authenticator;
+import jakarta.mail.Message;
+import jakarta.mail.MessagingException;
+import jakarta.mail.PasswordAuthentication;
+import jakarta.mail.Session;
+import jakarta.mail.Transport;
+import jakarta.mail.internet.AddressException;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Date;
+import java.util.Map;
+import java.util.Properties;
+
+public final class SmtpEmailSender implements EmailSender {
+
+    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+
+    private final Config config;
+    private final Session session;
+
+    private SmtpEmailSender(Config config) {
+        this.config = config;
+        this.session = createSession(config);
+    }
+
+    public static SmtpEmailSender fromEnvironment() {
+        return fromEnvironment(System.getenv());
+    }
+
+    static SmtpEmailSender fromEnvironment(Map<String, String> environment) {
+        String address = value(environment, "SMTP_ADDRESS");
+        String from = value(environment, "SMTP_FROM");
+        String tlsMode = value(environment, "SMTP_TLS_MODE").toLowerCase(java.util.Locale.ROOT);
+        String username = rawValue(environment, "SMTP_USERNAME");
+        String password = rawValue(environment, "SMTP_PASSWORD");
+        Endpoint endpoint = endpoint(address);
+        InternetAddress sender = mailbox(from);
+        if (!(tlsMode.equals("tls") || tlsMode.equals("starttls"))) {
+            throw invalidConfiguration("SMTP_TLS_MODE must be tls or starttls");
+        }
+        if (username.isEmpty() != password.isEmpty()) {
+            throw invalidConfiguration("SMTP_USERNAME and SMTP_PASSWORD must be set together");
+        }
+        return new SmtpEmailSender(
+                new Config(
+                        endpoint.host,
+                        endpoint.port,
+                        sender,
+                        tlsMode,
+                        username,
+                        password,
+                        DEFAULT_TIMEOUT));
+    }
+
+    @Override
+    public void send(NotificationEmail email) {
+        NotificationEmail validated = NotificationService.validate(email);
+        try {
+            MimeMessage message = compose(validated);
+            try (Transport transport = session.getTransport("smtp")) {
+                if (config.username.isEmpty()) {
+                    transport.connect(config.host, config.port, null, null);
+                } else {
+                    transport.connect(
+                            config.host,
+                            config.port,
+                            config.username,
+                            config.password);
+                }
+                transport.sendMessage(message, message.getAllRecipients());
+            }
+        } catch (MessagingException exception) {
+            throw new NotificationException(
+                    NotificationException.Kind.DELIVERY,
+                    "email notification delivery failed");
+        }
+    }
+
+    MimeMessage compose(NotificationEmail email) throws MessagingException {
+        NotificationEmail validated = NotificationService.validate(email);
+        MimeMessage message = new MimeMessage(session);
+        message.setFrom(config.from);
+        message.setRecipient(Message.RecipientType.TO, mailbox(validated.to()));
+        message.setSubject(validated.subject(), StandardCharsets.UTF_8.name());
+        message.setSentDate(new Date());
+        if (validated.textBody().isEmpty() || validated.htmlBody().isEmpty()) {
+            if (validated.htmlBody().isEmpty()) {
+                message.setText(validated.textBody(), StandardCharsets.UTF_8.name());
+            } else {
+                message.setContent(
+                        validated.htmlBody(),
+                        "text/html; charset=" + StandardCharsets.UTF_8.name());
+            }
+        } else {
+            MimeMultipart alternatives = new MimeMultipart("alternative");
+            MimeBodyPart text = new MimeBodyPart();
+            text.setText(validated.textBody(), StandardCharsets.UTF_8.name());
+            alternatives.addBodyPart(text);
+            MimeBodyPart html = new MimeBodyPart();
+            html.setContent(
+                    validated.htmlBody(),
+                    "text/html; charset=" + StandardCharsets.UTF_8.name());
+            alternatives.addBodyPart(html);
+            message.setContent(alternatives);
+        }
+        message.saveChanges();
+        return message;
+    }
+
+    private static Session createSession(Config config) {
+        int timeoutMillis = Math.toIntExact(config.timeout.toMillis());
+        Properties properties = new Properties();
+        properties.setProperty("mail.smtp.host", config.host);
+        properties.setProperty("mail.smtp.port", Integer.toString(config.port));
+        properties.setProperty("mail.smtp.auth", Boolean.toString(!config.username.isEmpty()));
+        properties.setProperty("mail.smtp.connectiontimeout", Integer.toString(timeoutMillis));
+        properties.setProperty("mail.smtp.timeout", Integer.toString(timeoutMillis));
+        properties.setProperty("mail.smtp.writetimeout", Integer.toString(timeoutMillis));
+        properties.setProperty("mail.smtp.ssl.checkserveridentity", "true");
+        properties.setProperty("mail.smtp.ssl.protocols", "TLSv1.3 TLSv1.2");
+        if (config.tlsMode.equals("tls")) {
+            properties.setProperty("mail.smtp.ssl.enable", "true");
+        } else {
+            properties.setProperty("mail.smtp.starttls.enable", "true");
+            properties.setProperty("mail.smtp.starttls.required", "true");
+        }
+        Authenticator authenticator = null;
+        if (!config.username.isEmpty()) {
+            authenticator =
+                    new Authenticator() {
+                        @Override
+                        protected PasswordAuthentication getPasswordAuthentication() {
+                            return new PasswordAuthentication(config.username, config.password);
+                        }
+                    };
+        }
+        return Session.getInstance(properties, authenticator);
+    }
+
+    private static Endpoint endpoint(String address) {
+        int separator = address.lastIndexOf(':');
+        if (separator <= 0 || separator == address.length() - 1) {
+            throw invalidConfiguration("SMTP_ADDRESS must contain a host and port");
+        }
+        String host = address.substring(0, separator).trim();
+        if (host.startsWith("[") && host.endsWith("]")) {
+            host = host.substring(1, host.length() - 1);
+        }
+        if (host.isEmpty()
+                || containsControl(host)
+                || host.chars().anyMatch(character -> Character.isWhitespace(character))) {
+            throw invalidConfiguration("SMTP_ADDRESS must contain a valid host");
+        }
+        try {
+            int port = Integer.parseInt(address.substring(separator + 1));
+            if (port < 1 || port > 65_535) {
+                throw invalidConfiguration("SMTP_ADDRESS port is invalid");
+            }
+            return new Endpoint(host, port);
+        } catch (NumberFormatException exception) {
+            throw invalidConfiguration("SMTP_ADDRESS port is invalid");
+        }
+    }
+
+    private static InternetAddress mailbox(String value) {
+        if (value.isEmpty() || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0) {
+            throw invalidConfiguration("SMTP_FROM must be a valid mailbox");
+        }
+        try {
+            InternetAddress address = new InternetAddress(value, true);
+            address.validate();
+            if (address.getAddress() == null || address.getAddress().isBlank()) {
+                throw invalidConfiguration("SMTP_FROM must be a valid mailbox");
+            }
+            return address;
+        } catch (AddressException exception) {
+            throw invalidConfiguration("SMTP_FROM must be a valid mailbox");
+        }
+    }
+
+    private static boolean containsControl(String value) {
+        return value.chars().anyMatch(character -> Character.isISOControl(character));
+    }
+
+    private static String value(Map<String, String> environment, String name) {
+        return rawValue(environment, name).trim();
+    }
+
+    private static String rawValue(Map<String, String> environment, String name) {
+        String value = environment.get(name);
+        return value == null ? "" : value;
+    }
+
+    private static NotificationException invalidConfiguration(String message) {
+        return new NotificationException(NotificationException.Kind.INVALID, message);
+    }
+
+    private static final class Config {
+
+        private final String host;
+        private final int port;
+        private final InternetAddress from;
+        private final String tlsMode;
+        private final String username;
+        private final String password;
+        private final Duration timeout;
+
+        private Config(
+                String host,
+                int port,
+                InternetAddress from,
+                String tlsMode,
+                String username,
+                String password,
+                Duration timeout) {
+            this.host = host;
+            this.port = port;
+            this.from = from;
+            this.tlsMode = tlsMode;
+            this.username = username;
+            this.password = password;
+            this.timeout = timeout;
+        }
+    }
+
+    private record Endpoint(String host, int port) {}
+}

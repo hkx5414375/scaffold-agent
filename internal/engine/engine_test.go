@@ -331,6 +331,18 @@ func TestJavaMySQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaJobsReference(t, "mysql", true, true, "0.3.0")
 }
 
+func TestJavaPostgreSQLNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaNotificationsReference(t, "postgresql", true, false, "")
+}
+
+func TestJavaPostgreSQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaNotificationsReference(t, "postgresql", true, true, "0.3.0")
+}
+
+func TestJavaMySQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaNotificationsReference(t, "mysql", true, true, "0.3.0")
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -591,14 +603,21 @@ func runGeneratedJavaReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false)
 }
 
 func runGeneratedJavaJobsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false)
+}
+
+func runGeneratedJavaNotificationsReference(
+	t *testing.T, database string, business, admin bool, tenancyVersion string,
+) {
+	t.Helper()
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true)
 }
 
 func runGeneratedJavaCapabilities(
@@ -608,6 +627,7 @@ func runGeneratedJavaCapabilities(
 	admin bool,
 	tenancyVersion string,
 	jobs bool,
+	notifications bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -648,6 +668,14 @@ MODULES
 			capabilities = "  capabilities:\n"
 		}
 		capabilities += `    - name: background-jobs
+      version: 0.1.0
+`
+	}
+	if notifications {
+		if capabilities == "" {
+			capabilities = "  capabilities:\n"
+		}
+		capabilities += `    - name: notifications
       version: 0.1.0
 `
 	}
@@ -704,6 +732,9 @@ MODULES
 	if jobs {
 		wantChanges += 11
 	}
+	if notifications {
+		wantChanges += 22
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -719,6 +750,11 @@ MODULES
 	}
 	if jobs && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
 		t.Fatalf("Plan() jobs lock = %#v", plannedData.CapabilityLock)
+	}
+	if notifications &&
+		(plannedData.CapabilityLock["notifications"] != "0.1.0" ||
+			plannedData.CapabilityLock["background-jobs"] != "0.1.0") {
+		t.Fatalf("Plan() notifications lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

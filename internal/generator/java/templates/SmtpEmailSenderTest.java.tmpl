@@ -1,0 +1,59 @@
+package {{.PackageName}}.notifications;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+
+class SmtpEmailSenderTest {
+
+    @Test
+    void composesUtf8MultipartAlternativeWithoutNetworkAccess() throws Exception {
+        SmtpEmailSender sender =
+                SmtpEmailSender.fromEnvironment(
+                        Map.of(
+                                "SMTP_ADDRESS", "smtp.example.com:587",
+                                "SMTP_FROM", "Example <app@example.com>",
+                                "SMTP_TLS_MODE", "starttls",
+                                "SMTP_USERNAME", "mailer",
+                                "SMTP_PASSWORD", "secret"));
+
+        MimeMessage message =
+                sender.compose(
+                        new NotificationEmail(
+                                "person@example.com",
+                                "欢迎",
+                                "Plain text",
+                                "<p>HTML</p>"));
+
+        assertThat(message.getSubject()).isEqualTo("欢迎");
+        assertThat(message.getAllRecipients()).hasSize(1);
+        assertThat(message.getContent()).isInstanceOf(MimeMultipart.class);
+        MimeMultipart multipart = (MimeMultipart) message.getContent();
+        assertThat(multipart.getCount()).isEqualTo(2);
+    }
+
+    @Test
+    void rejectsPlaintextAndPartialCredentialConfiguration() {
+        assertThatThrownBy(
+                        () ->
+                                SmtpEmailSender.fromEnvironment(
+                                        Map.of(
+                                                "SMTP_ADDRESS", "smtp.example.com:25",
+                                                "SMTP_FROM", "app@example.com",
+                                                "SMTP_TLS_MODE", "plain")))
+                .isInstanceOf(NotificationException.class);
+        assertThatThrownBy(
+                        () ->
+                                SmtpEmailSender.fromEnvironment(
+                                        Map.of(
+                                                "SMTP_ADDRESS", "smtp.example.com:587",
+                                                "SMTP_FROM", "app@example.com",
+                                                "SMTP_TLS_MODE", "starttls",
+                                                "SMTP_USERNAME", "mailer")))
+                .isInstanceOf(NotificationException.class);
+    }
+}

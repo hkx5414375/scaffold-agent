@@ -1,0 +1,83 @@
+package {{.PackageName}}.notifications;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.jobs.Job;
+import java.time.Instant;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
+
+class EmailNotificationHandlerTest {
+
+    @Test
+    void decodesValidatesAndSendsQueuedEmail() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        RecordingSender sender = new RecordingSender();
+        EmailNotificationHandler handler = new EmailNotificationHandler(objectMapper, sender);
+        String payload =
+                objectMapper.writeValueAsString(
+                        new EmailNotificationPayload(
+                                1,
+                                new NotificationEmail(
+                                        "Person@Example.com",
+                                        "Welcome",
+                                        "Hello",
+                                        "<p>Hello</p>")));
+
+        handler.handle(job(payload));
+
+        assertThat(sender.email.to()).isEqualTo("person@example.com");
+        assertThat(sender.email.subject()).isEqualTo("Welcome");
+    }
+
+    @Test
+    void rejectsUnknownPayloadVersionWithoutSending() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        RecordingSender sender = new RecordingSender();
+        EmailNotificationHandler handler = new EmailNotificationHandler(objectMapper, sender);
+        String payload =
+                objectMapper.writeValueAsString(
+                        new EmailNotificationPayload(
+                                2,
+                                new NotificationEmail(
+                                        "person@example.com", "Welcome", "Hello", "")));
+
+        assertThatThrownBy(() -> handler.handle(job(payload)))
+                .isInstanceOf(NotificationException.class)
+                .hasFieldOrPropertyWithValue("kind", NotificationException.Kind.INVALID);
+        assertThat(sender.email).isNull();
+    }
+
+    private static Job job(String payload) {
+        Instant now = Instant.parse("2026-09-01T00:00:00Z");
+        return new Job(
+                "job-1",
+                null,
+                NotificationService.EMAIL_JOB_TYPE,
+                payload,
+                "running",
+                0,
+                1,
+                8,
+                now,
+                "worker-1",
+                now.plusSeconds(30),
+                null,
+                now,
+                now,
+                null,
+                "global",
+                "key:request-1");
+    }
+
+    private static final class RecordingSender implements EmailSender {
+
+        private NotificationEmail email;
+
+        @Override
+        public void send(NotificationEmail email) {
+            this.email = email;
+        }
+    }
+}
