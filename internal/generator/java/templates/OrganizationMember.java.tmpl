@@ -3,4 +3,9 @@ package {{.PackageName}}.tenancy;
 import java.time.Instant;
 
 public record OrganizationMember(
-        String organizationId, String userId, String email, String role, Instant joinedAt) {}
+        String organizationId,
+        String userId,
+        String email,
+        String role,
+        Instant joinedAt{{if .TenancyLifecycle}},
+        boolean isOwner{{end}}) {}

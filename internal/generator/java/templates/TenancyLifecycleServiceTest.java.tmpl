@@ -1,0 +1,114 @@
+package {{.PackageName}}.tenancy;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import org.junit.jupiter.api.Test;
+
+class TenancyLifecycleServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final Principal OWNER =
+            new Principal("owner-1", "owner@example.com", "admin", "session", "");
+
+    @Test
+    void validatesAndDelegatesLifecycleMutations() {
+        FakeRepository repository = new FakeRepository();
+        TenancyLifecycleService service =
+                new TenancyLifecycleService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThat(service.rename(" organization-1 ", " Renamed ", OWNER).name())
+                .isEqualTo("Renamed");
+        assertThat(service.transferOwnership("organization-1", "member-1", OWNER).ownerUserId())
+                .isEqualTo("member-1");
+        assertThat(service.deactivate("organization-1", OWNER).status()).isEqualTo("inactive");
+        assertThat(service.reactivate("organization-1", OWNER).status()).isEqualTo("active");
+        assertThat(repository.action).isEqualTo("reactivate");
+    }
+
+    @Test
+    void rejectsSelfTransferAndUnsafeNames() {
+        TenancyLifecycleService service =
+                new TenancyLifecycleService(
+                        new FakeRepository(), Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(
+                        () -> service.transferOwnership("organization-1", OWNER.userId(), OWNER))
+                .isInstanceOf(TenancyException.class)
+                .hasFieldOrPropertyWithValue(
+                        "kind", TenancyException.Kind.ORGANIZATION_INVALID);
+        assertThatThrownBy(() -> service.rename("organization-1", "unsafe\nname", OWNER))
+                .isInstanceOf(TenancyException.class)
+                .hasFieldOrPropertyWithValue(
+                        "kind", TenancyException.Kind.ORGANIZATION_INVALID);
+    }
+
+    private static final class FakeRepository implements TenancyLifecycleRepository {
+
+        private String action;
+
+        @Override
+        public Organization renameOrganization(
+                String organizationId,
+                String name,
+                String actorId,
+                Instant updatedAt,
+                AuditEvent auditEvent) {
+            action = "rename";
+            return organization(organizationId, name, actorId, true, "active", updatedAt);
+        }
+
+        @Override
+        public Organization transferOwnership(
+                String organizationId,
+                String actorId,
+                String targetUserId,
+                Instant updatedAt,
+                AuditEvent auditEvent) {
+            action = "transfer";
+            return organization(
+                    organizationId, "Acme", targetUserId, false, "active", updatedAt);
+        }
+
+        @Override
+        public Organization setOrganizationActive(
+                String organizationId,
+                String actorId,
+                boolean active,
+                Instant updatedAt,
+                AuditEvent auditEvent) {
+            action = active ? "reactivate" : "deactivate";
+            return organization(
+                    organizationId,
+                    "Acme",
+                    actorId,
+                    true,
+                    active ? "active" : "inactive",
+                    updatedAt);
+        }
+
+        private static Organization organization(
+                String id,
+                String name,
+                String ownerUserId,
+                boolean owner,
+                String status,
+                Instant updatedAt) {
+            return new Organization(
+                    id,
+                    name,
+                    "admin",
+                    NOW,
+                    ownerUserId,
+                    owner,
+                    status,
+                    updatedAt,
+                    "inactive".equals(status) ? updatedAt : null);
+        }
+    }
+}

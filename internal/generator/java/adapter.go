@@ -19,16 +19,17 @@ import (
 )
 
 const (
-	backend               = "java"
-	baseOwner             = "java-service"
-	baseVersion           = "0.3.0"
-	businessOwner         = "java-crud"
-	businessVersion       = "0.1.0"
-	adminOwner            = adminui.Owner
-	adminVersion          = adminui.Version
-	tenancyOwner          = "organization-tenancy"
-	tenancyVersion        = "0.1.0"
-	tenancyMembersVersion = "0.2.0"
+	backend                 = "java"
+	baseOwner               = "java-service"
+	baseVersion             = "0.3.0"
+	businessOwner           = "java-crud"
+	businessVersion         = "0.1.0"
+	adminOwner              = adminui.Owner
+	adminVersion            = adminui.Version
+	tenancyOwner            = "organization-tenancy"
+	tenancyVersion          = "0.1.0"
+	tenancyMembersVersion   = "0.2.0"
+	tenancyLifecycleVersion = "0.3.0"
 )
 
 //go:embed all:templates
@@ -45,42 +46,45 @@ var outputTemplates = map[string]string{
 }
 
 type databaseData struct {
-	Engine                          string
-	DisplayName                     string
-	DriverGroupID                   string
-	DriverArtifactID                string
-	FlywayGroupID                   string
-	FlywayArtifactID                string
-	IdentityMigrationTemplate       string
-	BusinessMigrationTemplate       string
-	TenancyMigrationTemplate        string
-	TenancyMembersMigrationTemplate string
+	Engine                            string
+	DisplayName                       string
+	DriverGroupID                     string
+	DriverArtifactID                  string
+	FlywayGroupID                     string
+	FlywayArtifactID                  string
+	IdentityMigrationTemplate         string
+	BusinessMigrationTemplate         string
+	TenancyMigrationTemplate          string
+	TenancyMembersMigrationTemplate   string
+	TenancyLifecycleMigrationTemplate string
 }
 
 var databases = map[string]databaseData{
 	"postgresql": {
-		Engine:                          "postgresql",
-		DisplayName:                     "PostgreSQL",
-		DriverGroupID:                   "org.postgresql",
-		DriverArtifactID:                "postgresql",
-		FlywayGroupID:                   "org.flywaydb",
-		FlywayArtifactID:                "flyway-database-postgresql",
-		IdentityMigrationTemplate:       "templates/identity_postgresql.sql.tmpl",
-		BusinessMigrationTemplate:       "templates/business_postgresql.sql.tmpl",
-		TenancyMigrationTemplate:        "templates/tenancy_postgresql.sql.tmpl",
-		TenancyMembersMigrationTemplate: "templates/tenancy_members_postgresql.sql.tmpl",
+		Engine:                            "postgresql",
+		DisplayName:                       "PostgreSQL",
+		DriverGroupID:                     "org.postgresql",
+		DriverArtifactID:                  "postgresql",
+		FlywayGroupID:                     "org.flywaydb",
+		FlywayArtifactID:                  "flyway-database-postgresql",
+		IdentityMigrationTemplate:         "templates/identity_postgresql.sql.tmpl",
+		BusinessMigrationTemplate:         "templates/business_postgresql.sql.tmpl",
+		TenancyMigrationTemplate:          "templates/tenancy_postgresql.sql.tmpl",
+		TenancyMembersMigrationTemplate:   "templates/tenancy_members_postgresql.sql.tmpl",
+		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_postgresql.sql.tmpl",
 	},
 	"mysql": {
-		Engine:                          "mysql",
-		DisplayName:                     "MySQL",
-		DriverGroupID:                   "com.mysql",
-		DriverArtifactID:                "mysql-connector-j",
-		FlywayGroupID:                   "org.flywaydb",
-		FlywayArtifactID:                "flyway-mysql",
-		IdentityMigrationTemplate:       "templates/identity_mysql.sql.tmpl",
-		BusinessMigrationTemplate:       "templates/business_mysql.sql.tmpl",
-		TenancyMigrationTemplate:        "templates/tenancy_mysql.sql.tmpl",
-		TenancyMembersMigrationTemplate: "templates/tenancy_members_mysql.sql.tmpl",
+		Engine:                            "mysql",
+		DisplayName:                       "MySQL",
+		DriverGroupID:                     "com.mysql",
+		DriverArtifactID:                  "mysql-connector-j",
+		FlywayGroupID:                     "org.flywaydb",
+		FlywayArtifactID:                  "flyway-mysql",
+		IdentityMigrationTemplate:         "templates/identity_mysql.sql.tmpl",
+		BusinessMigrationTemplate:         "templates/business_mysql.sql.tmpl",
+		TenancyMigrationTemplate:          "templates/tenancy_mysql.sql.tmpl",
+		TenancyMembersMigrationTemplate:   "templates/tenancy_members_mysql.sql.tmpl",
+		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_mysql.sql.tmpl",
 	},
 }
 
@@ -101,6 +105,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyMembersVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization invitations, member administration, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization ownership, reversible lifecycle, invitations, and tenant isolation.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -214,12 +228,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
+	tenancyLifecycleEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
 			tenancyEnabled = true
 			selectedTenancyVersion = pack.Metadata.Version
-			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
+			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion ||
+				pack.Metadata.Version == tenancyLifecycleVersion
+			tenancyLifecycleEnabled = pack.Metadata.Version == tenancyLifecycleVersion
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -237,18 +254,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if tenancyMembersEnabled {
 		migrationCount++
 	}
+	if tenancyLifecycleEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
-		ProjectName:    project.Metadata.Name,
-		ArtifactID:     project.Metadata.Name,
-		PackageName:    "com.scaffold.generated." + packageSegment,
-		PackagePath:    "com/scaffold/generated/" + packageSegment,
-		Database:       database,
-		Business:       business,
-		Admin:          adminEnabled,
-		Tenancy:        tenancyEnabled,
-		TenancyMembers: tenancyMembersEnabled,
-		MigrationCount: migrationCount,
+		ProjectName:      project.Metadata.Name,
+		ArtifactID:       project.Metadata.Name,
+		PackageName:      "com.scaffold.generated." + packageSegment,
+		PackagePath:      "com/scaffold/generated/" + packageSegment,
+		Database:         database,
+		Business:         business,
+		Admin:            adminEnabled,
+		Tenancy:          tenancyEnabled,
+		TenancyMembers:   tenancyMembersEnabled,
+		TenancyLifecycle: tenancyLifecycleEnabled,
+		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
 	for path, templatePath := range outputTemplates {
@@ -256,7 +277,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	businessPaths := make(map[string]struct{}, 9)
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
-	tenancyPaths := make(map[string]struct{}, 19)
+	tenancyPaths := make(map[string]struct{}, 27)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -333,6 +354,24 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			addTenancyAdminTarget(
 				"web/admin/src/views/MembersView.vue",
 				"templates/src/views/MembersView.vue",
+			)
+		}
+	}
+	if tenancyLifecycleEnabled {
+		addTenancyTarget(mainRoot+"/tenancy/TenancyLifecycleRepository.java", "templates/TenancyLifecycleRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyLifecycleService.java", "templates/TenancyLifecycleService.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/JdbcTenancyLifecycleRepository.java", "templates/JdbcTenancyLifecycleRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/OrganizationLifecycleController.java", "templates/OrganizationLifecycleController.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyLifecycleServiceTest.java", "templates/TenancyLifecycleServiceTest.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyLifecycleDatabaseIntegrationTest.java", "templates/TenancyLifecycleDatabaseIntegrationTest.java.tmpl")
+		addTenancyTarget(
+			"src/main/resources/db/migration/V000070__organization_lifecycle.sql",
+			database.TenancyLifecycleMigrationTemplate,
+		)
+		if adminEnabled {
+			addTenancyAdminTarget(
+				"web/admin/src/views/OrganizationSettingsView.vue",
+				"templates/src/views/OrganizationSettingsView.vue",
 			)
 		}
 	}

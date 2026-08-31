@@ -1,6 +1,20 @@
 package {{.PackageName}}.tenancy;
 
+{{- if .TenancyLifecycle}}
+import com.fasterxml.jackson.annotation.JsonInclude;
+{{- end}}
 import java.time.Instant;
 
+{{- if .TenancyLifecycle}}
+@JsonInclude(JsonInclude.Include.NON_NULL)
+{{- end}}
 public record Organization(
-        String id, String name, String role, Instant createdAt) {}
+        String id,
+        String name,
+        String role,
+        Instant createdAt{{if .TenancyLifecycle}},
+        String ownerUserId,
+        boolean isOwner,
+        String status,
+        Instant updatedAt,
+        Instant deactivatedAt{{end}}) {}

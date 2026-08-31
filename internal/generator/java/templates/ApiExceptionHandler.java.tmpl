@@ -75,6 +75,33 @@ public final class ApiExceptionHandler {
                             exception.getMessage());
             case MEMBER_NOT_FOUND ->
                     response(HttpStatus.NOT_FOUND, "tenancy.member.not_found", exception.getMessage());
+{{- if .TenancyLifecycle}}
+            case ORGANIZATION_INVALID ->
+                    response(
+                            HttpStatus.BAD_REQUEST,
+                            "tenancy.organization.invalid",
+                            exception.getMessage());
+            case LIFECYCLE_FORBIDDEN ->
+                    response(
+                            HttpStatus.FORBIDDEN,
+                            "tenancy.organization.forbidden",
+                            exception.getMessage());
+            case LIFECYCLE_CONFLICT ->
+                    response(
+                            HttpStatus.CONFLICT,
+                            "tenancy.organization.state_conflict",
+                            exception.getMessage());
+            case ORGANIZATION_NOT_FOUND ->
+                    response(
+                            HttpStatus.NOT_FOUND,
+                            "tenancy.organization.not_found",
+                            exception.getMessage());
+            case OWNER_PROTECTED ->
+                    response(
+                            HttpStatus.CONFLICT,
+                            "tenancy.owner_protected",
+                            exception.getMessage());
+{{- end}}
 {{- end}}
         };
     }

@@ -37,7 +37,16 @@ public final class TenancyService {
         }
         Instant now = clock.instant();
         Organization organization =
-                new Organization(newId(), normalizedName, "admin", now);
+                new Organization(
+                        newId(),
+                        normalizedName,
+                        "admin",
+                        now{{if .TenancyLifecycle}},
+                        actor.userId(),
+                        true,
+                        "active",
+                        now,
+                        null{{end}});
         repository.createOrganization(
                 organization,
                 actor.userId(),

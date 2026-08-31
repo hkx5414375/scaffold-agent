@@ -1,0 +1,63 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class OrganizationLifecycleController {
+
+    private final TenancyLifecycleService service;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring service is a process-scoped constructor dependency")
+    public OrganizationLifecycleController(TenancyLifecycleService service) {
+        this.service = service;
+    }
+
+    @PatchMapping("/api/v1/organizations/{organizationId}")
+    public Organization rename(
+            @PathVariable String organizationId,
+            @Valid @RequestBody RenameOrganizationRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.rename(organizationId, input.name(), actor);
+    }
+
+    @PostMapping("/api/v1/organizations/{organizationId}/ownership-transfers")
+    public Organization transferOwnership(
+            @PathVariable String organizationId,
+            @Valid @RequestBody TransferOwnershipRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.transferOwnership(organizationId, input.targetUserId(), actor);
+    }
+
+    @PostMapping("/api/v1/organizations/{organizationId}/deactivation")
+    public Organization deactivate(
+            @PathVariable String organizationId,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.deactivate(organizationId, actor);
+    }
+
+    @PostMapping("/api/v1/organizations/{organizationId}/reactivation")
+    public Organization reactivate(
+            @PathVariable String organizationId,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivate(organizationId, actor);
+    }
+
+    public record RenameOrganizationRequest(
+            @NotBlank @Size(max = 120) String name) {}
+
+    public record TransferOwnershipRequest(
+            @NotBlank @Size(max = 191) String targetUserId) {}
+}

@@ -16,7 +16,7 @@ spec:
       - token
   capabilities:
     - name: organization-tenancy
-      version: 0.2.0
+      version: 0.3.0
   modules:
     - name: tasks
       entities:

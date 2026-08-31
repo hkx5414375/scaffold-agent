@@ -50,7 +50,7 @@ and a member administration view. The raw invitation token is returned once for
 delivery; agents must not search the database for it because only its digest is
 stored.
 
-The Go `0.3.0` version adds an explicit owner, organization rename, atomic ownership
+The Go and Java `0.3.0` versions add an explicit owner, organization rename, atomic ownership
 transfer, reversible deactivation, and reactivation. Transfer only targets an
 existing member and promotes that identity to administrator. Agents must not add
 a destructive organization-delete shortcut or bypass owner protection. An

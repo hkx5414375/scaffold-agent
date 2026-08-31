@@ -1,0 +1,312 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcTenancyLifecycleRepository implements TenancyLifecycleRepository {
+
+    private static final String ACTIVE = "active";
+    private static final String INACTIVE = "inactive";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcTenancyLifecycleRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public Organization renameOrganization(
+            String organizationId,
+            String name,
+            String actorId,
+            Instant updatedAt,
+            AuditEvent auditEvent) {
+        Operation<Organization> result =
+                transactionTemplate.execute(
+                        status -> {
+                            Optional<Organization> found =
+                                    organizationForUpdate(organizationId, actorId);
+                            if (found.isEmpty()) {
+                                return notFound(auditEvent);
+                            }
+                            Organization organization = found.orElseThrow();
+                            if (!ACTIVE.equals(organization.status())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.LIFECYCLE_CONFLICT,
+                                        "organization is already in the requested state");
+                            }
+                            if (!"admin".equals(organization.role())) {
+                                return forbidden(auditEvent);
+                            }
+                            jdbcTemplate.update(
+                                    "update organizations set name = ?, updated_at = ? where id = ?",
+                                    name,
+                                    Timestamp.from(updatedAt),
+                                    organizationId);
+                            appendAudit(auditEvent);
+                            return Operation.success(
+                                    organizationView(
+                                            organization,
+                                            name,
+                                            organization.ownerUserId(),
+                                            organization.isOwner(),
+                                            organization.status(),
+                                            updatedAt,
+                                            organization.deactivatedAt()));
+                        });
+        return requireSuccess(result);
+    }
+
+    @Override
+    public Organization transferOwnership(
+            String organizationId,
+            String actorId,
+            String targetUserId,
+            Instant updatedAt,
+            AuditEvent auditEvent) {
+        Operation<Organization> result =
+                transactionTemplate.execute(
+                        status -> {
+                            Optional<Organization> found =
+                                    organizationForUpdate(organizationId, actorId);
+                            if (found.isEmpty()) {
+                                return notFound(auditEvent);
+                            }
+                            Organization organization = found.orElseThrow();
+                            if (!ACTIVE.equals(organization.status())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.LIFECYCLE_CONFLICT,
+                                        "organization is already in the requested state");
+                            }
+                            if (!organization.isOwner()) {
+                                return forbidden(auditEvent);
+                            }
+                            List<String> targetRoles =
+                                    jdbcTemplate.query(
+                                            "select role_code from organization_memberships "
+                                                    + "where organization_id = ? and user_id = ? for update",
+                                            (resultSet, rowNumber) ->
+                                                    resultSet.getString("role_code"),
+                                            organizationId,
+                                            targetUserId);
+                            if (targetRoles.isEmpty()) {
+                                return notFound(auditEvent);
+                            }
+                            if (!"admin".equals(targetRoles.getFirst())) {
+                                jdbcTemplate.update(
+                                        "update organization_memberships set role_code = 'admin' "
+                                                + "where organization_id = ? and user_id = ?",
+                                        organizationId,
+                                        targetUserId);
+                            }
+                            jdbcTemplate.update(
+                                    "update organizations set owner_user_id = ?, updated_at = ? "
+                                            + "where id = ?",
+                                    targetUserId,
+                                    Timestamp.from(updatedAt),
+                                    organizationId);
+                            appendAudit(auditEvent);
+                            return Operation.success(
+                                    organizationView(
+                                            organization,
+                                            organization.name(),
+                                            targetUserId,
+                                            false,
+                                            organization.status(),
+                                            updatedAt,
+                                            organization.deactivatedAt()));
+                        });
+        return requireSuccess(result);
+    }
+
+    @Override
+    public Organization setOrganizationActive(
+            String organizationId,
+            String actorId,
+            boolean active,
+            Instant updatedAt,
+            AuditEvent auditEvent) {
+        Operation<Organization> result =
+                transactionTemplate.execute(
+                        status -> {
+                            Optional<Organization> found =
+                                    organizationForUpdate(organizationId, actorId);
+                            if (found.isEmpty()) {
+                                return notFound(auditEvent);
+                            }
+                            Organization organization = found.orElseThrow();
+                            if (!organization.isOwner()) {
+                                return forbidden(auditEvent);
+                            }
+                            String wantedStatus = active ? ACTIVE : INACTIVE;
+                            if (wantedStatus.equals(organization.status())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.LIFECYCLE_CONFLICT,
+                                        "organization is already in the requested state");
+                            }
+                            Instant deactivatedAt = active ? null : updatedAt;
+                            jdbcTemplate.update(
+                                    "update organizations set status = ?, deactivated_at = ?, "
+                                            + "updated_at = ? where id = ?",
+                                    wantedStatus,
+                                    deactivatedAt == null ? null : Timestamp.from(deactivatedAt),
+                                    Timestamp.from(updatedAt),
+                                    organizationId);
+                            appendAudit(auditEvent);
+                            return Operation.success(
+                                    organizationView(
+                                            organization,
+                                            organization.name(),
+                                            organization.ownerUserId(),
+                                            true,
+                                            wantedStatus,
+                                            updatedAt,
+                                            deactivatedAt));
+                        });
+        return requireSuccess(result);
+    }
+
+    private Optional<Organization> organizationForUpdate(
+            String organizationId, String actorId) {
+        List<Organization> organizations =
+                jdbcTemplate.query(
+                        "select organizations.id, organizations.name, organizations.owner_user_id, "
+                                + "organizations.status, organizations.deactivated_at, "
+                                + "organizations.created_at, organizations.updated_at, "
+                                + "memberships.role_code "
+                                + "from organizations join organization_memberships memberships "
+                                + "on memberships.organization_id = organizations.id "
+                                + "and memberships.user_id = ? "
+                                + "where organizations.id = ? for update",
+                        (resultSet, rowNumber) -> {
+                            Timestamp deactivatedAt = resultSet.getTimestamp("deactivated_at");
+                            String ownerUserId = resultSet.getString("owner_user_id");
+                            return new Organization(
+                                    resultSet.getString("id"),
+                                    resultSet.getString("name"),
+                                    resultSet.getString("role_code"),
+                                    resultSet.getTimestamp("created_at").toInstant(),
+                                    ownerUserId,
+                                    actorId.equals(ownerUserId),
+                                    resultSet.getString("status"),
+                                    resultSet.getTimestamp("updated_at").toInstant(),
+                                    deactivatedAt == null ? null : deactivatedAt.toInstant());
+                        },
+                        actorId,
+                        organizationId);
+        if (organizations.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(organizations.getFirst());
+    }
+
+    private Operation<Organization> forbidden(AuditEvent auditEvent) {
+        return denied(
+                auditEvent,
+                TenancyException.Kind.LIFECYCLE_FORBIDDEN,
+                "organization lifecycle action is forbidden");
+    }
+
+    private Operation<Organization> notFound(AuditEvent auditEvent) {
+        return denied(
+                auditEvent,
+                TenancyException.Kind.ORGANIZATION_NOT_FOUND,
+                "organization was not found");
+    }
+
+    private <T> Operation<T> denied(
+            AuditEvent auditEvent, TenancyException.Kind kind, String message) {
+        appendAudit(withOutcome(auditEvent, "denied"));
+        return Operation.failure(new TenancyException(kind, message));
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static Organization organizationView(
+            Organization source,
+            String name,
+            String ownerUserId,
+            boolean owner,
+            String status,
+            Instant updatedAt,
+            Instant deactivatedAt) {
+        return new Organization(
+                source.id(),
+                name,
+                source.role(),
+                source.createdAt(),
+                ownerUserId,
+                owner,
+                status,
+                updatedAt,
+                deactivatedAt);
+    }
+
+    private static AuditEvent withOutcome(AuditEvent event, String outcome) {
+        return new AuditEvent(
+                event.id(),
+                event.userId(),
+                event.action(),
+                outcome,
+                event.target(),
+                event.ipAddress(),
+                event.userAgent(),
+                event.createdAt());
+    }
+
+    private static <T> T requireSuccess(Operation<T> result) {
+        if (result == null) {
+            throw new IllegalStateException("lifecycle transaction did not return a result");
+        }
+        if (result.failure() != null) {
+            throw result.failure();
+        }
+        return result.value();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private record Operation<T>(T value, TenancyException failure) {
+
+        private static <T> Operation<T> success(T value) {
+            return new Operation<>(value, null);
+        }
+
+        private static <T> Operation<T> failure(TenancyException failure) {
+            return new Operation<>(null, failure);
+        }
+    }
+
+}

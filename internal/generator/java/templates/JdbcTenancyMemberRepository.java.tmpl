@@ -29,8 +29,14 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
         return jdbcTemplate.query(
                 "select memberships.organization_id, users.id, users.email, "
                         + "memberships.role_code, memberships.created_at "
+{{- if .TenancyLifecycle}}
+                        + ", organizations.owner_user_id = users.id as is_owner "
+{{- end}}
                         + "from organization_memberships memberships "
                         + "join identity_users users on users.id = memberships.user_id "
+{{- if .TenancyLifecycle}}
+                        + "join organizations on organizations.id = memberships.organization_id "
+{{- end}}
                         + "where memberships.organization_id = ? "
                         + "order by users.email, users.id",
                 (resultSet, rowNumber) ->
@@ -39,7 +45,8 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                 resultSet.getString("id"),
                                 resultSet.getString("email"),
                                 resultSet.getString("role_code"),
-                                resultSet.getTimestamp("created_at").toInstant()),
+                                resultSet.getTimestamp("created_at").toInstant(){{if .TenancyLifecycle}},
+                                resultSet.getBoolean("is_owner"){{end}}),
                 organizationId);
     }
 
@@ -156,7 +163,8 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                             userId,
                                             email,
                                             invitation.role(),
-                                            acceptedAt));
+                                            acceptedAt{{if .TenancyLifecycle}},
+                                            false{{end}}));
                         });
         return requireSuccess(result);
     }
@@ -175,6 +183,14 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                 return memberNotFound(auditEvent);
                             }
                             OrganizationMember member = members.getFirst();
+{{- if .TenancyLifecycle}}
+                            if (member.isOwner() && !"admin".equals(role)) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.OWNER_PROTECTED,
+                                        "transfer ownership before changing or removing the owner");
+                            }
+{{- end}}
                             if ("admin".equals(member.role())
                                     && !"admin".equals(role)
                                     && administratorCount(organizationId) <= 1) {
@@ -196,7 +212,8 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                             member.userId(),
                                             member.email(),
                                             role,
-                                            member.joinedAt()));
+                                            member.joinedAt(){{if .TenancyLifecycle}},
+                                            member.isOwner(){{end}}));
                         });
         return requireSuccess(result);
     }
@@ -214,6 +231,14 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                 return memberNotFound(auditEvent);
                             }
                             OrganizationMember member = members.getFirst();
+{{- if .TenancyLifecycle}}
+                            if (member.isOwner()) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.OWNER_PROTECTED,
+                                        "transfer ownership before changing or removing the owner");
+                            }
+{{- end}}
                             if ("admin".equals(member.role())
                                     && administratorCount(organizationId) <= 1) {
                                 return denied(
@@ -235,7 +260,11 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
     private boolean lockOrganization(String organizationId) {
         return !jdbcTemplate
                 .query(
+{{- if .TenancyLifecycle}}
+                        "select id from organizations where id = ? and status = 'active' for update",
+{{- else}}
                         "select id from organizations where id = ? for update",
+{{- end}}
                         (resultSet, rowNumber) -> resultSet.getString("id"),
                         organizationId)
                 .isEmpty();
@@ -270,8 +299,14 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
         return jdbcTemplate.query(
                 "select memberships.organization_id, users.id, users.email, "
                         + "memberships.role_code, memberships.created_at "
+{{- if .TenancyLifecycle}}
+                        + ", organizations.owner_user_id = users.id as is_owner "
+{{- end}}
                         + "from organization_memberships memberships "
                         + "join identity_users users on users.id = memberships.user_id "
+{{- if .TenancyLifecycle}}
+                        + "join organizations on organizations.id = memberships.organization_id "
+{{- end}}
                         + "where memberships.organization_id = ? and memberships.user_id = ? for update",
                 (resultSet, rowNumber) ->
                         new OrganizationMember(
@@ -279,7 +314,8 @@ public final class JdbcTenancyMemberRepository implements TenancyMemberRepositor
                                 resultSet.getString("id"),
                                 resultSet.getString("email"),
                                 resultSet.getString("role_code"),
-                                resultSet.getTimestamp("created_at").toInstant()),
+                                resultSet.getTimestamp("created_at").toInstant(){{if .TenancyLifecycle}},
+                                resultSet.getBoolean("is_owner"){{end}}),
                 organizationId,
                 userId);
     }

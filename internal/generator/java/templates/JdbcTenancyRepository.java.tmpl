@@ -36,11 +36,15 @@ public final class JdbcTenancyRepository implements TenancyRepository {
                 status -> {
                     jdbcTemplate.update(
                             "insert into organizations "
-                                    + "(id, name, created_by, created_at, updated_at) "
-                                    + "values (?, ?, ?, ?, ?)",
+                                    + "(id, name, created_by{{if .TenancyLifecycle}}, owner_user_id, status{{end}}, created_at, updated_at) "
+                                    + "values (?, ?, ?{{if .TenancyLifecycle}}, ?, ?{{end}}, ?, ?)",
                             organization.id(),
                             organization.name(),
                             userId,
+{{- if .TenancyLifecycle}}
+                            userId,
+                            "active",
+{{- end}}
                             Timestamp.from(createdAt),
                             Timestamp.from(createdAt));
                     jdbcTemplate.update(
@@ -60,6 +64,10 @@ public final class JdbcTenancyRepository implements TenancyRepository {
         return jdbcTemplate.query(
                 "select organizations.id, organizations.name, "
                         + "memberships.role_code, organizations.created_at "
+{{- if .TenancyLifecycle}}
+                        + ", organizations.owner_user_id, organizations.status, "
+                        + "organizations.updated_at, organizations.deactivated_at "
+{{- end}}
                         + "from organization_memberships memberships "
                         + "join organizations on organizations.id = memberships.organization_id "
                         + "where memberships.user_id = ? "
@@ -69,7 +77,14 @@ public final class JdbcTenancyRepository implements TenancyRepository {
                                 resultSet.getString("id"),
                                 resultSet.getString("name"),
                                 resultSet.getString("role_code"),
-                                resultSet.getTimestamp("created_at").toInstant()),
+                                resultSet.getTimestamp("created_at").toInstant(){{if .TenancyLifecycle}},
+                                resultSet.getString("owner_user_id"),
+                                userId.equals(resultSet.getString("owner_user_id")),
+                                resultSet.getString("status"),
+                                resultSet.getTimestamp("updated_at").toInstant(),
+                                resultSet.getTimestamp("deactivated_at") == null
+                                        ? null
+                                        : resultSet.getTimestamp("deactivated_at").toInstant(){{end}}),
                 userId);
     }
 
@@ -77,8 +92,15 @@ public final class JdbcTenancyRepository implements TenancyRepository {
     public Optional<String> membershipRole(String organizationId, String userId) {
         List<String> roles =
                 jdbcTemplate.query(
+{{- if .TenancyLifecycle}}
+                        "select memberships.role_code from organization_memberships memberships "
+                                + "join organizations on organizations.id = memberships.organization_id "
+                                + "where memberships.organization_id = ? and memberships.user_id = ? "
+                                + "and organizations.status = 'active'",
+{{- else}}
                         "select role_code from organization_memberships "
                                 + "where organization_id = ? and user_id = ?",
+{{- end}}
                         (resultSet, rowNumber) -> resultSet.getString("role_code"),
                         organizationId,
                         userId);

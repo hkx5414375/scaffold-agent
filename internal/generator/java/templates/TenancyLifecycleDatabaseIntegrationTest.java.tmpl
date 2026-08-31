@@ -3,6 +3,7 @@ package {{.PackageName}}.tenancy;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import {{.PackageName}}.identity.IdentityException;
 import {{.PackageName}}.identity.IdentityService;
 import {{.PackageName}}.identity.JdbcIdentityRepository;
 import {{.PackageName}}.identity.PasswordHasher;
@@ -12,12 +13,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.Arrays;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
@@ -27,16 +23,17 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
-class TenancyMemberDatabaseIntegrationTest {
+class TenancyLifecycleDatabaseIntegrationTest {
 
     @Test
     @Timeout(45)
-    void managesInvitationsAndProtectsConcurrentLastAdministratorChanges() throws Exception {
+    void transfersOwnershipAndReversesDeactivationWithoutDeletingTenantData()
+            throws SQLException {
         String adminUrl = environment("TEST_DATABASE_URL");
         Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
         String username = environment("TEST_DATABASE_USER");
         String password = environment("TEST_DATABASE_PASSWORD");
-        String scope = "scaffold_java_members_" + UUID.randomUUID().toString().replace("-", "");
+        String scope = "scaffold_java_lifecycle_" + UUID.randomUUID().toString().replace("-", "");
         String applicationUrl;
 {{- if eq .Database.Engine "postgresql"}}
         execute(adminUrl, username, password, "create schema " + scope);
@@ -61,17 +58,19 @@ class TenancyMemberDatabaseIntegrationTest {
                             new PasswordHasher(),
                             new TokenCodec());
             String passwordValue = "correct horse battery staple";
-            identityService.ensureAdmin("admin@example.com", passwordValue);
+            identityService.ensureAdmin("owner@example.com", passwordValue);
             identityService.ensureAdmin("member@example.com", passwordValue);
-            Principal admin = login(identityService, "admin@example.com", passwordValue);
+            Principal owner = login(identityService, "owner@example.com", passwordValue);
             Principal member = login(identityService, "member@example.com", passwordValue);
 
             TenancyService tenancy =
                     new TenancyService(new JdbcTenancyRepository(jdbcTemplate, transactions));
-            Organization organization = tenancy.create("Acme", admin);
-            Principal scopedAdmin =
+            Organization organization = tenancy.create("Acme", owner);
+            assertThat(organization.ownerUserId()).isEqualTo(owner.userId());
+            assertThat(organization.isOwner()).isTrue();
+            Principal scopedOwner =
                     tenancy.authorize(
-                            admin,
+                            owner,
                             organization.id(),
                             "tenancy:members:manage",
                             "127.0.0.1",
@@ -80,93 +79,82 @@ class TenancyMemberDatabaseIntegrationTest {
                     new TenancyMemberService(
                             new JdbcTenancyMemberRepository(jdbcTemplate, transactions));
             OrganizationInvitation invitation =
-                    members.invite("member@example.com", "admin", scopedAdmin);
-            assertThat(invitation.acceptanceToken()).isNotBlank();
-            assertThat(
-                            jdbcTemplate.queryForObject(
-                                    "select token_hash from organization_invitations where id = ?",
-                                    String.class,
-                                    invitation.id()))
-                    .hasSize(64)
-                    .isNotEqualTo(invitation.acceptanceToken());
+                    members.invite("member@example.com", "user", scopedOwner);
+            members.accept(invitation.acceptanceToken(), member);
 
-            OrganizationMember accepted = members.accept(invitation.acceptanceToken(), member);
-            assertThat(accepted.role()).isEqualTo("admin");
-            assertThatThrownBy(() -> members.accept(invitation.acceptanceToken(), member))
+            TenancyLifecycleService lifecycle =
+                    new TenancyLifecycleService(
+                            new JdbcTenancyLifecycleRepository(jdbcTemplate, transactions));
+            assertThat(lifecycle.rename(organization.id(), "Renamed", owner).name())
+                    .isEqualTo("Renamed");
+            assertThatThrownBy(() -> lifecycle.deactivate(organization.id(), member))
                     .isInstanceOf(TenancyException.class)
                     .hasFieldOrPropertyWithValue(
-                            "kind", TenancyException.Kind.INVITATION_INVALID);
+                            "kind", TenancyException.Kind.LIFECYCLE_FORBIDDEN);
+            assertThatThrownBy(() -> members.changeRole(owner.userId(), "user", scopedOwner))
+                    .isInstanceOf(TenancyException.class)
+                    .hasFieldOrPropertyWithValue(
+                            "kind", TenancyException.Kind.OWNER_PROTECTED);
+            assertThatThrownBy(() -> members.remove(owner.userId(), scopedOwner))
+                    .isInstanceOf(TenancyException.class)
+                    .hasFieldOrPropertyWithValue(
+                            "kind", TenancyException.Kind.OWNER_PROTECTED);
 
-            Principal scopedMember =
-                    tenancy.authorize(
-                            member,
-                            organization.id(),
-                            "tenancy:members:manage",
-                            "127.0.0.1",
-                            "integration-test");
-{{- if .TenancyLifecycle}}
-            assertThat(members.list(scopedMember))
-                    .filteredOn(value -> "admin".equals(value.role()))
-                    .hasSize(2);
-{{- else}}
-            assertConcurrentAdministratorProtection(
-                    members, scopedAdmin, scopedMember, admin.userId(), member.userId());
-            assertThat(members.list(scopedAdmin))
-                    .filteredOn(value -> "admin".equals(value.role()))
-                    .hasSize(1);
-{{- end}}
+            Organization transferred =
+                    lifecycle.transferOwnership(organization.id(), member.userId(), owner);
+            assertThat(transferred.ownerUserId()).isEqualTo(member.userId());
+            assertThat(transferred.isOwner()).isFalse();
+            assertThat(
+                            jdbcTemplate.queryForObject(
+                                    "select role_code from organization_memberships "
+                                            + "where organization_id = ? and user_id = ?",
+                                    String.class,
+                                    organization.id(),
+                                    member.userId()))
+                    .isEqualTo("admin");
+
+            assertThatThrownBy(() -> lifecycle.deactivate(organization.id(), owner))
+                    .isInstanceOf(TenancyException.class)
+                    .hasFieldOrPropertyWithValue(
+                            "kind", TenancyException.Kind.LIFECYCLE_FORBIDDEN);
+            Organization inactive = lifecycle.deactivate(organization.id(), member);
+            assertThat(inactive.status()).isEqualTo("inactive");
+            assertThat(inactive.deactivatedAt()).isNotNull();
+            assertThatThrownBy(
+                            () ->
+                                    tenancy.authorize(
+                                            member,
+                                            organization.id(),
+                                            "tenancy:members:read",
+                                            "127.0.0.1",
+                                            "integration-test"))
+                    .isInstanceOf(IdentityException.class);
+            assertThat(tenancy.list(member).getFirst().status()).isEqualTo("inactive");
+
+            Organization active = lifecycle.reactivate(organization.id(), member);
+            assertThat(active.status()).isEqualTo("active");
+            assertThat(active.deactivatedAt()).isNull();
+            assertThat(
+                            tenancy.authorize(
+                                            member,
+                                            organization.id(),
+                                            "tenancy:members:read",
+                                            "127.0.0.1",
+                                            "integration-test")
+                                    .organizationId())
+                    .isEqualTo(organization.id());
             assertThat(
                             jdbcTemplate.queryForObject(
                                     "select count(*) from audit_events "
-                                            + "where action like 'tenancy.member.%' "
-                                            + "or action = 'tenancy.invitation.accept'",
+                                            + "where action like 'tenancy.organization.%'",
                                     Integer.class))
-                    .isGreaterThanOrEqualTo(4);
+                    .isGreaterThanOrEqualTo(7);
         } finally {
 {{- if eq .Database.Engine "postgresql"}}
             execute(adminUrl, username, password, "drop schema " + scope + " cascade");
 {{- else}}
             execute(adminUrl, username, password, "drop database `" + scope + "`");
 {{- end}}
-        }
-    }
-
-    private static void assertConcurrentAdministratorProtection(
-            TenancyMemberService service,
-            Principal firstActor,
-            Principal secondActor,
-            String firstUserId,
-            String secondUserId)
-            throws Exception {
-        CountDownLatch start = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Future<TenancyException.Kind> first =
-                    executor.submit(
-                            () -> demoteAfter(start, service, firstUserId, firstActor));
-            Future<TenancyException.Kind> second =
-                    executor.submit(
-                            () -> demoteAfter(start, service, secondUserId, secondActor));
-            start.countDown();
-            assertThat(Arrays.asList(first.get(), second.get()))
-                    .containsExactlyInAnyOrder(null, TenancyException.Kind.LAST_ADMINISTRATOR);
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    private static TenancyException.Kind demoteAfter(
-            CountDownLatch start,
-            TenancyMemberService service,
-            String userId,
-            Principal actor)
-            throws InterruptedException {
-        start.await();
-        try {
-            service.changeRole(userId, "user", actor);
-            return null;
-        } catch (TenancyException exception) {
-            return exception.kind();
         }
     }
 

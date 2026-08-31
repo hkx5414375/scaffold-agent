@@ -52,6 +52,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java OpenAPI and shared Vue/Element Plus administration parity with locked frontend build gates.
 - [x] Java organization-tenancy 0.1 with atomic organization creation, membership RBAC, tenant-scoped CRUD, and administration selection.
 - [x] Java organization-tenancy 0.2 with email-bound invitations, member administration, and concurrent last-administrator protection.
+- [x] Java organization-tenancy 0.3 with ownership transfer, reversible deactivation, inactive authorization blocking, and owner-safe administration.
 - [ ] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 

@@ -59,6 +59,15 @@ an authenticated identity with the invited email. Keep member mutations inside t
 generated repository transaction so concurrent changes cannot remove the final
 administrator.
 {{end}}
+{{if .TenancyLifecycle}}
+
+The organization creator is its initial owner. Active administrators may rename
+the organization; only the owner may transfer ownership, deactivate, or reactivate
+it. Transfer targets an existing member and promotes that identity to administrator.
+Deactivation retains all tenant data but blocks new tenant-authorized requests.
+Transfer ownership before changing or removing the owner; do not add a cascading
+organization deletion shortcut.
+{{end}}
 {{if .Admin}}
 
 ## Administration UI

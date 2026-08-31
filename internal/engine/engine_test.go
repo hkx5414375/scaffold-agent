@@ -311,6 +311,14 @@ func TestJavaMySQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "mysql", true, true, "0.2.0")
 }
 
+func TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql", true, true, "0.3.0")
+}
+
+func TestJavaMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql", true, true, "0.3.0")
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -642,8 +650,14 @@ MODULES
 	if tenancyVersion != "" {
 		wantChanges += 9
 	}
-	if tenancyVersion == "0.2.0" {
+	if tenancyVersion == "0.2.0" || tenancyVersion == "0.3.0" {
 		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
+	}
+	if tenancyVersion == "0.3.0" {
+		wantChanges += 7
 		if admin {
 			wantChanges++
 		}

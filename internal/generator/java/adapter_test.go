@@ -265,6 +265,104 @@ func TestOrganizationMemberUpgradePreservesFoundationMigration(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationLifecycleForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyLifecycleVersion,
+			}}
+			project.Spec.Modules = []spec.Module{businessModule()}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 87 ||
+				result.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/TenancyLifecycleService.java",
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/OrganizationLifecycleController.java",
+				"src/test/java/com/scaffold/generated/demoservice/tenancy/TenancyLifecycleDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000070__organization_lifecycle.sql",
+				"web/admin/src/views/OrganizationSettingsView.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != tenancyOwner {
+					t.Errorf("Generate() lifecycle output %s is missing or has the wrong owner", path)
+				}
+			}
+			migration := string(outputContent(
+				result, "src/main/resources/db/migration/V000070__organization_lifecycle.sql",
+			))
+			if !strings.Contains(migration, "owner_user_id") ||
+				!strings.Contains(migration, "deactivated_at") {
+				t.Fatalf("generated lifecycle migration is incomplete:\n%s", migration)
+			}
+			memberRepository := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/JdbcTenancyMemberRepository.java"))
+			if !strings.Contains(memberRepository, "OWNER_PROTECTED") {
+				t.Fatalf("generated member repository does not protect the owner:\n%s", memberRepository)
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated lifecycle OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI),
+				"/api/v1/organizations/{organizationId}/reactivation:") ||
+				!strings.Contains(string(openAPI), "owner_user_id") {
+				t.Fatalf("generated OpenAPI lacks lifecycle workflows:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestOrganizationLifecycleUpgradePreservesEarlierMigrations(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			versionTwo := validProject()
+			versionTwo.Spec.Database.Engine = database
+			versionTwo.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyMembersVersion,
+			}}
+			versionThree := validProject()
+			versionThree.Spec.Database.Engine = database
+			versionThree.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyLifecycleVersion,
+			}}
+			members, err := New().Generate(context.Background(), versionTwo)
+			if err != nil {
+				t.Fatalf("Generate(0.2.0) error = %v", err)
+			}
+			lifecycle, err := New().Generate(context.Background(), versionThree)
+			if err != nil {
+				t.Fatalf("Generate(0.3.0) error = %v", err)
+			}
+			for _, migration := range []string{
+				"src/main/resources/db/migration/V000050__organization_tenancy.sql",
+				"src/main/resources/db/migration/V000060__organization_members.sql",
+			} {
+				if !reflect.DeepEqual(
+					outputContent(members, migration), outputContent(lifecycle, migration),
+				) {
+					t.Fatalf("organization-tenancy 0.3.0 rewrites migration %s", migration)
+				}
+			}
+		})
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

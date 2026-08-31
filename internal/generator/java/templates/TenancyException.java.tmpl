@@ -9,7 +9,12 @@ public final class TenancyException extends RuntimeException {
         INVITATION_INVALID,
         MEMBER_CONFLICT,
         LAST_ADMINISTRATOR,
-        MEMBER_NOT_FOUND
+        MEMBER_NOT_FOUND{{if .TenancyLifecycle}},
+        ORGANIZATION_INVALID,
+        LIFECYCLE_FORBIDDEN,
+        LIFECYCLE_CONFLICT,
+        ORGANIZATION_NOT_FOUND,
+        OWNER_PROTECTED{{end}}
 {{- end}}
     }
 

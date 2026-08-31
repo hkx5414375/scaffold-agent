@@ -1,0 +1,128 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class TenancyLifecycleService {
+
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final int MAXIMUM_NAME_LENGTH = 120;
+
+    private final TenancyLifecycleRepository repository;
+    private final Clock clock;
+
+    public TenancyLifecycleService(TenancyLifecycleRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    TenancyLifecycleService(TenancyLifecycleRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public Organization rename(
+            String organizationId, String name, Principal actor) {
+        requireActor(actor);
+        String normalizedOrganizationId = normalizeIdentifier(organizationId);
+        String normalizedName = name == null ? "" : name.trim();
+        if (normalizedName.isEmpty()
+                || normalizedName.length() > MAXIMUM_NAME_LENGTH
+                || normalizedName.chars().anyMatch(Character::isISOControl)) {
+            throw invalidInput();
+        }
+        Instant now = clock.instant();
+        return repository.renameOrganization(
+                normalizedOrganizationId,
+                normalizedName,
+                actor.userId(),
+                now,
+                audit(actor.userId(), "tenancy.organization.rename", normalizedOrganizationId, now));
+    }
+
+    public Organization transferOwnership(
+            String organizationId, String targetUserId, Principal actor) {
+        requireActor(actor);
+        String normalizedOrganizationId = normalizeIdentifier(organizationId);
+        String normalizedTargetUserId = normalizeIdentifier(targetUserId);
+        if (normalizedTargetUserId.equals(actor.userId())) {
+            throw invalidInput();
+        }
+        Instant now = clock.instant();
+        return repository.transferOwnership(
+                normalizedOrganizationId,
+                actor.userId(),
+                normalizedTargetUserId,
+                now,
+                audit(
+                        actor.userId(),
+                        "tenancy.organization.ownership.transfer",
+                        normalizedOrganizationId + ":" + normalizedTargetUserId,
+                        now));
+    }
+
+    public Organization deactivate(String organizationId, Principal actor) {
+        return setActive(organizationId, actor, false);
+    }
+
+    public Organization reactivate(String organizationId, Principal actor) {
+        return setActive(organizationId, actor, true);
+    }
+
+    private Organization setActive(
+            String organizationId, Principal actor, boolean active) {
+        requireActor(actor);
+        String normalizedOrganizationId = normalizeIdentifier(organizationId);
+        Instant now = clock.instant();
+        String action =
+                active
+                        ? "tenancy.organization.reactivate"
+                        : "tenancy.organization.deactivate";
+        return repository.setOrganizationActive(
+                normalizedOrganizationId,
+                actor.userId(),
+                active,
+                now,
+                audit(actor.userId(), action, normalizedOrganizationId, now));
+    }
+
+    private static String normalizeIdentifier(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.isEmpty() || normalized.length() > MAXIMUM_IDENTIFIER_LENGTH) {
+            throw invalidInput();
+        }
+        return normalized;
+    }
+
+    private static void requireActor(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank()) {
+            throw new IdentityException(
+                    IdentityException.Kind.INVALID_CREDENTIALS,
+                    "valid session or bearer credentials are required");
+        }
+    }
+
+    private static AuditEvent audit(
+            String userId, String action, String target, Instant now) {
+        return new AuditEvent(
+                UUID.randomUUID().toString(),
+                userId,
+                action,
+                "succeeded",
+                target,
+                "",
+                "",
+                now);
+    }
+
+    private static TenancyException invalidInput() {
+        return new TenancyException(
+                TenancyException.Kind.ORGANIZATION_INVALID,
+                "organization input is invalid");
+    }
+}

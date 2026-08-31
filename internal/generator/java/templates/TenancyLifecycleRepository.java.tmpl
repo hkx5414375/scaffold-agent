@@ -1,0 +1,28 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import java.time.Instant;
+
+public interface TenancyLifecycleRepository {
+
+    Organization renameOrganization(
+            String organizationId,
+            String name,
+            String actorId,
+            Instant updatedAt,
+            AuditEvent auditEvent);
+
+    Organization transferOwnership(
+            String organizationId,
+            String actorId,
+            String targetUserId,
+            Instant updatedAt,
+            AuditEvent auditEvent);
+
+    Organization setOrganizationActive(
+            String organizationId,
+            String actorId,
+            boolean active,
+            Instant updatedAt,
+            AuditEvent auditEvent);
+}

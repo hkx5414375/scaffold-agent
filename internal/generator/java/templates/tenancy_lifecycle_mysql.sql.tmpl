@@ -1,0 +1,12 @@
+alter table organizations add column owner_user_id varchar(191);
+update organizations set owner_user_id = created_by;
+alter table organizations modify owner_user_id varchar(191) not null;
+alter table organizations add constraint organizations_owner_fk
+    foreign key (owner_user_id) references identity_users (id);
+alter table organizations add column status varchar(16) not null default 'active';
+alter table organizations add column deactivated_at datetime(6);
+alter table organizations add constraint organizations_lifecycle_check check (
+    (status = 'active' and deactivated_at is null)
+    or (status = 'inactive' and deactivated_at is not null)
+);
+alter table organizations add index organizations_owner_idx (owner_user_id, id);

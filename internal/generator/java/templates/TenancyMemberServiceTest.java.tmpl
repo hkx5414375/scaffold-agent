@@ -66,6 +66,24 @@ class TenancyMemberServiceTest {
         assertThatThrownBy(() -> service.remove("admin-1", ADMIN))
                 .isSameAs(repository.failure);
     }
+{{- if .TenancyLifecycle}}
+
+    @Test
+    void propagatesOwnerProtection() {
+        FakeRepository repository = new FakeRepository();
+        repository.failure =
+                new TenancyException(
+                        TenancyException.Kind.OWNER_PROTECTED,
+                        "transfer ownership before changing or removing the owner");
+        TenancyMemberService service =
+                new TenancyMemberService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(() -> service.changeRole("owner-1", "user", ADMIN))
+                .isSameAs(repository.failure);
+        assertThatThrownBy(() -> service.remove("owner-1", ADMIN))
+                .isSameAs(repository.failure);
+    }
+{{- end}}
 
     private static final class FakeRepository implements TenancyMemberRepository {
 
@@ -115,7 +133,8 @@ class TenancyMemberServiceTest {
         }
 
         private static OrganizationMember member(String userId, String email, String role) {
-            return new OrganizationMember("organization-1", userId, email, role, NOW);
+            return new OrganizationMember(
+                    "organization-1", userId, email, role, NOW{{if .TenancyLifecycle}}, false{{end}});
         }
     }
 }
