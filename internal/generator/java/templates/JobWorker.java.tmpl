@@ -1,0 +1,125 @@
+package {{.PackageName}}.jobs;
+
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+
+public final class JobWorker {
+
+    private static final Duration DEFAULT_LEASE_DURATION = Duration.ofSeconds(30);
+
+    private final JobService service;
+    private final Map<String, Handler> handlers;
+    private final String workerId;
+    private final Duration leaseDuration;
+
+    public JobWorker(JobService service, String workerId, List<Handler> handlers) {
+        this(service, workerId, handlers, DEFAULT_LEASE_DURATION);
+    }
+
+    JobWorker(
+            JobService service,
+            String workerId,
+            List<Handler> handlers,
+            Duration leaseDuration) {
+        if (service == null
+                || workerId == null
+                || workerId.isBlank()
+                || workerId.length() > 128
+                || handlers == null
+                || handlers.isEmpty()) {
+            throw new JobException(JobException.Kind.INVALID, "background worker input is invalid");
+        }
+        this.service = service;
+        this.workerId = workerId.trim();
+        this.leaseDuration = leaseDuration;
+        this.handlers = indexHandlers(handlers);
+    }
+
+    public void runOnce() {
+        Job job = service.leaseNext(workerId, leaseDuration);
+        Handler handler = handlers.get(job.type());
+        if (handler == null) {
+            service.fail(
+                    job,
+                    workerId,
+                    new IllegalStateException("no handler registered for job type " + job.type()));
+            return;
+        }
+        Exception failure = executeWithHeartbeat(job, handler);
+        if (failure == null) {
+            service.complete(job.id(), workerId);
+        } else {
+            service.fail(job, workerId, failure);
+        }
+    }
+
+    private Exception executeWithHeartbeat(Job job, Handler handler) {
+        Thread handlerThread = Thread.currentThread();
+        AtomicReference<Exception> heartbeatFailure = new AtomicReference<>();
+        ScheduledExecutorService scheduler =
+                Executors.newSingleThreadScheduledExecutor(
+                        task -> {
+                            Thread thread = new Thread(task, "job-heartbeat-" + workerId);
+                            thread.setDaemon(true);
+                            return thread;
+                        });
+        long heartbeatMillis = Math.max(1, leaseDuration.toMillis() / 3);
+        ScheduledFuture<?> heartbeat =
+                scheduler.scheduleAtFixedRate(
+                        () -> {
+                            try {
+                                service.extendLease(job.id(), workerId, leaseDuration);
+                            } catch (RuntimeException exception) {
+                                heartbeatFailure.compareAndSet(null, exception);
+                                handlerThread.interrupt();
+                            }
+                        },
+                        heartbeatMillis,
+                        heartbeatMillis,
+                        TimeUnit.MILLISECONDS);
+        Exception handlerFailure = null;
+        try {
+            handler.handle(job);
+        } catch (Exception exception) {
+            handlerFailure = exception;
+        } finally {
+            heartbeat.cancel(true);
+            scheduler.shutdownNow();
+        }
+        Exception leaseFailure = heartbeatFailure.get();
+        if (leaseFailure != null) {
+            Thread.interrupted();
+            return leaseFailure;
+        }
+        return handlerFailure;
+    }
+
+    private static Map<String, Handler> indexHandlers(List<Handler> handlers) {
+        Map<String, Handler> indexed = new HashMap<>();
+        for (Handler handler : handlers) {
+            if (handler == null || handler.type() == null || handler.type().isBlank()) {
+                throw new JobException(JobException.Kind.INVALID, "background worker input is invalid");
+            }
+            if (indexed.putIfAbsent(handler.type(), handler) != null) {
+                throw new JobException(
+                        JobException.Kind.INVALID,
+                        "background job handler type is duplicated: " + handler.type());
+            }
+        }
+        return Map.copyOf(indexed);
+    }
+
+    public interface Handler {
+
+        String type();
+
+        void handle(Job job) throws Exception;
+    }
+}

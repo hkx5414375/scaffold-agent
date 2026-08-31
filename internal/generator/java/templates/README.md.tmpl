@@ -41,6 +41,23 @@ cookie, while automation uses `Authorization: Bearer <token>`. Raw session and A
 tokens are returned only to their owners and only SHA-256 digests are persisted.
 Database errors are never returned to clients. The HTTP contract is
 `api/openapi.yaml`.
+{{if .Jobs}}
+
+## Background worker
+
+The durable queue uses idempotent enqueue, bounded payloads, expiring leases,
+heartbeat renewal, exponential retry, and a terminal dead state. Start an independent
+worker process after building the service:
+
+```bash
+java -jar target/{{.ArtifactID}}-0.1.0-SNAPSHOT.jar \
+  --spring.main.web-application-type=none --scaffold.worker.enabled=true
+```
+
+Set `WORKER_ID` to a stable unique process name when desired. Add Spring beans that
+implement `JobWorker.Handler`; handlers must honor thread interruption and must not
+log payload contents. The web process leaves the worker disabled by default.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

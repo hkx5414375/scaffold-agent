@@ -1,0 +1,21 @@
+package {{.PackageName}}.jobs;
+
+public final class JobException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        LEASE_LOST
+    }
+
+    private final Kind kind;
+
+    public JobException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

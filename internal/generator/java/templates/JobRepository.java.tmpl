@@ -1,0 +1,22 @@
+package {{.PackageName}}.jobs;
+
+import java.time.Instant;
+
+public interface JobRepository {
+
+    Job enqueue(Job job);
+
+    Job leaseNext(String workerId, Instant now, Instant leaseUntil);
+
+    void extendLease(String jobId, String workerId, Instant now, Instant leaseUntil);
+
+    void complete(String jobId, String workerId, Instant now);
+
+    void fail(
+            String jobId,
+            String workerId,
+            String message,
+            Instant retryAt,
+            boolean dead,
+            Instant now);
+}

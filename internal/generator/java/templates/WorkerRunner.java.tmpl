@@ -1,0 +1,83 @@
+package {{.PackageName}}.jobs;
+
+import java.lang.management.ManagementFactory;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.time.Duration;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.stereotype.Component;
+
+@Component
+@ConditionalOnProperty(name = "scaffold.worker.enabled", havingValue = "true")
+public final class WorkerRunner implements ApplicationRunner {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(WorkerRunner.class);
+    private static final Duration POLL_INTERVAL = Duration.ofSeconds(1);
+
+    private final JobWorker worker;
+
+    public WorkerRunner(JobService service, List<JobWorker.Handler> handlers) {
+        this.worker = new JobWorker(service, workerIdentifier(), handlers);
+    }
+
+    @Override
+    public void run(ApplicationArguments arguments) throws InterruptedException {
+        LOGGER.info("background worker started worker_id={}", workerIdentifier());
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                worker.runOnce();
+            } catch (JobException exception) {
+                if (exception.kind() != JobException.Kind.NOT_FOUND) {
+                    LOGGER.error(
+                            "background job iteration failed worker_id={} kind={}",
+                            workerIdentifier(),
+                            exception.kind());
+                }
+                Thread.sleep(POLL_INTERVAL.toMillis());
+            } catch (RuntimeException exception) {
+                LOGGER.error(
+                        "background job iteration failed worker_id={} type={}",
+                        workerIdentifier(),
+                        exception.getClass().getName());
+                Thread.sleep(POLL_INTERVAL.toMillis());
+            }
+        }
+    }
+
+    private static String workerIdentifier() {
+        String configured = System.getenv("WORKER_ID");
+        if (configured != null && !configured.isBlank() && configured.trim().length() <= 128) {
+            return configured.trim();
+        }
+        String generated = hostname() + "-" + ManagementFactory.getRuntimeMXBean().getPid();
+        return generated.length() <= 128 ? generated : generated.substring(0, 128);
+    }
+
+    private static String hostname() {
+        try {
+            String hostname = InetAddress.getLocalHost().getHostName();
+            return hostname == null || hostname.isBlank() ? "worker" : hostname;
+        } catch (UnknownHostException exception) {
+            return "worker";
+        }
+    }
+
+    @Component
+    public static final class NoopHandler implements JobWorker.Handler {
+
+        @Override
+        public String type() {
+            return "system.noop";
+        }
+
+        @Override
+        public void handle(Job job) {
+            // Deliberately empty extension example.
+        }
+    }
+}

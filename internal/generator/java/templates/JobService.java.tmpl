@@ -1,0 +1,192 @@
+package {{.PackageName}}.jobs;
+
+import tools.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class JobService {
+
+    private static final Pattern TYPE_PATTERN =
+            Pattern.compile("^[a-z][a-z0-9_.-]{0,127}$");
+    private static final int MAXIMUM_PAYLOAD_BYTES = 1 << 20;
+    private static final int DEFAULT_MAX_ATTEMPTS = 8;
+    private static final Duration MAXIMUM_RETRY_DELAY = Duration.ofMinutes(15);
+
+    private final JobRepository repository;
+    private final ObjectMapper objectMapper;
+    private final Clock clock;
+
+    public JobService(JobRepository repository, ObjectMapper objectMapper) {
+        this(repository, objectMapper, Clock.systemUTC());
+    }
+
+    JobService(JobRepository repository, ObjectMapper objectMapper, Clock clock) {
+        this.repository = repository;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    public Job enqueue(
+            String organizationId,
+            String type,
+            String payloadJson,
+            String idempotencyKey,
+            int priority,
+            int maxAttempts) {
+        String normalizedOrganizationId = organizationId == null ? "" : organizationId.trim();
+{{- if .Tenancy}}
+        if (normalizedOrganizationId.isEmpty() || normalizedOrganizationId.length() > 191) {
+            throw invalid();
+        }
+{{- else}}
+        normalizedOrganizationId = "";
+{{- end}}
+        String normalizedType = type == null ? "" : type.trim();
+        String normalizedIdempotencyKey =
+                idempotencyKey == null ? "" : idempotencyKey.trim();
+        if (!TYPE_PATTERN.matcher(normalizedType).matches()
+                || !validPayload(payloadJson)
+                || normalizedIdempotencyKey.length() > 128
+                || priority < -100
+                || priority > 100) {
+            throw invalid();
+        }
+        int attemptsLimit = maxAttempts == 0 ? DEFAULT_MAX_ATTEMPTS : maxAttempts;
+        if (attemptsLimit < 1 || attemptsLimit > 100) {
+            throw invalid();
+        }
+        Instant now = clock.instant();
+        String id = UUID.randomUUID().toString();
+        String scopeKey = normalizedOrganizationId.isEmpty() ? "global" : normalizedOrganizationId;
+        String dedupeKey =
+                normalizedIdempotencyKey.isEmpty()
+                        ? "job:" + id
+                        : "key:" + normalizedIdempotencyKey;
+        return repository.enqueue(
+                new Job(
+                        id,
+                        emptyToNull(normalizedOrganizationId),
+                        normalizedType,
+                        payloadJson,
+                        "queued",
+                        priority,
+                        0,
+                        attemptsLimit,
+                        now,
+                        null,
+                        null,
+                        null,
+                        now,
+                        now,
+                        null,
+                        scopeKey,
+                        dedupeKey));
+    }
+
+    public Job leaseNext(String workerId, Duration leaseDuration) {
+        String normalizedWorkerId = workerId == null ? "" : workerId.trim();
+        requireLeaseInput(normalizedWorkerId, leaseDuration);
+        Instant now = clock.instant();
+        return repository.leaseNext(normalizedWorkerId, now, now.plus(leaseDuration));
+    }
+
+    public void extendLease(String jobId, String workerId, Duration leaseDuration) {
+        requireJobAndWorker(jobId, workerId);
+        requireLeaseInput(workerId.trim(), leaseDuration);
+        Instant now = clock.instant();
+        repository.extendLease(jobId.trim(), workerId.trim(), now, now.plus(leaseDuration));
+    }
+
+    public void complete(String jobId, String workerId) {
+        requireJobAndWorker(jobId, workerId);
+        repository.complete(jobId.trim(), workerId.trim(), clock.instant());
+    }
+
+    public void fail(Job job, String workerId, Exception cause) {
+        if (job == null || cause == null) {
+            throw invalid();
+        }
+        requireJobAndWorker(job.id(), workerId);
+        Instant now = clock.instant();
+        boolean dead = job.attempts() >= job.maxAttempts();
+        String message = safeError(cause.getMessage());
+        repository.fail(
+                job.id(),
+                workerId.trim(),
+                message,
+                now.plus(retryDelay(job.attempts())),
+                dead,
+                now);
+    }
+
+    static Duration retryDelay(int attempt) {
+        int normalizedAttempt = Math.max(1, attempt);
+        Duration delay = Duration.ofSeconds(5);
+        for (int index = 1; index < normalizedAttempt; index++) {
+            if (delay.compareTo(MAXIMUM_RETRY_DELAY.dividedBy(2)) >= 0) {
+                return MAXIMUM_RETRY_DELAY;
+            }
+            delay = delay.multipliedBy(2);
+        }
+        return delay.compareTo(MAXIMUM_RETRY_DELAY) > 0 ? MAXIMUM_RETRY_DELAY : delay;
+    }
+
+    private boolean validPayload(String payloadJson) {
+        if (payloadJson == null
+                || payloadJson.isEmpty()
+                || payloadJson.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_PAYLOAD_BYTES) {
+            return false;
+        }
+        try {
+            objectMapper.readTree(payloadJson);
+            return true;
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private static void requireLeaseInput(String workerId, Duration leaseDuration) {
+        if (workerId.isEmpty()
+                || workerId.length() > 128
+                || leaseDuration == null
+                || leaseDuration.compareTo(Duration.ofSeconds(1)) < 0
+                || leaseDuration.compareTo(Duration.ofHours(1)) > 0) {
+            throw invalid();
+        }
+    }
+
+    private static void requireJobAndWorker(String jobId, String workerId) {
+        if (jobId == null
+                || jobId.isBlank()
+                || workerId == null
+                || workerId.isBlank()
+                || workerId.trim().length() > 128) {
+            throw invalid();
+        }
+    }
+
+    private static String safeError(String value) {
+        if (value == null || value.isBlank()) {
+            return "background job handler failed";
+        }
+        return value.chars()
+                .filter(character -> !Character.isISOControl(character))
+                .limit(2000)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static JobException invalid() {
+        return new JobException(JobException.Kind.INVALID, "background job input is invalid");
+    }
+}

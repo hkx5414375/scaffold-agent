@@ -78,7 +78,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Maven projects
         env:
           SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
-        run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle)PlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLJobsPlanApplyVerifyEndToEnd$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration
@@ -112,13 +112,13 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/scaffold_agent?sslmode=disable
         run: go test ./internal/engine -run '^(TestGoTenantNotificationsPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCachePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantObservabilityPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd)$' -count=1
-      - name: Generate Java and test tenancy lifecycle against PostgreSQL
+      - name: Generate Java and test tenant jobs against PostgreSQL
         env:
           SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
           TEST_DATABASE_URL: jdbc:postgresql://localhost:5432/scaffold_agent
           TEST_DATABASE_USER: postgres
           TEST_DATABASE_PASSWORD: postgres
-        run: go test ./internal/engine -run '^TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestJavaPostgreSQLTenantJobsPlanApplyVerifyEndToEnd$' -count=1
 
   generated-mysql:
     name: Generated MySQL integration
@@ -150,10 +150,10 @@ jobs:
         env:
           TEST_DATABASE_URL: "root:mysql@tcp(127.0.0.1:3306)/"
         run: go test ./internal/engine -run '^(TestGoTenantNotificationsMySQLPlanApplyVerifyEndToEnd|TestGoTenantFilesMySQLPlanApplyVerifyEndToEnd|TestGoTenantCacheMySQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationMySQLPlanApplyVerifyEndToEnd|TestGoTenantObservabilityMySQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportMySQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsMySQLPlanApplyVerifyEndToEnd)$' -count=1
-      - name: Generate Java and test tenancy lifecycle against MySQL
+      - name: Generate Java and test tenant jobs against MySQL
         env:
           SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
           TEST_DATABASE_URL: "jdbc:mysql://127.0.0.1:3306/?useSSL=false&allowPublicKeyRetrieval=true"
           TEST_DATABASE_USER: root
           TEST_DATABASE_PASSWORD: mysql
-        run: go test ./internal/engine -run '^TestJavaMySQLTenancyLifecyclePlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestJavaMySQLTenantJobsPlanApplyVerifyEndToEnd$' -count=1

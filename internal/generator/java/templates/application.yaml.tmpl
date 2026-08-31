@@ -19,3 +19,7 @@ server:
   shutdown: graceful
 scaffold:
   cookie-secure: ${COOKIE_SECURE:true}
+{{- if .Jobs}}
+  worker:
+    enabled: ${WORKER_ENABLED:false}
+{{- end}}

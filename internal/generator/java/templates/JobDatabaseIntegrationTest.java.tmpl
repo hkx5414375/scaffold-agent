@@ -1,0 +1,210 @@
+package {{.PackageName}}.jobs;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import tools.jackson.databind.ObjectMapper;
+{{- if .Tenancy}}
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class JobDatabaseIntegrationTest {
+
+    @Test
+    @Timeout(45)
+    void enforcesIdempotencyRetryCompletionAndLeaseOwnership() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_jobs_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            String organizationId = "";
+{{- if .Tenancy}}
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbcTemplate, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal actor =
+                    identity.login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbcTemplate, transactions));
+            Organization organization = tenancy.create("Acme", actor);
+            organizationId = organization.id();
+{{- end}}
+            MutableClock clock = new MutableClock(Instant.parse("2026-09-01T00:00:00Z"));
+            JobService service =
+                    new JobService(
+                            new JdbcJobRepository(jdbcTemplate, transactions),
+                            new ObjectMapper(),
+                            clock);
+            Job first =
+                    service.enqueue(
+                            organizationId,
+                            "system.noop",
+                            "{\"ok\":true}",
+                            "request-1",
+                            10,
+                            3);
+            Job duplicate =
+                    service.enqueue(
+                            organizationId,
+                            "system.noop",
+                            "{\"ok\":true}",
+                            "request-1",
+                            10,
+                            3);
+            assertThat(duplicate.id()).isEqualTo(first.id());
+
+            Job leased = service.leaseNext("worker-1", Duration.ofSeconds(30));
+            assertThat(leased.id()).isEqualTo(first.id());
+            assertThat(leased.attempts()).isEqualTo(1);
+            assertThatThrownBy(() -> service.complete(leased.id(), "worker-2"))
+                    .isInstanceOf(JobException.class)
+                    .hasFieldOrPropertyWithValue("kind", JobException.Kind.LEASE_LOST);
+            service.fail(leased, "worker-1", new IllegalStateException("temporary"));
+            clock.advance(Duration.ofSeconds(6));
+            Job retried = service.leaseNext("worker-2", Duration.ofSeconds(30));
+            assertThat(retried.attempts()).isEqualTo(2);
+            service.complete(retried.id(), "worker-2");
+            assertThat(
+                            jdbcTemplate.queryForObject(
+                                    "select status from background_jobs where id = ?",
+                                    String.class,
+                                    retried.id()))
+                    .isEqualTo("succeeded");
+
+            Job expiring =
+                    service.enqueue(
+                            organizationId,
+                            "system.noop",
+                            "{}",
+                            "request-2",
+                            0,
+                            2);
+            Job oldLease = service.leaseNext("worker-old", Duration.ofSeconds(1));
+            assertThat(oldLease.id()).isEqualTo(expiring.id());
+            clock.advance(Duration.ofSeconds(2));
+            Job reclaimed = service.leaseNext("worker-new", Duration.ofSeconds(30));
+            assertThat(reclaimed.id()).isEqualTo(expiring.id());
+            assertThatThrownBy(
+                            () ->
+                                    service.extendLease(
+                                            oldLease.id(),
+                                            "worker-old",
+                                            Duration.ofSeconds(30)))
+                    .isInstanceOf(JobException.class)
+                    .hasFieldOrPropertyWithValue("kind", JobException.Kind.LEASE_LOST);
+            service.complete(reclaimed.id(), "worker-new");
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+
+    private static final class MutableClock extends Clock {
+
+        private Instant value;
+
+        private MutableClock(Instant value) {
+            this.value = value;
+        }
+
+        private void advance(Duration duration) {
+            value = value.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return value;
+        }
+    }
+}

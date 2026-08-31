@@ -1,0 +1,210 @@
+package {{.PackageName}}.jobs;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcJobRepository implements JobRepository {
+
+    private static final String COLUMNS =
+            "id, organization_id, type, payload_json, status, priority, attempts, "
+                    + "max_attempts, available_at, lease_owner, lease_until, last_error, "
+                    + "created_at, updated_at, completed_at, scope_key, dedupe_key";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcJobRepository(JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public Job enqueue(Job job) {
+        return transactionTemplate.execute(
+                status -> {
+                    jdbcTemplate.update(
+{{- if eq .Database.Engine "postgresql"}}
+                            "insert into background_jobs (" + COLUMNS + ") "
+                                    + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                    + "on conflict (scope_key, type, dedupe_key) do nothing",
+{{- else}}
+                            "insert into background_jobs (" + COLUMNS + ") "
+                                    + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                    + "on duplicate key update id = id",
+{{- end}}
+                            job.id(),
+                            job.organizationId(),
+                            job.type(),
+                            job.payloadJson(),
+                            job.status(),
+                            job.priority(),
+                            job.attempts(),
+                            job.maxAttempts(),
+                            Timestamp.from(job.availableAt()),
+                            job.leaseOwner(),
+                            toTimestamp(job.leaseUntil()),
+                            job.lastError(),
+                            Timestamp.from(job.createdAt()),
+                            Timestamp.from(job.updatedAt()),
+                            toTimestamp(job.completedAt()),
+                            job.scopeKey(),
+                            job.dedupeKey());
+                    return one(
+                            "select " + COLUMNS + " from background_jobs "
+                                    + "where scope_key = ? and type = ? and dedupe_key = ?",
+                            job.scopeKey(),
+                            job.type(),
+                            job.dedupeKey());
+                });
+    }
+
+    @Override
+    public Job leaseNext(String workerId, Instant now, Instant leaseUntil) {
+        Job leased =
+                transactionTemplate.execute(
+                        status -> {
+                            List<String> ids =
+                                    jdbcTemplate.query(
+                                            "select id from background_jobs where "
+                                                    + "((status in ('queued', 'retry') and available_at <= ?) "
+                                                    + "or (status = 'running' and lease_until <= ?)) "
+                                                    + "order by priority desc, available_at, created_at, id "
+{{- if eq .Database.Engine "postgresql"}}
+                                                    + "for update skip locked limit 1",
+{{- else}}
+                                                    + "limit 1 for update skip locked",
+{{- end}}
+                                            (resultSet, rowNumber) -> resultSet.getString("id"),
+                                            Timestamp.from(now),
+                                            Timestamp.from(now));
+                            if (ids.isEmpty()) {
+                                return null;
+                            }
+                            String id = ids.getFirst();
+                            jdbcTemplate.update(
+                                    "update background_jobs set status = 'running', attempts = attempts + 1, "
+                                            + "lease_owner = ?, lease_until = ?, updated_at = ?, "
+                                            + "completed_at = null where id = ?",
+                                    workerId,
+                                    Timestamp.from(leaseUntil),
+                                    Timestamp.from(now),
+                                    id);
+                            return one("select " + COLUMNS + " from background_jobs where id = ?", id);
+                        });
+        if (leased == null) {
+            throw new JobException(JobException.Kind.NOT_FOUND, "background job was not found");
+        }
+        return leased;
+    }
+
+    @Override
+    public void extendLease(
+            String jobId, String workerId, Instant now, Instant leaseUntil) {
+        int updated =
+                jdbcTemplate.update(
+                        "update background_jobs set lease_until = ?, updated_at = ? "
+                                + "where id = ? and status = 'running' and lease_owner = ? "
+                                + "and lease_until > ?",
+                        Timestamp.from(leaseUntil),
+                        Timestamp.from(now),
+                        jobId,
+                        workerId,
+                        Timestamp.from(now));
+        requireLease(updated);
+    }
+
+    @Override
+    public void complete(String jobId, String workerId, Instant now) {
+        int updated =
+                jdbcTemplate.update(
+                        "update background_jobs set status = 'succeeded', lease_owner = null, "
+                                + "lease_until = null, last_error = null, completed_at = ?, updated_at = ? "
+                                + "where id = ? and status = 'running' and lease_owner = ? "
+                                + "and lease_until > ?",
+                        Timestamp.from(now),
+                        Timestamp.from(now),
+                        jobId,
+                        workerId,
+                        Timestamp.from(now));
+        requireLease(updated);
+    }
+
+    @Override
+    public void fail(
+            String jobId,
+            String workerId,
+            String message,
+            Instant retryAt,
+            boolean dead,
+            Instant now) {
+        int updated =
+                jdbcTemplate.update(
+                        "update background_jobs set status = ?, available_at = ?, lease_owner = null, "
+                                + "lease_until = null, last_error = ?, completed_at = ?, updated_at = ? "
+                                + "where id = ? and status = 'running' and lease_owner = ? "
+                                + "and lease_until > ?",
+                        dead ? "dead" : "retry",
+                        Timestamp.from(retryAt),
+                        message,
+                        dead ? Timestamp.from(now) : null,
+                        Timestamp.from(now),
+                        jobId,
+                        workerId,
+                        Timestamp.from(now));
+        requireLease(updated);
+    }
+
+    private Job one(String sql, Object... arguments) {
+        List<Job> jobs = jdbcTemplate.query(sql, JdbcJobRepository::mapJob, arguments);
+        if (jobs.isEmpty()) {
+            throw new JobException(JobException.Kind.NOT_FOUND, "background job was not found");
+        }
+        return jobs.getFirst();
+    }
+
+    private static Job mapJob(ResultSet resultSet, int rowNumber) throws SQLException {
+        return new Job(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("type"),
+                resultSet.getString("payload_json"),
+                resultSet.getString("status"),
+                resultSet.getInt("priority"),
+                resultSet.getInt("attempts"),
+                resultSet.getInt("max_attempts"),
+                resultSet.getTimestamp("available_at").toInstant(),
+                resultSet.getString("lease_owner"),
+                instant(resultSet.getTimestamp("lease_until")),
+                resultSet.getString("last_error"),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant(),
+                instant(resultSet.getTimestamp("completed_at")),
+                resultSet.getString("scope_key"),
+                resultSet.getString("dedupe_key"));
+    }
+
+    private static void requireLease(int updated) {
+        if (updated != 1) {
+            throw new JobException(JobException.Kind.LEASE_LOST, "background job lease was lost");
+        }
+    }
+
+    private static Timestamp toTimestamp(Instant value) {
+        return value == null ? null : Timestamp.from(value);
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+}

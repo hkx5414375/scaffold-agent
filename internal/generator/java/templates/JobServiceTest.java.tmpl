@@ -1,0 +1,108 @@
+package {{.PackageName}}.jobs;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import tools.jackson.databind.ObjectMapper;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.HashMap;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+
+class JobServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void enqueueIsScopedAndIdempotent() {
+        FakeRepository repository = new FakeRepository();
+        JobService service =
+                new JobService(
+                        repository,
+                        new ObjectMapper(),
+                        Clock.fixed(NOW, ZoneOffset.UTC));
+
+        Job first =
+                service.enqueue(
+                        {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}},
+                        "system.noop",
+                        "{\"ok\":true}",
+                        "request-1",
+                        10,
+                        0);
+        Job second =
+                service.enqueue(
+                        {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}},
+                        "system.noop",
+                        "{\"ok\":true}",
+                        "request-1",
+                        10,
+                        0);
+
+        assertThat(second.id()).isEqualTo(first.id());
+        assertThat(first.scopeKey()).isEqualTo({{if .Tenancy}}"organization-1"{{else}}"global"{{end}});
+        assertThat(first.dedupeKey()).isEqualTo("key:request-1");
+        assertThat(first.maxAttempts()).isEqualTo(8);
+    }
+
+    @Test
+    void retryIsExponentialAndBounded() {
+        assertThat(JobService.retryDelay(1)).isEqualTo(Duration.ofSeconds(5));
+        assertThat(JobService.retryDelay(3)).isEqualTo(Duration.ofSeconds(20));
+        assertThat(JobService.retryDelay(100)).isEqualTo(Duration.ofMinutes(15));
+    }
+
+    @Test
+    void rejectsInvalidPayloadAndScope() {
+        JobService service =
+                new JobService(
+                        new FakeRepository(),
+                        new ObjectMapper(),
+                        Clock.fixed(NOW, ZoneOffset.UTC));
+        assertThatThrownBy(
+                        () ->
+                                service.enqueue(
+                                        {{if .Tenancy}}""{{else}}"ignored"{{end}},
+                                        "Invalid Type",
+                                        "not-json",
+                                        "",
+                                        0,
+                                        0))
+                .isInstanceOf(JobException.class)
+                .hasFieldOrPropertyWithValue("kind", JobException.Kind.INVALID);
+    }
+
+    private static final class FakeRepository implements JobRepository {
+
+        private final Map<String, Job> jobs = new HashMap<>();
+
+        @Override
+        public Job enqueue(Job job) {
+            String key = job.scopeKey() + ":" + job.type() + ":" + job.dedupeKey();
+            return jobs.computeIfAbsent(key, ignored -> job);
+        }
+
+        @Override
+        public Job leaseNext(String workerId, Instant now, Instant leaseUntil) {
+            throw new JobException(JobException.Kind.NOT_FOUND, "background job was not found");
+        }
+
+        @Override
+        public void extendLease(String jobId, String workerId, Instant now, Instant leaseUntil) {}
+
+        @Override
+        public void complete(String jobId, String workerId, Instant now) {}
+
+        @Override
+        public void fail(
+                String jobId,
+                String workerId,
+                String message,
+                Instant retryAt,
+                boolean dead,
+                Instant now) {}
+    }
+}

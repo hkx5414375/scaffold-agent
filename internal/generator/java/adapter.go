@@ -30,6 +30,8 @@ const (
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
 	tenancyLifecycleVersion = "0.3.0"
+	jobsOwner               = "background-jobs"
+	jobsVersion             = "0.1.0"
 )
 
 //go:embed all:templates
@@ -57,6 +59,7 @@ type databaseData struct {
 	TenancyMigrationTemplate          string
 	TenancyMembersMigrationTemplate   string
 	TenancyLifecycleMigrationTemplate string
+	JobsMigrationTemplate             string
 }
 
 var databases = map[string]databaseData{
@@ -72,6 +75,7 @@ var databases = map[string]databaseData{
 		TenancyMigrationTemplate:          "templates/tenancy_postgresql.sql.tmpl",
 		TenancyMembersMigrationTemplate:   "templates/tenancy_members_postgresql.sql.tmpl",
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_postgresql.sql.tmpl",
+		JobsMigrationTemplate:             "templates/jobs_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -85,6 +89,7 @@ var databases = map[string]databaseData{
 		TenancyMigrationTemplate:          "templates/tenancy_mysql.sql.tmpl",
 		TenancyMembersMigrationTemplate:   "templates/tenancy_members_mysql.sql.tmpl",
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_mysql.sql.tmpl",
+		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
 	},
 }
 
@@ -95,6 +100,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobsOwner, Version: jobsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Reliable leased background jobs with retries and idempotent enqueue.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -132,6 +147,7 @@ type templateData struct {
 	Tenancy          bool
 	TenancyMembers   bool
 	TenancyLifecycle bool
+	Jobs             bool
 	Files            bool
 	JobAdmin         bool
 	CSVTransfer      bool
@@ -229,6 +245,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
 	tenancyLifecycleEnabled := false
+	jobsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -237,6 +254,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion ||
 				pack.Metadata.Version == tenancyLifecycleVersion
 			tenancyLifecycleEnabled = pack.Metadata.Version == tenancyLifecycleVersion
+		}
+		if pack.Metadata.Name == jobsOwner {
+			jobsEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -257,6 +277,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if tenancyLifecycleEnabled {
 		migrationCount++
 	}
+	if jobsEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -269,6 +292,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Tenancy:          tenancyEnabled,
 		TenancyMembers:   tenancyMembersEnabled,
 		TenancyLifecycle: tenancyLifecycleEnabled,
+		Jobs:             jobsEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -278,6 +302,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	businessPaths := make(map[string]struct{}, 9)
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
 	tenancyPaths := make(map[string]struct{}, 27)
+	jobsPaths := make(map[string]struct{}, 12)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -294,6 +319,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		adminPaths[path] = struct{}{}
 		tenancyPaths[path] = struct{}{}
+	}
+	addJobsTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		jobsPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -375,6 +404,23 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			)
 		}
 	}
+	if jobsEnabled {
+		addJobsTarget(mainRoot+"/jobs/Job.java", "templates/Job.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/JobException.java", "templates/JobException.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/JobRepository.java", "templates/JobRepository.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/JobService.java", "templates/JobService.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/JdbcJobRepository.java", "templates/JdbcJobRepository.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/JobWorker.java", "templates/JobWorker.java.tmpl")
+		addJobsTarget(mainRoot+"/jobs/WorkerRunner.java", "templates/WorkerRunner.java.tmpl")
+		addJobsTarget(testRoot+"/jobs/JobServiceTest.java", "templates/JobServiceTest.java.tmpl")
+		addJobsTarget(testRoot+"/jobs/JobWorkerTest.java", "templates/JobWorkerTest.java.tmpl")
+		addJobsTarget(testRoot+"/jobs/JobDatabaseIntegrationTest.java", "templates/JobDatabaseIntegrationTest.java.tmpl")
+		addJobsTarget(
+			"src/main/resources/db/migration/V000200__background_jobs.sql",
+			database.JobsMigrationTemplate,
+		)
+		capabilityLock[jobsOwner] = jobsVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -428,6 +474,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isTenancyPath := tenancyPaths[path]; isTenancyPath {
 			owner = tenancyOwner
+		}
+		if _, isJobsPath := jobsPaths[path]; isJobsPath {
+			owner = jobsOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

@@ -319,6 +319,18 @@ func TestJavaMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "mysql", true, true, "0.3.0")
 }
 
+func TestJavaPostgreSQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaJobsReference(t, "postgresql", true, false, "")
+}
+
+func TestJavaPostgreSQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaJobsReference(t, "postgresql", true, true, "0.3.0")
+}
+
+func TestJavaMySQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaJobsReference(t, "mysql", true, true, "0.3.0")
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -579,6 +591,25 @@ func runGeneratedJavaReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false)
+}
+
+func runGeneratedJavaJobsReference(
+	t *testing.T, database string, business, admin bool, tenancyVersion string,
+) {
+	t.Helper()
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true)
+}
+
+func runGeneratedJavaCapabilities(
+	t *testing.T,
+	database string,
+	business bool,
+	admin bool,
+	tenancyVersion string,
+	jobs bool,
+) {
+	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
 	blueprint := `
@@ -611,6 +642,14 @@ MODULES
       version: TENANCY_VERSION
 `
 		capabilities = strings.ReplaceAll(capabilities, "TENANCY_VERSION", tenancyVersion)
+	}
+	if jobs {
+		if capabilities == "" {
+			capabilities = "  capabilities:\n"
+		}
+		capabilities += `    - name: background-jobs
+      version: 0.1.0
+`
 	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
@@ -662,6 +701,9 @@ MODULES
 			wantChanges++
 		}
 	}
+	if jobs {
+		wantChanges += 11
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -674,6 +716,9 @@ MODULES
 	if tenancyVersion != "" &&
 		plannedData.CapabilityLock["organization-tenancy"] != tenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
+	}
+	if jobs && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+		t.Fatalf("Plan() jobs lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

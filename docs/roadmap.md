@@ -53,6 +53,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java organization-tenancy 0.1 with atomic organization creation, membership RBAC, tenant-scoped CRUD, and administration selection.
 - [x] Java organization-tenancy 0.2 with email-bound invitations, member administration, and concurrent last-administrator protection.
 - [x] Java organization-tenancy 0.3 with ownership transfer, reversible deactivation, inactive authorization blocking, and owner-safe administration.
+- [x] Java background-jobs 0.1 with scoped idempotency, skip-locked leasing, heartbeat renewal, bounded retry, dead state, and an independent worker mode.
 - [ ] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 
