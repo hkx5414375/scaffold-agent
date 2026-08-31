@@ -147,12 +147,28 @@ func TestGoTenantJobsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyJobsSelection, "0.3.0", 76, false)
 }
 
+func TestGoTenantNotificationsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyNotificationsSelection, "0.3.0", 81, false)
+}
+
+func TestGoTenantNotificationsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyNotificationsSelection, "0.3.0", 82, false)
+}
+
 func TestGoJobsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", jobsSelection, "", 55, false)
 }
 
 func TestGoJobsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", jobsSelection, "", 56, false)
+}
+
+func TestGoNotificationsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", notificationsSelection, "", 61, false)
+}
+
+func TestGoNotificationsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", notificationsSelection, "", 62, false)
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -177,8 +193,20 @@ const tenancyJobsSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyNotificationsSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: notifications
+      version: 0.1.0
+`
+
 const jobsSelection = `  capabilities:
     - name: background-jobs
+      version: 0.1.0
+`
+
+const notificationsSelection = `  capabilities:
+    - name: notifications
       version: 0.1.0
 `
 
@@ -238,6 +266,11 @@ CAPABILITIES
 	}
 	if strings.Contains(capabilities, "background-jobs") && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
 		t.Fatalf("Plan() background jobs lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "notifications") {
+		if plannedData.CapabilityLock["notifications"] != "0.1.0" || plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+			t.Fatalf("Plan() notifications lock = %#v", plannedData.CapabilityLock)
+		}
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

@@ -32,6 +32,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 选择 `background-jobs` `0.1.0` 后，生成项目会加入数据库可靠队列和独立的 `cmd/worker`。业务能力应通过 `jobs.Service` 提交有大小限制的 JSON 载荷和稳定幂等键；Handler 可以从 `jobs.Job` 读取已经确认的组织标识，必须响应 Context 取消，并且不得记录载荷内容。任务抢占、租约续期、指数重试、死信和过期租约恢复均由能力包提供，AI 不需要重复编写。
 
+选择 `notifications` `0.1.0` 会自动解析并锁定 `background-jobs` `0.1.x`。业务代码通过 `notifications.Service.EnqueueEmail` 传入稳定幂等键，不得额外暴露一个无需业务授权的“任意发邮件”接口。Worker 只接受启用 TLS 的 SMTP 运行时配置。排队中的邮件正文属于数据库内的敏感持久化数据；AI 不得把 SMTP 凭据写入 Blueprint、源码、任务载荷或模型上下文。
+
 ## STDIO 协议
 
 启动服务：

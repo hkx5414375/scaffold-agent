@@ -1,0 +1,130 @@
+// Package notifications provides validated, idempotent email delivery through background jobs.
+package notifications
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/mail"
+	"strings"
+
+	"{{.ModulePath}}/internal/jobs"
+)
+
+const (
+	// EmailJobType is the stable background job type consumed by the SMTP handler.
+	EmailJobType = "notifications.email.deliver"
+	emailPayloadVersion = 1
+	maximumEmailBodyBytes = 512 << 10
+)
+
+var ErrInvalid = errors.New("notification input is invalid")
+
+// Email describes one transport-neutral email message.
+type Email struct {
+	To       string `json:"to"`
+	Subject  string `json:"subject"`
+	TextBody string `json:"text_body,omitempty"`
+	HTMLBody string `json:"html_body,omitempty"`
+}
+
+type emailPayload struct {
+	Version int   `json:"version"`
+	Email   Email `json:"email"`
+}
+
+// Queue is the durable background-job boundary.
+type Queue interface {
+	Enqueue(context.Context, string, jobs.EnqueueInput) (jobs.Job, error)
+}
+
+// Sender delivers one already-validated email.
+type Sender interface {
+	Send(context.Context, Email) error
+}
+
+// Service validates notifications and adds them to the durable queue.
+type Service struct {
+	queue Queue
+}
+
+// NewService returns an email notification service.
+func NewService(queue Queue) *Service {
+	return &Service{queue: queue}
+}
+
+// EnqueueEmail persists one idempotent email-delivery job.
+func (service *Service) EnqueueEmail(ctx context.Context, organizationID, idempotencyKey string, email Email) (jobs.Job, error) {
+	if service == nil || service.queue == nil {
+		return jobs.Job{}, ErrInvalid
+	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	validated, err := validateEmail(email)
+	if err != nil || idempotencyKey == "" || len(idempotencyKey) > 128 {
+		return jobs.Job{}, ErrInvalid
+	}
+	payload, err := json.Marshal(emailPayload{Version: emailPayloadVersion, Email: validated})
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("encode email notification: %w", err)
+	}
+	job, err := service.queue.Enqueue(ctx, organizationID, jobs.EnqueueInput{
+		Type: EmailJobType, Payload: payload, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("enqueue email notification: %w", err)
+	}
+	return job, nil
+}
+
+// EmailHandler validates queued payloads again and sends them without logging content.
+func EmailHandler(sender Sender) jobs.Handler {
+	return func(ctx context.Context, job jobs.Job) error {
+		if sender == nil || job.Type != EmailJobType {
+			return ErrInvalid
+		}
+		decoder := json.NewDecoder(bytes.NewReader(job.Payload))
+		decoder.DisallowUnknownFields()
+		var payload emailPayload
+		if err := decoder.Decode(&payload); err != nil || payload.Version != emailPayloadVersion {
+			return ErrInvalid
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			return ErrInvalid
+		}
+		validated, err := validateEmail(payload.Email)
+		if err != nil {
+			return ErrInvalid
+		}
+		if err := sender.Send(ctx, validated); err != nil {
+			return fmt.Errorf("send email notification: %w", err)
+		}
+		return nil
+	}
+}
+
+// ValidateEmail returns the normalized message accepted by the queue and transports.
+func ValidateEmail(email Email) (Email, error) {
+	return validateEmail(email)
+}
+
+func validateEmail(email Email) (Email, error) {
+	email.To = strings.ToLower(strings.TrimSpace(email.To))
+	address, err := mail.ParseAddress(email.To)
+	if err != nil || address.Address != email.To || len(email.To) > 254 {
+		return Email{}, ErrInvalid
+	}
+	email.Subject = strings.TrimSpace(email.Subject)
+	if email.Subject == "" || len(email.Subject) > 200 || strings.ContainsAny(email.Subject, "\r\n") {
+		return Email{}, ErrInvalid
+	}
+	if email.TextBody == "" && email.HTMLBody == "" {
+		return Email{}, ErrInvalid
+	}
+	if len(email.TextBody)+len(email.HTMLBody) > maximumEmailBodyBytes {
+		return Email{}, ErrInvalid
+	}
+	return email, nil
+}

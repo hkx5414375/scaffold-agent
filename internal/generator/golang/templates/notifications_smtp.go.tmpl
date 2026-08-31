@@ -1,0 +1,228 @@
+// Package smtp sends validated notification email through an encrypted SMTP connection.
+package smtp
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
+	"net"
+	"net/mail"
+	standardsmtp "net/smtp"
+	"net/textproto"
+	"os"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/notifications"
+)
+
+const defaultTimeout = 30 * time.Second
+
+// Config is the explicit SMTP runtime contract.
+type Config struct {
+	Address  string
+	Username string
+	Password string
+	From     string
+	TLSMode  string
+	Timeout  time.Duration
+}
+
+// Sender delivers email through SMTP with mandatory TLS.
+type Sender struct {
+	config Config
+	host   string
+	from   *mail.Address
+}
+
+// NewFromEnvironment reads SMTP_ADDRESS, SMTP_FROM, SMTP_TLS_MODE, SMTP_USERNAME, and SMTP_PASSWORD.
+func NewFromEnvironment() (*Sender, error) {
+	return New(Config{
+		Address: os.Getenv("SMTP_ADDRESS"), Username: os.Getenv("SMTP_USERNAME"),
+		Password: os.Getenv("SMTP_PASSWORD"), From: os.Getenv("SMTP_FROM"),
+		TLSMode: os.Getenv("SMTP_TLS_MODE"), Timeout: defaultTimeout,
+	})
+}
+
+// New validates SMTP configuration without opening a connection.
+func New(config Config) (*Sender, error) {
+	config.Address = strings.TrimSpace(config.Address)
+	config.From = strings.TrimSpace(config.From)
+	config.TLSMode = strings.ToLower(strings.TrimSpace(config.TLSMode))
+	host, _, err := net.SplitHostPort(config.Address)
+	if err != nil || host == "" || strings.ContainsAny(config.From, "\r\n") {
+		return nil, errors.New("SMTP_ADDRESS and SMTP_FROM must be valid")
+	}
+	from, err := mail.ParseAddress(config.From)
+	if err != nil || from.Address == "" {
+		return nil, errors.New("SMTP_FROM must be a valid mailbox")
+	}
+	if config.TLSMode != "tls" && config.TLSMode != "starttls" {
+		return nil, errors.New("SMTP_TLS_MODE must be tls or starttls")
+	}
+	if (config.Username == "") != (config.Password == "") {
+		return nil, errors.New("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+	}
+	if config.Timeout == 0 {
+		config.Timeout = defaultTimeout
+	}
+	if config.Timeout < time.Second || config.Timeout > 5*time.Minute {
+		return nil, errors.New("SMTP timeout must be between one second and five minutes")
+	}
+	return &Sender{config: config, host: host, from: from}, nil
+}
+
+// Send delivers one message. It never logs or includes body content in errors.
+func (sender *Sender) Send(ctx context.Context, email notifications.Email) error {
+	if sender == nil || sender.from == nil {
+		return errors.New("SMTP sender is not configured")
+	}
+	email, err := notifications.ValidateEmail(email)
+	if err != nil {
+		return errors.New("email notification is invalid")
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, sender.config.Timeout)
+		defer cancel()
+	}
+	connection, err := sender.dial(ctx)
+	if err != nil {
+		return fmt.Errorf("connect to SMTP server: %w", err)
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set SMTP deadline: %w", err)
+		}
+	}
+	stopCancellation := context.AfterFunc(ctx, func() { _ = connection.SetDeadline(time.Now()) })
+	defer stopCancellation()
+	client, err := standardsmtp.NewClient(connection, sender.host)
+	if err != nil {
+		return fmt.Errorf("start SMTP client: %w", err)
+	}
+	defer client.Close()
+	if sender.config.TLSMode == "starttls" {
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			return errors.New("SMTP server does not support STARTTLS")
+		}
+		if err := client.StartTLS(sender.tlsConfig()); err != nil {
+			return fmt.Errorf("start SMTP TLS: %w", err)
+		}
+	}
+	if sender.config.Username != "" {
+		auth := standardsmtp.PlainAuth("", sender.config.Username, sender.config.Password, sender.host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("authenticate SMTP client: %w", err)
+		}
+	}
+	if err := client.Mail(sender.from.Address); err != nil {
+		return fmt.Errorf("set SMTP sender: %w", err)
+	}
+	if err := client.Rcpt(email.To); err != nil {
+		return fmt.Errorf("set SMTP recipient: %w", err)
+	}
+	message, err := composeEmail(*sender.from, email, rand.Text(), time.Now().UTC(), sender.host)
+	if err != nil {
+		return err
+	}
+	data, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("open SMTP message: %w", err)
+	}
+	if _, err := data.Write(message); err != nil {
+		_ = data.Close()
+		return fmt.Errorf("write SMTP message: %w", err)
+	}
+	if err := data.Close(); err != nil {
+		return fmt.Errorf("finish SMTP message: %w", err)
+	}
+	if err := client.Quit(); err != nil {
+		return fmt.Errorf("finish SMTP session: %w", err)
+	}
+	return nil
+}
+
+func (sender *Sender) dial(ctx context.Context) (net.Conn, error) {
+	if sender.config.TLSMode == "tls" {
+		dialer := tls.Dialer{NetDialer: &net.Dialer{}, Config: sender.tlsConfig()}
+		return dialer.DialContext(ctx, "tcp", sender.config.Address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "tcp", sender.config.Address)
+}
+
+func (sender *Sender) tlsConfig() *tls.Config {
+	return &tls.Config{ServerName: sender.host, MinVersion: tls.VersionTLS12}
+}
+
+func composeEmail(from mail.Address, email notifications.Email, messageID string, now time.Time, host string) ([]byte, error) {
+	if strings.ContainsAny(email.To+email.Subject, "\r\n") {
+		return nil, errors.New("email headers are invalid")
+	}
+	var output bytes.Buffer
+	headers := []string{
+		"Date: " + now.Format(time.RFC1123Z),
+		"From: " + from.String(),
+		"To: " + email.To,
+		"Subject: " + mime.QEncoding.Encode("utf-8", email.Subject),
+		"Message-ID: <" + messageID + "@" + host + ">",
+		"MIME-Version: 1.0",
+	}
+	for _, header := range headers {
+		output.WriteString(header + "\r\n")
+	}
+	if email.TextBody == "" || email.HTMLBody == "" {
+		mediaType, body := "text/plain", email.TextBody
+		if email.HTMLBody != "" {
+			mediaType, body = "text/html", email.HTMLBody
+		}
+		output.WriteString("Content-Type: " + mediaType + "; charset=UTF-8\r\n")
+		output.WriteString("Content-Transfer-Encoding: quoted-printable\r\n\r\n")
+		encoder := quotedprintable.NewWriter(&output)
+		if _, err := io.WriteString(encoder, body); err != nil {
+			return nil, fmt.Errorf("write email body: %w", err)
+		}
+		if err := encoder.Close(); err != nil {
+			return nil, fmt.Errorf("finish email body: %w", err)
+		}
+		return output.Bytes(), nil
+	}
+	writer := multipart.NewWriter(&output)
+	output.WriteString("Content-Type: multipart/alternative; boundary=\"" + writer.Boundary() + "\"\r\n\r\n")
+	for _, part := range []struct {
+		mediaType string
+		body      string
+	}{
+		{mediaType: "text/plain", body: email.TextBody},
+		{mediaType: "text/html", body: email.HTMLBody},
+	} {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Type", part.mediaType+"; charset=UTF-8")
+		header.Set("Content-Transfer-Encoding", "quoted-printable")
+		partWriter, err := writer.CreatePart(header)
+		if err != nil {
+			return nil, fmt.Errorf("compose email part: %w", err)
+		}
+		encoder := quotedprintable.NewWriter(partWriter)
+		if _, err := io.WriteString(encoder, part.body); err != nil {
+			return nil, fmt.Errorf("write email part: %w", err)
+		}
+		if err := encoder.Close(); err != nil {
+			return nil, fmt.Errorf("finish email part: %w", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("finish email message: %w", err)
+	}
+	return output.Bytes(), nil
+}
+
+var _ notifications.Sender = (*Sender)(nil)

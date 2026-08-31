@@ -36,7 +36,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Email-bound invitations, member administration, role changes, removals, and concurrent last-administrator protection.
 - [x] Tenant-aware durable jobs, idempotent enqueue, leased workers, heartbeat, retry, and dead-letter state.
 - [x] Reversible organization deactivation, reactivation, rename, ownership transfer, and owner protection.
-- [ ] Files, notifications, cache, import/export, job administration, and observability.
+- [x] Idempotent email notification enqueue and TLS-only SMTP worker delivery.
+- [ ] Files, cache, import/export, job administration, and observability.
 - [ ] Portable approval workflows.
 
 ## M6 — Language parity

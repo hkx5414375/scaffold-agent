@@ -80,6 +80,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"organization-member-invitations",
 				"organization-lifecycle-and-ownership",
 				"durable-background-jobs",
+				"idempotent-email-notifications",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

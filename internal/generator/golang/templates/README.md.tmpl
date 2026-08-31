@@ -54,6 +54,12 @@ Run the independent background worker with the same database:
 ```bash
 export DATABASE_URL='replace-me'
 export WORKER_ID='worker-1'
+{{if .Notifications}}export SMTP_ADDRESS='smtp.example.com:587'
+export SMTP_FROM='Example <no-reply@example.com>'
+export SMTP_TLS_MODE='starttls'
+export SMTP_USERNAME='replace-me'
+export SMTP_PASSWORD='replace-me'
+{{end}}go run ./cmd/worker
 go run ./cmd/worker
 ```
 
@@ -62,6 +68,13 @@ idempotency key for external requests. Add custom handlers in an unowned file su
 as `internal/jobhandlers/email.go` and call `jobs.MustRegister` from `init`; the
 managed worker imports that package and reads the registry snapshot at startup.
 Handlers must honor context cancellation and must never log job payloads.
+{{if .Notifications}}
+
+Feature code calls `notifications.Service.EnqueueEmail` with a required stable
+idempotency key after its own authorization. The worker validates SMTP settings
+before polling and accepts only implicit TLS or STARTTLS. Keep credentials in the
+runtime secret store; queued message bodies are sensitive database content.
+{{end}}
 {{end}}
 
 ## HTTP API
@@ -80,6 +93,11 @@ Handlers must honor context cancellation and must never log job payloads.
 - `PATCH /api/v1/organizations/{organizationID}/members/{userID}`
 - `DELETE /api/v1/organizations/{organizationID}/members/{userID}`
 - `POST /api/v1/organization-invitations/accept`
+{{if .TenancyLifecycle}}- `PATCH /api/v1/organizations/{organizationID}`
+- `POST /api/v1/organizations/{organizationID}/ownership-transfers`
+- `POST /api/v1/organizations/{organizationID}/deactivation`
+- `POST /api/v1/organizations/{organizationID}/reactivation`
+{{end}}
 {{end}}
 {{end}}
 {{if .Business}}

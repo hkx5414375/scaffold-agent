@@ -425,6 +425,42 @@ func TestGenerateBackgroundJobsWithoutTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateNotificationsResolvesBackgroundJobs(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+		{Name: notificationsCapability, Version: notificationsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[notificationsCapability] != notificationsVersion ||
+		generated.CapabilityLock[jobsCapability] != jobsVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"cmd/worker/main.go":                      false,
+		"internal/jobs/jobs.go":                   false,
+		"internal/jobhandlers/notifications.go":   false,
+		"internal/notifications/notifications.go": false,
+		"internal/notifications/smtp/sender.go":   false,
+		"internal/jobs/postgres/store.go":         false,
+	}
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

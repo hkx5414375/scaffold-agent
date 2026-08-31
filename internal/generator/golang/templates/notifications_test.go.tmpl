@@ -1,0 +1,80 @@
+package notifications
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"{{.ModulePath}}/internal/jobs"
+)
+
+func TestEnqueueEmailUsesStableJobContract(t *testing.T) {
+	t.Parallel()
+
+	queue := &recordingQueue{}
+	service := NewService(queue)
+	job, err := service.EnqueueEmail(context.Background(), "organization", "request-1", Email{
+		To: " Person@Example.com ", Subject: " Welcome ", TextBody: "Hello",
+	})
+	if err != nil || job.ID != "job-1" {
+		t.Fatalf("EnqueueEmail() = %#v, %v", job, err)
+	}
+	if queue.organizationID != "organization" || queue.input.Type != EmailJobType || queue.input.IdempotencyKey != "request-1" {
+		t.Fatalf("EnqueueEmail() queue = %#v, organization = %q", queue.input, queue.organizationID)
+	}
+}
+
+func TestEnqueueEmailRejectsUnsafeInput(t *testing.T) {
+	t.Parallel()
+
+	service := NewService(&recordingQueue{})
+	tests := []Email{
+		{To: "invalid", Subject: "subject", TextBody: "body"},
+		{To: "person@example.com", Subject: "subject\r\nBcc: other@example.com", TextBody: "body"},
+		{To: "person@example.com", Subject: "subject"},
+	}
+	for _, email := range tests {
+		if _, err := service.EnqueueEmail(context.Background(), "", "request", email); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("EnqueueEmail(%#v) error = %v, want ErrInvalid", email, err)
+		}
+	}
+}
+
+func TestEmailHandlerSendsValidatedPayload(t *testing.T) {
+	t.Parallel()
+
+	queue := &recordingQueue{}
+	service := NewService(queue)
+	_, err := service.EnqueueEmail(context.Background(), "organization", "request", Email{
+		To: "person@example.com", Subject: "Welcome", HTMLBody: "<p>Hello</p>",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail() error = %v", err)
+	}
+	sender := &recordingSender{}
+	if err := EmailHandler(sender)(context.Background(), jobs.Job{Type: EmailJobType, Payload: queue.input.Payload}); err != nil {
+		t.Fatalf("EmailHandler() error = %v", err)
+	}
+	if sender.email.To != "person@example.com" || sender.email.Subject != "Welcome" {
+		t.Fatalf("EmailHandler() email = %#v", sender.email)
+	}
+}
+
+type recordingQueue struct {
+	organizationID string
+	input          jobs.EnqueueInput
+}
+
+func (queue *recordingQueue) Enqueue(_ context.Context, organizationID string, input jobs.EnqueueInput) (jobs.Job, error) {
+	queue.organizationID, queue.input = organizationID, input
+	return jobs.Job{ID: "job-1", Type: input.Type, Payload: input.Payload}, nil
+}
+
+type recordingSender struct {
+	email Email
+}
+
+func (sender *recordingSender) Send(_ context.Context, email Email) error {
+	sender.email = email
+	return nil
+}

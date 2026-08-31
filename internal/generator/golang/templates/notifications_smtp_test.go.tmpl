@@ -1,0 +1,49 @@
+package smtp
+
+import (
+	"net/mail"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/notifications"
+)
+
+func TestNewRequiresEncryptedSMTPConfiguration(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(Config{Address: "smtp.example.com:587", From: "App <app@example.com>", TLSMode: "starttls"}); err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	for _, config := range []Config{
+		{Address: "missing-port", From: "app@example.com", TLSMode: "tls"},
+		{Address: "smtp.example.com:25", From: "app@example.com", TLSMode: "none"},
+		{Address: "smtp.example.com:465", From: "bad\r\nBcc: other@example.com", TLSMode: "tls"},
+	} {
+		if _, err := New(config); err == nil {
+			t.Fatalf("New(%#v) error = nil", config)
+		}
+	}
+}
+
+func TestComposeEmailBuildsMultipartAlternativeWithoutHeaderInjection(t *testing.T) {
+	t.Parallel()
+
+	message, err := composeEmail(mail.Address{Name: "Example", Address: "app@example.com"}, notifications.Email{
+		To: "person@example.com", Subject: "Welcome ✓", TextBody: "Hello", HTMLBody: "<p>Hello</p>",
+	}, "message-id", time.Unix(1_700_000_000, 0).UTC(), "smtp.example.com")
+	if err != nil {
+		t.Fatalf("composeEmail() error = %v", err)
+	}
+	content := string(message)
+	for _, expected := range []string{"multipart/alternative", "text/plain", "text/html", "Message-ID: <message-id@smtp.example.com>"} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("composeEmail() does not contain %q", expected)
+		}
+	}
+	if _, err := composeEmail(mail.Address{Address: "app@example.com"}, notifications.Email{
+		To: "person@example.com", Subject: "subject\r\nBcc: other@example.com", TextBody: "body",
+	}, "message-id", time.Now(), "smtp.example.com"); err == nil {
+		t.Fatal("composeEmail(header injection) error = nil")
+	}
+}

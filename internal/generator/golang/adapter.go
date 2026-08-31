@@ -31,6 +31,8 @@ const (
 	tenancyLifecycleVersion = "0.3.0"
 	jobsCapability          = "background-jobs"
 	jobsVersion             = "0.1.0"
+	notificationsCapability = "notifications"
+	notificationsVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -185,6 +187,17 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: notificationsCapability, Version: notificationsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Idempotent email notifications delivered by reliable background jobs",
+			Requires:    []spec.PackDependency{{Name: jobsCapability, Constraint: "^0.1.0"}},
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -215,6 +228,15 @@ var jobsTemplates = map[string]string{
 	"internal/jobs/jobs_test.go":       "templates/jobs_test.go.tmpl",
 	"internal/jobs/worker.go":          "templates/jobs_worker.go.tmpl",
 	"internal/jobs/worker_test.go":     "templates/jobs_worker_test.go.tmpl",
+}
+
+var notificationsTemplates = map[string]string{
+	"internal/jobhandlers/notifications.go":        "templates/notifications_jobhandler.go.tmpl",
+	"internal/jobhandlers/notifications_test.go":   "templates/notifications_jobhandler_test.go.tmpl",
+	"internal/notifications/notifications.go":      "templates/notifications.go.tmpl",
+	"internal/notifications/notifications_test.go": "templates/notifications_test.go.tmpl",
+	"internal/notifications/smtp/sender.go":        "templates/notifications_smtp.go.tmpl",
+	"internal/notifications/smtp/sender_test.go":   "templates/notifications_smtp_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -282,6 +304,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyMembersEnabled := false
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
+	notificationsEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -295,6 +318,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == jobsCapability {
 			jobsEnabled = true
+		}
+		if pack.Metadata.Name == notificationsCapability {
+			notificationsEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
@@ -311,6 +337,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyMembers:   tenancyMembersEnabled,
 		TenancyLifecycle: tenancyLifecycleEnabled,
 		Jobs:             jobsEnabled,
+		Notifications:    notificationsEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -398,6 +425,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			Owner:        jobsCapability,
 		}
 	}
+	if notificationsEnabled {
+		for path, templatePath := range notificationsTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: notificationsCapability}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -458,6 +490,7 @@ type templateData struct {
 	TenancyMembers   bool
 	TenancyLifecycle bool
 	Jobs             bool
+	Notifications    bool
 }
 
 type databaseData struct {

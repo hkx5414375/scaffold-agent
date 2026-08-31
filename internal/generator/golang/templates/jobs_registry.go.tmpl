@@ -1,3 +1,43 @@
-// Package jobhandlers is the extension package imported by the generated worker.
-// Add user-owned files here and call jobs.MustRegister from init functions.
+// Package jobhandlers is the extension package initialized by the generated worker.
+// Add user-owned files here and call jobs.MustRegister directly or register runtime setup.
 package jobhandlers
+
+import (
+	"errors"
+	"sync"
+)
+
+var initializerRegistry = struct {
+	sync.Mutex
+	initializers []func() error
+}{}
+
+var (
+	initializeOnce sync.Once
+	initializeErr  error
+)
+
+// RegisterInitializer adds runtime setup that must finish before workers begin polling.
+func RegisterInitializer(initializer func() error) {
+	if initializer == nil {
+		panic("job handler initializer must not be nil")
+	}
+	initializerRegistry.Lock()
+	defer initializerRegistry.Unlock()
+	initializerRegistry.initializers = append(initializerRegistry.initializers, initializer)
+}
+
+// Initialize configures environment-backed handlers exactly once.
+func Initialize() error {
+	initializeOnce.Do(func() {
+		initializerRegistry.Lock()
+		initializers := append([]func() error(nil), initializerRegistry.initializers...)
+		initializerRegistry.Unlock()
+		for _, initializer := range initializers {
+			if err := initializer(); err != nil {
+				initializeErr = errors.Join(initializeErr, err)
+			}
+		}
+	})
+	return initializeErr
+}

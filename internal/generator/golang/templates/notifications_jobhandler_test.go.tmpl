@@ -1,0 +1,22 @@
+package jobhandlers
+
+import (
+	"testing"
+
+	"{{.ModulePath}}/internal/jobs"
+	"{{.ModulePath}}/internal/notifications"
+)
+
+func TestInitializeRegistersEmailNotificationHandler(t *testing.T) {
+	t.Setenv("SMTP_ADDRESS", "smtp.example.com:465")
+	t.Setenv("SMTP_FROM", "Example <no-reply@example.com>")
+	t.Setenv("SMTP_TLS_MODE", "tls")
+	t.Setenv("SMTP_USERNAME", "")
+	t.Setenv("SMTP_PASSWORD", "")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+	if jobs.DefaultHandlers()[notifications.EmailJobType] == nil {
+		t.Fatalf("DefaultHandlers()[%q] is nil", notifications.EmailJobType)
+	}
+}

@@ -3,7 +3,7 @@ package integration_test
 import (
 	"context"
 	"crypto/rand"
-{{- if .Jobs}}
+{{- if and .Jobs (not .Notifications)}}
 	"encoding/json"
 {{- end}}
 	"errors"
@@ -22,6 +22,9 @@ import (
 	"{{.ModulePath}}/internal/jobs"
 	jobspostgres "{{.ModulePath}}/internal/jobs/postgres"
 	{{- end}}
+{{- if .Notifications}}
+	"{{.ModulePath}}/internal/notifications"
+{{- end}}
 	"{{.ModulePath}}/internal/platform/migrate"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	businesspostgres "{{.ModulePath}}/internal/{{.Business.ModuleName}}/postgres"
@@ -190,6 +193,18 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 {{- if .Jobs}}
 	jobStore := jobspostgres.New(pool)
 	jobService := jobs.NewService(jobStore)
+{{- if .Notifications}}
+	notificationService := notifications.NewService(jobService)
+	queued, err := notificationService.EnqueueEmail(ctx, organizationID, "integration-request", notifications.Email{
+		To: "person@example.com", Subject: "Integration", TextBody: "Queued by integration test",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail() error = %v", err)
+	}
+	duplicate, err := notificationService.EnqueueEmail(ctx, organizationID, "integration-request", notifications.Email{
+		To: "person@example.com", Subject: "Integration", TextBody: "Queued by integration test",
+	})
+{{- else}}
 	jobInput := jobs.EnqueueInput{
 		Type: "system.noop", Payload: json.RawMessage(`{"source":"integration"}`),
 		IdempotencyKey: "integration-request", MaxAttempts: 3,
@@ -199,6 +214,7 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 	duplicate, err := jobService.Enqueue(ctx, organizationID, jobInput)
+{{- end}}
 	if err != nil || duplicate.ID != queued.ID {
 		t.Fatalf("Enqueue(duplicate) = %#v, %v, want %s", duplicate, err, queued.ID)
 	}

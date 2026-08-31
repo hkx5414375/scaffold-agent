@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-{{- if .Jobs}}
+{{- if and .Jobs (not .Notifications)}}
 	"encoding/json"
 {{- end}}
 	"errors"
@@ -22,6 +22,9 @@ import (
 	"{{.ModulePath}}/internal/jobs"
 	jobsmysql "{{.ModulePath}}/internal/jobs/mysql"
 	{{- end}}
+{{- if .Notifications}}
+	"{{.ModulePath}}/internal/notifications"
+{{- end}}
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformmysql "{{.ModulePath}}/internal/platform/mysql"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
@@ -191,6 +194,18 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 {{- if .Jobs}}
 	jobStore := jobsmysql.New(database)
 	jobService := jobs.NewService(jobStore)
+{{- if .Notifications}}
+	notificationService := notifications.NewService(jobService)
+	queued, err := notificationService.EnqueueEmail(ctx, organizationID, "integration-request", notifications.Email{
+		To: "person@example.com", Subject: "Integration", TextBody: "Queued by integration test",
+	})
+	if err != nil {
+		t.Fatalf("EnqueueEmail() error = %v", err)
+	}
+	duplicate, err := notificationService.EnqueueEmail(ctx, organizationID, "integration-request", notifications.Email{
+		To: "person@example.com", Subject: "Integration", TextBody: "Queued by integration test",
+	})
+{{- else}}
 	jobInput := jobs.EnqueueInput{
 		Type: "system.noop", Payload: json.RawMessage(`{"source":"integration"}`),
 		IdempotencyKey: "integration-request", MaxAttempts: 3,
@@ -200,6 +215,7 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 	duplicate, err := jobService.Enqueue(ctx, organizationID, jobInput)
+{{- end}}
 	if err != nil || duplicate.ID != queued.ID {
 		t.Fatalf("Enqueue(duplicate) = %#v, %v, want %s", duplicate, err, queued.ID)
 	}

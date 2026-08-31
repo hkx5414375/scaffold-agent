@@ -1,0 +1,24 @@
+package jobhandlers
+
+import (
+	"fmt"
+
+	"{{.ModulePath}}/internal/jobs"
+	"{{.ModulePath}}/internal/notifications"
+	notificationsmtp "{{.ModulePath}}/internal/notifications/smtp"
+)
+
+func init() {
+	RegisterInitializer(configureEmailNotifications)
+}
+
+func configureEmailNotifications() error {
+	sender, err := notificationsmtp.NewFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("configure email notifications: %w", err)
+	}
+	if err := jobs.Register(notifications.EmailJobType, notifications.EmailHandler(sender)); err != nil {
+		return fmt.Errorf("register email notification handler: %w", err)
+	}
+	return nil
+}

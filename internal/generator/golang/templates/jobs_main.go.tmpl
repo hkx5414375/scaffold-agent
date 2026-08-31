@@ -14,7 +14,7 @@ import (
 
 	"{{.ModulePath}}/internal/jobs"
 	jobsdatabase "{{.ModulePath}}/internal/jobs/{{.Database.PackageName}}"
-	_ "{{.ModulePath}}/internal/jobhandlers"
+	"{{.ModulePath}}/internal/jobhandlers"
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformdatabase "{{.ModulePath}}/internal/platform/{{.Database.PackageName}}"
 )
@@ -40,6 +40,9 @@ func run() error {
 	defer database.Close()
 	if err := migrate.Run(startupContext, database); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+	if err := jobhandlers.Initialize(); err != nil {
+		return fmt.Errorf("initialize background job handlers: %w", err)
 	}
 	workerID := workerIdentifier()
 	worker, err := jobs.NewWorker(jobs.NewService(jobsdatabase.New(database)), workerID, jobs.DefaultHandlers())
