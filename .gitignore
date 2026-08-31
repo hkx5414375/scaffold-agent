@@ -1,0 +1,23 @@
+# Go
+/bin/
+/dist/
+*.test
+*.out
+
+# Scaffold Agent local state
+.scaffold-agent/cache/
+.scaffold-agent/plans/
+.scaffold-agent/backups/
+.scaffold-agent/tmp/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
