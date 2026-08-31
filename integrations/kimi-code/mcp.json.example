@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "scaffold-agent": {
+      "command": "/absolute/path/to/scaffold-agent",
+      "args": ["mcp"],
+      "startupTimeoutMs": 10000,
+      "toolTimeoutMs": 120000
+    }
+  }
+}

@@ -1,12 +1,14 @@
 package change
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/hkx5414375/scaffold-agent/internal/manifest"
 	"github.com/hkx5414375/scaffold-agent/internal/plan"
 	"github.com/hkx5414375/scaffold-agent/internal/projectfs"
 )
@@ -21,12 +23,8 @@ type Receipt struct {
 
 // Apply verifies every precondition and applies an artifact transactionally.
 func Apply(artifact Artifact) (Receipt, error) {
-	computedID, err := plan.ComputeID(artifact.Plan)
-	if err != nil {
+	if err := ValidateArtifact(artifact); err != nil {
 		return Receipt{}, err
-	}
-	if computedID != artifact.Plan.ID {
-		return Receipt{}, fmt.Errorf("plan ID mismatch: got %q, computed %q", artifact.Plan.ID, computedID)
 	}
 	root, err := projectfs.Open(artifact.Plan.ProjectRoot)
 	if err != nil {
@@ -52,9 +50,6 @@ func Apply(artifact Artifact) (Receipt, error) {
 	}
 	if len(artifact.Plan.Changes) == 0 {
 		return Receipt{PlanID: artifact.Plan.ID}, nil
-	}
-	if err := verifyArtifact(artifact); err != nil {
-		return Receipt{}, err
 	}
 	if err := verifyPreconditions(root, artifact.Plan.Changes); err != nil {
 		return Receipt{}, err
@@ -195,11 +190,53 @@ func Recover(rootPath, planID string) (Receipt, error) {
 	return Receipt{PlanID: planID, ChangedFiles: len(value.Entries), RolledBack: true}, nil
 }
 
-func verifyArtifact(artifact Artifact) error {
+// ValidateArtifact verifies the immutable plan identity and every declared content blob.
+func ValidateArtifact(artifact Artifact) error {
+	computedID, err := plan.ComputeID(artifact.Plan)
+	if err != nil {
+		return err
+	}
+	if computedID != artifact.Plan.ID {
+		return fmt.Errorf("plan ID mismatch: got %q, computed %q", artifact.Plan.ID, computedID)
+	}
+	root, err := projectfs.Open(artifact.Plan.ProjectRoot)
+	if err != nil {
+		return err
+	}
 	expectedContent := make(map[string]struct{})
-	for _, change := range artifact.Plan.Changes {
+	seen := make(map[string]struct{}, len(artifact.Plan.Changes))
+	hasManagedChange := false
+	hasManifestChange := false
+	for index, change := range artifact.Plan.Changes {
+		if _, exists := seen[change.Path]; exists {
+			return fmt.Errorf("plan contains duplicate change path %q", change.Path)
+		}
+		seen[change.Path] = struct{}{}
+		if _, err := root.Resolve(change.Path); err != nil {
+			return err
+		}
+		if strings.TrimSpace(change.Owner) == "" {
+			return fmt.Errorf("change %q has no owner", change.Path)
+		}
+		if change.Path == manifest.Path {
+			hasManifestChange = true
+			if change.Owner != manifest.Owner || change.Operation == plan.OperationDelete {
+				return errors.New("ownership manifest change is invalid")
+			}
+			if index != len(artifact.Plan.Changes)-1 {
+				return errors.New("ownership manifest must be the final plan change")
+			}
+		} else {
+			hasManagedChange = true
+			if change.Path == ".scaffold-agent" || strings.HasPrefix(change.Path, ".scaffold-agent/") {
+				return fmt.Errorf("change %q targets reserved Scaffold Agent metadata", change.Path)
+			}
+		}
 		switch change.Operation {
 		case plan.OperationCreate, plan.OperationModify:
+			if !validChangeHashes(change) {
+				return fmt.Errorf("change %q has invalid operation hashes", change.Path)
+			}
 			content, exists := artifact.Content[change.Path]
 			if !exists {
 				return fmt.Errorf("artifact content missing for %q", change.Path)
@@ -209,6 +246,9 @@ func verifyArtifact(artifact Artifact) error {
 			}
 			expectedContent[change.Path] = struct{}{}
 		case plan.OperationDelete:
+			if !validChangeHashes(change) {
+				return fmt.Errorf("change %q has invalid operation hashes", change.Path)
+			}
 			if _, exists := artifact.Content[change.Path]; exists {
 				return fmt.Errorf("delete change %q unexpectedly contains content", change.Path)
 			}
@@ -216,12 +256,36 @@ func verifyArtifact(artifact Artifact) error {
 			return fmt.Errorf("unsupported change operation %q", change.Operation)
 		}
 	}
+	if hasManagedChange && !hasManifestChange {
+		return errors.New("plan changes managed files without updating the ownership manifest")
+	}
 	for path := range artifact.Content {
 		if _, exists := expectedContent[path]; !exists {
 			return fmt.Errorf("artifact contains undeclared content for %q", path)
 		}
 	}
 	return nil
+}
+
+func validChangeHashes(change plan.Change) bool {
+	switch change.Operation {
+	case plan.OperationCreate:
+		return change.BeforeHash == "" && isSHA256(change.AfterHash)
+	case plan.OperationModify:
+		return isSHA256(change.BeforeHash) && isSHA256(change.AfterHash)
+	case plan.OperationDelete:
+		return isSHA256(change.BeforeHash) && change.AfterHash == ""
+	default:
+		return false
+	}
+}
+
+func isSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32
 }
 
 func verifyPreconditions(root projectfs.Root, changes []plan.Change) error {

@@ -2,6 +2,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/hkx5414375/scaffold-agent/internal/engine"
+	"github.com/hkx5414375/scaffold-agent/internal/mcp"
+	"github.com/hkx5414375/scaffold-agent/internal/result"
 	"github.com/hkx5414375/scaffold-agent/internal/version"
 )
 
@@ -19,6 +23,16 @@ Usage:
   scaffold-agent <command> [options]
 
 Commands:
+  query     Return compact Engine or managed-project facts
+  validate  Validate one project Blueprint
+  plan      Build and store an immutable project plan
+  preview   Preview a stored plan and obtain its apply token
+  apply     Apply a previewed plan transactionally
+  verify    Verify every Engine-managed file
+  result    Read one page from a stored result
+  rollback  Restore one fully applied transaction
+  recover   Restore one interrupted transaction
+  mcp       Run the newline-delimited JSON-RPC STDIO server
   doctor    Check the local development environment
   version   Print build version information
   help      Show this help
@@ -26,6 +40,11 @@ Commands:
 
 // Run executes the command and returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	return RunIO(args, strings.NewReader(""), stdout, stderr)
+}
+
+// RunIO executes the application with an explicit input stream for MCP STDIO.
+func RunIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stdout, usage)
 		return 0
@@ -39,10 +58,34 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runVersion(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
+	case "query", "validate", "plan", "preview", "apply", "verify", "result", "rollback", "recover":
+		return runEngineCommand(args[0], args[1:], stdout, stderr)
+	case "mcp":
+		if len(args) != 1 {
+			_, _ = fmt.Fprintln(stderr, "mcp does not accept command arguments")
+			return 2
+		}
+		current := version.Current()
+		server := mcp.New(engine.New(current.Version), current.Version)
+		if err := server.Serve(context.Background(), stdin, stdout); err != nil {
+			_, _ = fmt.Fprintf(stderr, "run MCP server: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		return 2
 	}
+}
+
+func writeEnvelope(stdout, stderr io.Writer, envelope result.Envelope) int {
+	if code := writeJSON(stdout, stderr, envelope); code != 0 {
+		return code
+	}
+	if envelope.Status == result.StatusError {
+		return 1
+	}
+	return 0
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) int {

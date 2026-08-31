@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "scaffold-agent": {
+      "type": "stdio",
+      "command": "/absolute/path/to/scaffold-agent",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}

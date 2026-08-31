@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The quality baseline, versioned protocol core, capability dependency resolver, and deterministic filesystem transactions with ownership protection, preview, apply, rollback, and interrupted-run recovery are implemented. The public CLI/MCP surface is still under construction, and schemas remain experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, content-addressed artifact storage, and pageable results are implemented. The first Go generator is the next milestone, and schemas remain experimental until 1.0.
 
 ## Design goals
 
@@ -40,9 +40,11 @@ Run the baseline checks:
 go test ./...
 go vet ./...
 go run ./cmd/scaffold-agent doctor --json
+go run ./cmd/scaffold-agent query --topic support
+go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
 
 ## License
 

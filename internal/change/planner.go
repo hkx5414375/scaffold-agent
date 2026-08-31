@@ -126,7 +126,7 @@ func Build(rootPath string, action plan.Action, blueprintHash string, capability
 	}
 	states = append(states, fileState{Path: manifest.Path, Exists: currentManifest.Exists, Hash: currentManifest.Hash})
 	manifestAfterHash := projectfs.HashBytes(manifestContent)
-	if !currentManifest.Exists || currentManifest.Hash != manifestAfterHash {
+	if !currentManifest.Exists || currentManifest.Hash != manifestAfterHash || len(changes) > 0 {
 		operation := plan.OperationCreate
 		if currentManifest.Exists {
 			operation = plan.OperationModify

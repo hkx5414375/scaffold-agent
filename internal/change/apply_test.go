@@ -141,6 +141,45 @@ func TestBuildRejectsReservedMetadataOutput(t *testing.T) {
 	}
 }
 
+func TestValidateArtifactRejectsDuplicateAndReservedChanges(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	artifact, err := Build(root, plan.ActionCreate, testBlueprintHash, nil, []Output{{Path: "file.txt", Owner: "test", Content: []byte("content")}})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	duplicate := artifact
+	duplicate.Plan.Changes = append([]plan.Change{artifact.Plan.Changes[0], artifact.Plan.Changes[0]}, artifact.Plan.Changes[1:]...)
+	duplicate.Plan, err = plan.WithComputedID(duplicate.Plan)
+	if err != nil {
+		t.Fatalf("plan.WithComputedID() error = %v", err)
+	}
+	if err := ValidateArtifact(duplicate); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("ValidateArtifact(duplicate) error = %v, want duplicate error", err)
+	}
+
+	reserved := artifact
+	reservedContent := []byte("metadata")
+	reserved.Plan.Changes[0] = plan.Change{
+		Operation: plan.OperationCreate,
+		Path:      ".scaffold-agent/plans/injected.json",
+		Owner:     "test",
+		AfterHash: projectfs.HashBytes(reservedContent),
+	}
+	reserved.Content = map[string][]byte{
+		reserved.Plan.Changes[0].Path: reservedContent,
+		reserved.Plan.Changes[1].Path: artifact.Content[artifact.Plan.Changes[1].Path],
+	}
+	reserved.Plan, err = plan.WithComputedID(reserved.Plan)
+	if err != nil {
+		t.Fatalf("plan.WithComputedID() error = %v", err)
+	}
+	if err := ValidateArtifact(reserved); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("ValidateArtifact(reserved) error = %v, want reserved metadata error", err)
+	}
+}
+
 func TestRecoverRestoresModifyInterruptedAfterBackup(t *testing.T) {
 	t.Parallel()
 

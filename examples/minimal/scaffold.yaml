@@ -1,0 +1,15 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: minimal-demo
+spec:
+  stack:
+    backend: go
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes:
+      - session
+      - token
