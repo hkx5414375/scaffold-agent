@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated Go services include migrations, password hashing, browser sessions, API tokens, permission-based RBAC, and security audit events. Business CRUD and frontends remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated Go services include migrations, password hashing, browser sessions, API tokens, permission-based RBAC, security audit events, and a Blueprint-driven CRUD module with keyset pagination and optimistic locking. OpenAPI and frontends remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -42,6 +42,7 @@ go vet ./...
 go run ./cmd/scaffold-agent doctor --json
 go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

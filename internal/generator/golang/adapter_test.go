@@ -58,6 +58,45 @@ func TestGenerateRejectsUnsupportedBusinessModules(t *testing.T) {
 	}
 }
 
+func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Modules = []spec.Module{{
+		Name: "tasks",
+		Entities: []spec.Entity{{Name: "task", Fields: []spec.Field{
+			{Name: "title", Type: "string", Required: true, Unique: true},
+			{Name: "description", Type: "text"},
+			{Name: "done", Type: "bool", Required: true},
+			{Name: "priority", Type: "int64", Required: true},
+			{Name: "due_at", Type: "datetime"},
+		}}},
+		Permissions: []spec.Permission{
+			{Code: "tasks:task:create"}, {Code: "tasks:task:read"},
+			{Code: "tasks:task:update"}, {Code: "tasks:task:delete"},
+		},
+	}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[businessCapability] != businessVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, output := range generated.Outputs {
+		if !strings.HasSuffix(output.Path, ".go") {
+			continue
+		}
+		formatted, err := format.Source(output.Content)
+		if err != nil {
+			t.Fatalf("generated %q is invalid Go: %v", output.Path, err)
+		}
+		if !bytes.Equal(formatted, output.Content) {
+			t.Fatalf("generated %q is not gofmt formatted\n--- got ---\n%s\n--- want ---\n%s", output.Path, output.Content, formatted)
+		}
+	}
+}
+
 func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
 	t.Parallel()
 

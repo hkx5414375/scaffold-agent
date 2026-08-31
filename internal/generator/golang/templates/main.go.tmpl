@@ -19,6 +19,11 @@ import (
 	"{{.ModulePath}}/internal/platform/httpserver"
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformpostgres "{{.ModulePath}}/internal/platform/postgres"
+{{- if .Business}}
+	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	{{.Business.PackageName}}http "{{.ModulePath}}/internal/{{.Business.ModuleName}}/httpapi"
+	{{.Business.PackageName}}postgres "{{.ModulePath}}/internal/{{.Business.ModuleName}}/postgres"
+{{- end}}
 )
 
 const (
@@ -57,11 +62,20 @@ func run() error {
 		return err
 	}
 	identityAPI := httpapi.New(identityService, secureCookies)
+	registerRoutes := identityAPI.Register
+{{- if .Business}}
+	{{.Business.PackageName}}Service := {{.Business.PackageName}}.NewService({{.Business.PackageName}}postgres.New(pool))
+	{{.Business.PackageName}}API := {{.Business.PackageName}}http.New({{.Business.PackageName}}Service)
+	registerRoutes = func(mux *http.ServeMux) {
+		identityAPI.Register(mux)
+		{{.Business.PackageName}}API.Register(mux, identityAPI)
+	}
+{{- end}}
 	address := strings.TrimSpace(os.Getenv("HTTP_ADDRESS"))
 	if address == "" {
 		address = ":8080"
 	}
-	server := httpserver.New(address, identityAPI.Register)
+	server := httpserver.New(address, registerRoutes)
 	serveError := make(chan error, 1)
 	go func() {
 		slog.Info("start HTTP server", "address", address)

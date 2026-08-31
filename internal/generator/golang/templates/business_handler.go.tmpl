@@ -1,0 +1,117 @@
+// Package httpapi exposes {{.Business.EntityName}} use cases over HTTP.
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+)
+
+const defaultPageLimit = 20
+
+// Handler maps HTTP requests to the {{.Business.EntityName}} application service.
+type Handler struct {
+	service *{{.Business.PackageName}}.Service
+}
+
+// New returns a {{.Business.EntityName}} HTTP adapter.
+func New(service *{{.Business.PackageName}}.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds CRUD routes protected by explicit permission codes.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST {{.Business.RoutePath}}", security.Authorized("{{.Business.PermissionPrefix}}:create", handler.create))
+	mux.HandleFunc("GET {{.Business.RoutePath}}", security.Authorized("{{.Business.PermissionPrefix}}:read", handler.list))
+	mux.HandleFunc("GET {{.Business.RoutePath}}/{id}", security.Authorized("{{.Business.PermissionPrefix}}:read", handler.get))
+	mux.HandleFunc("PUT {{.Business.RoutePath}}/{id}", security.Authorized("{{.Business.PermissionPrefix}}:update", handler.update))
+	mux.HandleFunc("DELETE {{.Business.RoutePath}}/{id}", security.Authorized("{{.Business.PermissionPrefix}}:delete", handler.delete))
+}
+
+func (handler *Handler) create(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input {{.Business.PackageName}}.WriteInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := handler.service.Create(request.Context(), input, actor)
+	if err != nil {
+		handleError(response, "create {{.Business.EntityName}}", err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, value)
+}
+
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, _ identity.Principal) {
+	value, err := handler.service.Get(request.Context(), request.PathValue("id"))
+	if err != nil {
+		handleError(response, "get {{.Business.EntityName}}", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, _ identity.Principal) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	page, err := handler.service.List(request.Context(), request.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		handleError(response, "list {{.Business.EntityName}}", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) update(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input {{.Business.PackageName}}.UpdateInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := handler.service.Update(request.Context(), request.PathValue("id"), input, actor)
+	if err != nil {
+		handleError(response, "update {{.Business.EntityName}}", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) delete(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	version, err := strconv.ParseInt(request.URL.Query().Get("version"), 10, 64)
+	if err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "version must be an integer")
+		return
+	}
+	if err := handler.service.Delete(request.Context(), request.PathValue("id"), version, actor); err != nil {
+		handleError(response, "delete {{.Business.EntityName}}", err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, {{.Business.PackageName}}.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "{{.Business.ModuleName}}.invalid", "request data is invalid")
+	case errors.Is(err, {{.Business.PackageName}}.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "{{.Business.ModuleName}}.not_found", "{{.Business.EntityName}} was not found")
+	case errors.Is(err, {{.Business.PackageName}}.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "{{.Business.ModuleName}}.conflict", "{{.Business.EntityName}} changed or conflicts with an existing value")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

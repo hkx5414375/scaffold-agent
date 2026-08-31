@@ -23,7 +23,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] PBKDF2 password hashing, administrator bootstrap, browser sessions, API tokens, and audit events.
 - [x] Generated-module formatting, dependency, unit-test, vet, apply, and ownership verification.
 - [x] Permission-based RBAC with deny-by-default HTTP wrappers.
-- [ ] One stateful CRUD module with optimistic concurrency and audit coverage.
+- [x] One stateful CRUD module with keyset pagination, optimistic concurrency, transactional audit, and generated RBAC.
 - [ ] OpenAPI contract and Vue/Element Plus administration UI.
 - [ ] PostgreSQL integration tests against an ephemeral database.
 

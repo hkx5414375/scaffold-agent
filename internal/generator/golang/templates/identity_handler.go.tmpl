@@ -2,19 +2,17 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 
 	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/platform/httpjson"
 )
 
 const (
-	maximumRequestBytes   = 1 << 20
 	sessionCookieName     = "scaffold_session"
 	sessionMaxAge         = 24 * 60 * 60
 	createTokenPermission = "identity:token:create"
@@ -35,8 +33,8 @@ func New(service *identity.Service, secureCookies bool) *Handler {
 func (handler *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", handler.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", handler.logout)
-	mux.HandleFunc("GET /api/v1/auth/me", handler.authenticated(handler.me))
-	mux.HandleFunc("POST /api/v1/auth/tokens", handler.authorized(createTokenPermission, handler.createAPIToken))
+	mux.HandleFunc("GET /api/v1/auth/me", handler.Authenticated(handler.me))
+	mux.HandleFunc("POST /api/v1/auth/tokens", handler.Authorized(createTokenPermission, handler.createAPIToken))
 }
 
 func (handler *Handler) login(response http.ResponseWriter, request *http.Request) {
@@ -112,9 +110,11 @@ func (handler *Handler) createAPIToken(response http.ResponseWriter, request *ht
 	writeJSON(response, http.StatusCreated, map[string]string{"token": token})
 }
 
-type principalHandler func(http.ResponseWriter, *http.Request, identity.Principal)
+// PrincipalHandler is an authenticated HTTP endpoint.
+type PrincipalHandler func(http.ResponseWriter, *http.Request, identity.Principal)
 
-func (handler *Handler) authenticated(next principalHandler) http.HandlerFunc {
+// Authenticated requires a valid session or bearer token.
+func (handler *Handler) Authenticated(next PrincipalHandler) http.HandlerFunc {
 	return func(response http.ResponseWriter, request *http.Request) {
 		principal, ok := handler.authenticate(response, request)
 		if !ok {
@@ -124,8 +124,9 @@ func (handler *Handler) authenticated(next principalHandler) http.HandlerFunc {
 	}
 }
 
-func (handler *Handler) authorized(permission string, next principalHandler) http.HandlerFunc {
-	return handler.authenticated(func(response http.ResponseWriter, request *http.Request, principal identity.Principal) {
+// Authorized requires authentication and one explicit permission assignment.
+func (handler *Handler) Authorized(permission string, next PrincipalHandler) http.HandlerFunc {
+	return handler.Authenticated(func(response http.ResponseWriter, request *http.Request, principal identity.Principal) {
 		err := handler.service.Authorize(request.Context(), principal, permission, clientIP(request), request.UserAgent())
 		if errors.Is(err, identity.ErrForbidden) {
 			writeError(response, http.StatusForbidden, "identity.forbidden", "permission is required")
@@ -163,16 +164,7 @@ func (handler *Handler) authenticate(response http.ResponseWriter, request *http
 }
 
 func decodeJSON(response http.ResponseWriter, request *http.Request, destination any) error {
-	request.Body = http.MaxBytesReader(response, request.Body, maximumRequestBytes)
-	decoder := json.NewDecoder(request.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return errors.New("request body must be one valid JSON object")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("request body must contain exactly one JSON object")
-	}
-	return nil
+	return httpjson.Decode(response, request, destination)
 }
 
 func bearer(value string) string {
@@ -195,13 +187,9 @@ func clientIP(request *http.Request) string {
 }
 
 func writeError(response http.ResponseWriter, status int, code, message string) {
-	writeJSON(response, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+	httpjson.WriteError(response, status, code, message)
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
-	response.Header().Set("Content-Type", "application/json; charset=utf-8")
-	response.WriteHeader(status)
-	if err := json.NewEncoder(response).Encode(value); err != nil {
-		slog.Error("encode HTTP response", "error", err)
-	}
+	httpjson.Write(response, status, value)
 }

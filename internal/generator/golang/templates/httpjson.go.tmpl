@@ -1,0 +1,40 @@
+// Package httpjson provides strict JSON request and response primitives.
+package httpjson
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+)
+
+const maximumRequestBytes = 1 << 20
+
+// Decode accepts exactly one JSON object and rejects unknown fields.
+func Decode(response http.ResponseWriter, request *http.Request, destination any) error {
+	request.Body = http.MaxBytesReader(response, request.Body, maximumRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return errors.New("request body must be one valid JSON object")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain exactly one JSON object")
+	}
+	return nil
+}
+
+// WriteError writes one stable public error envelope.
+func WriteError(response http.ResponseWriter, status int, code, message string) {
+	Write(response, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+// Write writes a JSON response and records transport failures without leaking data.
+func Write(response http.ResponseWriter, status int, value any) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.WriteHeader(status)
+	if err := json.NewEncoder(response).Encode(value); err != nil {
+		slog.Error("encode HTTP response", "error", err)
+	}
+}

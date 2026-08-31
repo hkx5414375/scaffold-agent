@@ -1,0 +1,186 @@
+// Package {{.Business.PackageName}} owns the {{.Business.EntityName}} business boundary.
+package {{.Business.PackageName}}
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+var (
+	// ErrNotFound means the requested {{.Business.EntityName}} does not exist.
+	ErrNotFound = errors.New("{{.Business.EntityName}} not found")
+	// ErrConflict means a unique value or optimistic-lock version conflicts.
+	ErrConflict = errors.New("{{.Business.EntityName}} conflicts with current state")
+	// ErrInvalidInput means the request cannot form a valid {{.Business.EntityName}}.
+	ErrInvalidInput = errors.New("{{.Business.EntityName}} input is invalid")
+)
+
+// {{.Business.EntityType}} is the persisted business entity.
+type {{.Business.EntityType}} struct {
+	ID string `json:"id"`
+{{- range .Business.Fields}}
+	{{.GoName}} {{.EntityType}} `json:"{{.Name}}{{if not .Required}},omitempty{{end}}"`
+{{- end}}
+	Version   int64     `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// WriteInput is the full create or replacement representation.
+type WriteInput struct {
+{{- range .Business.Fields}}
+	{{.GoName}} *{{.GoType}} `json:"{{.Name}}"`
+{{- end}}
+}
+
+// UpdateInput adds the optimistic-lock version to a replacement representation.
+type UpdateInput struct {
+	WriteInput
+	Version int64 `json:"version"`
+}
+
+// Page is one bounded keyset page.
+type Page struct {
+	Items      []{{.Business.EntityType}} `json:"items"`
+	NextCursor string                 `json:"next_cursor,omitempty"`
+}
+
+// Store persists {{.Business.EntityName}} mutations and their audit event atomically.
+type Store interface {
+	Create(context.Context, {{.Business.EntityType}}, identity.AuditEvent) error
+	Get(context.Context, string) ({{.Business.EntityType}}, error)
+	List(context.Context, string, int) ([]{{.Business.EntityType}}, string, error)
+	Update(context.Context, {{.Business.EntityType}}, identity.AuditEvent) ({{.Business.EntityType}}, error)
+	Delete(context.Context, string, int64, identity.AuditEvent) error
+}
+
+// Service implements {{.Business.EntityName}} use cases independently from HTTP and PostgreSQL.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns a {{.Business.EntityName}} application service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Create validates and persists one {{.Business.EntityName}} with an audit event.
+func (service *Service) Create(ctx context.Context, input WriteInput, actor identity.Principal) ({{.Business.EntityType}}, error) {
+	if actor.UserID == "" {
+		return {{.Business.EntityType}}{}, identity.ErrInvalidCredentials
+	}
+	if err := validateWrite(input); err != nil {
+		return {{.Business.EntityType}}{}, err
+	}
+	now := service.now().UTC()
+	value := {{.Business.EntityType}}{ID: rand.Text(), Version: 1, CreatedAt: now, UpdatedAt: now}
+	assign(&value, input)
+	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:create", value.ID, now)
+	if err := service.store.Create(ctx, value, audit); err != nil {
+		return {{.Business.EntityType}}{}, fmt.Errorf("create {{.Business.EntityName}}: %w", err)
+	}
+	return value, nil
+}
+
+// Get returns one {{.Business.EntityName}} by identifier.
+func (service *Service) Get(ctx context.Context, id string) ({{.Business.EntityType}}, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return {{.Business.EntityType}}{}, ErrInvalidInput
+	}
+	value, err := service.store.Get(ctx, id)
+	if err != nil {
+		return {{.Business.EntityType}}{}, fmt.Errorf("get {{.Business.EntityName}}: %w", err)
+	}
+	return value, nil
+}
+
+// List returns a bounded keyset page.
+func (service *Service) List(ctx context.Context, cursor string, limit int) (Page, error) {
+	if limit < 1 || limit > 100 {
+		return Page{}, ErrInvalidInput
+	}
+	items, nextCursor, err := service.store.List(ctx, cursor, limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("list {{.Business.EntityName}}: %w", err)
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+// Update replaces mutable fields when the caller's version matches.
+func (service *Service) Update(ctx context.Context, id string, input UpdateInput, actor identity.Principal) ({{.Business.EntityType}}, error) {
+	if actor.UserID == "" {
+		return {{.Business.EntityType}}{}, identity.ErrInvalidCredentials
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || input.Version < 1 {
+		return {{.Business.EntityType}}{}, ErrInvalidInput
+	}
+	if err := validateWrite(input.WriteInput); err != nil {
+		return {{.Business.EntityType}}{}, err
+	}
+	value := {{.Business.EntityType}}{ID: id, Version: input.Version, UpdatedAt: service.now().UTC()}
+	assign(&value, input.WriteInput)
+	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:update", id, value.UpdatedAt)
+	updated, err := service.store.Update(ctx, value, audit)
+	if err != nil {
+		return {{.Business.EntityType}}{}, fmt.Errorf("update {{.Business.EntityName}}: %w", err)
+	}
+	return updated, nil
+}
+
+// Delete removes one {{.Business.EntityName}} when the caller's version matches.
+func (service *Service) Delete(ctx context.Context, id string, version int64, actor identity.Principal) error {
+	if actor.UserID == "" {
+		return identity.ErrInvalidCredentials
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || version < 1 {
+		return ErrInvalidInput
+	}
+	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:delete", id, service.now().UTC())
+	if err := service.store.Delete(ctx, id, version, audit); err != nil {
+		return fmt.Errorf("delete {{.Business.EntityName}}: %w", err)
+	}
+	return nil
+}
+
+func validateWrite(input WriteInput) error {
+{{- range .Business.Fields}}
+{{- if .Required}}
+	if input.{{.GoName}} == nil {
+		return fmt.Errorf("%w: {{.Name}} is required", ErrInvalidInput)
+	}
+{{- end}}
+{{- if .StringLike}}
+	if input.{{.GoName}} != nil && strings.TrimSpace(*input.{{.GoName}}) == "" {
+		return fmt.Errorf("%w: {{.Name}} cannot be blank", ErrInvalidInput)
+	}
+{{- end}}
+{{- end}}
+	return nil
+}
+
+func assign(destination *{{.Business.EntityType}}, input WriteInput) {
+{{- range .Business.Fields}}
+{{- if .Required}}
+	destination.{{.GoName}} = *input.{{.GoName}}
+{{- else}}
+	destination.{{.GoName}} = input.{{.GoName}}
+{{- end}}
+{{- end}}
+}
+
+func newAudit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

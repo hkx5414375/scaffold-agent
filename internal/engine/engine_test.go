@@ -30,6 +30,21 @@ spec:
     engine: postgresql
   auth:
     modes: [session, token]
+  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - {name: title, type: string, required: true, unique: true}
+            - {name: description, type: text}
+            - {name: done, type: bool, required: true}
+            - {name: priority, type: int64, required: true}
+            - {name: due_at, type: datetime}
+      permissions:
+        - {code: "tasks:task:create"}
+        - {code: "tasks:task:read"}
+        - {code: "tasks:task:update"}
+        - {code: "tasks:task:delete"}
 `)
 	envelope := New("test").Validate(context.Background(), ValidateInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml"})
 	if envelope.Status != result.StatusOK {
@@ -109,6 +124,21 @@ spec:
     engine: postgresql
   auth:
     modes: [session, token]
+  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - {name: title, type: string, required: true, unique: true}
+            - {name: description, type: text}
+            - {name: done, type: bool, required: true}
+            - {name: priority, type: int64, required: true}
+            - {name: due_at, type: datetime}
+      permissions:
+        - {code: "tasks:task:create"}
+        - {code: "tasks:task:read"}
+        - {code: "tasks:task:update"}
+        - {code: "tasks:task:delete"}
 `)
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
@@ -116,7 +146,7 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 19 || plannedData.CapabilityLock["go-service"] != "0.1.0" {
+	if plannedData.ChangeCount != 25 || plannedData.CapabilityLock["go-service"] != "0.1.0" || plannedData.CapabilityLock["go-crud"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

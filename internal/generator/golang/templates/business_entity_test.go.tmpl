@@ -1,0 +1,112 @@
+package {{.Business.PackageName}}
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestCreateUpdateDeleteUsesVersionsAndAudit(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "user-1", Role: "admin"}
+{{- range .Business.Fields}}
+	first{{.GoName}} := {{.SampleOne}}
+	second{{.GoName}} := {{.SampleTwo}}
+{{- end}}
+	created, err := service.Create(context.Background(), WriteInput{
+{{- range .Business.Fields}}
+		{{.GoName}}: &first{{.GoName}},
+{{- end}}
+	}, actor)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.ID == "" || created.Version != 1 || store.audit.Action != "{{.Business.PermissionPrefix}}:create" {
+		t.Fatalf("Create() value = %#v, audit = %#v", created, store.audit)
+	}
+	updated, err := service.Update(context.Background(), created.ID, UpdateInput{
+		WriteInput: WriteInput{
+{{- range .Business.Fields}}
+			{{.GoName}}: &second{{.GoName}},
+{{- end}}
+		},
+		Version: created.Version,
+	}, actor)
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.Version != 2 || store.audit.Action != "{{.Business.PermissionPrefix}}:update" {
+		t.Fatalf("Update() value = %#v, audit = %#v", updated, store.audit)
+	}
+	if _, err := service.Update(context.Background(), created.ID, UpdateInput{
+		WriteInput: WriteInput{
+{{- range .Business.Fields}}
+			{{.GoName}}: &second{{.GoName}},
+{{- end}}
+		},
+		Version: 1,
+	}, actor); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Update(stale) error = %v, want ErrConflict", err)
+	}
+	if err := service.Delete(context.Background(), created.ID, updated.Version, actor); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if store.exists || store.audit.Action != "{{.Business.PermissionPrefix}}:delete" {
+		t.Fatalf("Delete() exists = %t, audit = %#v", store.exists, store.audit)
+	}
+}
+
+type memoryStore struct {
+	value  {{.Business.EntityType}}
+	exists bool
+	audit  identity.AuditEvent
+}
+
+func (store *memoryStore) Create(_ context.Context, value {{.Business.EntityType}}, audit identity.AuditEvent) error {
+	if store.exists {
+		return ErrConflict
+	}
+	store.value, store.exists, store.audit = value, true, audit
+	return nil
+}
+
+func (store *memoryStore) Get(_ context.Context, id string) ({{.Business.EntityType}}, error) {
+	if !store.exists || store.value.ID != id {
+		return {{.Business.EntityType}}{}, ErrNotFound
+	}
+	return store.value, nil
+}
+
+func (store *memoryStore) List(context.Context, string, int) ([]{{.Business.EntityType}}, string, error) {
+	if !store.exists {
+		return nil, "", nil
+	}
+	return []{{.Business.EntityType}}{store.value}, "", nil
+}
+
+func (store *memoryStore) Update(_ context.Context, value {{.Business.EntityType}}, audit identity.AuditEvent) ({{.Business.EntityType}}, error) {
+	if !store.exists || store.value.ID != value.ID || store.value.Version != value.Version {
+		return {{.Business.EntityType}}{}, ErrConflict
+	}
+	value.Version++
+	value.CreatedAt = store.value.CreatedAt
+	store.value, store.audit = value, audit
+	return value, nil
+}
+
+func (store *memoryStore) Delete(_ context.Context, id string, version int64, audit identity.AuditEvent) error {
+	if !store.exists || store.value.ID != id || store.value.Version != version {
+		return ErrConflict
+	}
+	store.exists, store.audit = false, audit
+	return nil
+}
+
+var _ Store = (*memoryStore)(nil)

@@ -1,0 +1,23 @@
+insert into identity_permissions (code, description) values
+    ('{{.Business.PermissionPrefix}}:create', 'Create {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:read', 'Read {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:update', 'Update {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:delete', 'Delete {{.Business.EntityName}} records');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', '{{.Business.PermissionPrefix}}:create'),
+    ('admin', '{{.Business.PermissionPrefix}}:read'),
+    ('admin', '{{.Business.PermissionPrefix}}:update'),
+    ('admin', '{{.Business.PermissionPrefix}}:delete');
+
+create table {{.Business.TableName}} (
+    id text primary key,
+{{- range .Business.Fields}}
+    {{.Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
+{{- end}}
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+
+create index {{.Business.TableName}}_updated_idx on {{.Business.TableName}} (updated_at desc);
