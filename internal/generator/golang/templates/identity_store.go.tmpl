@@ -1,0 +1,73 @@
+package identity
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+var (
+	// ErrNotFound hides persistence-specific missing-row behavior.
+	ErrNotFound = errors.New("identity record not found")
+	// ErrInvalidCredentials deliberately does not reveal whether an account exists.
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	// ErrInvalidTokenName identifies a user-correctable API token name.
+	ErrInvalidTokenName = errors.New("token name must contain 1 to 80 characters")
+)
+
+// User is the authenticated account aggregate.
+type User struct {
+	ID           string
+	Email        string
+	PasswordHash string
+	Role         string
+	Disabled     bool
+}
+
+// Principal is the minimum authenticated identity passed to application use cases.
+type Principal struct {
+	UserID string `json:"user_id"`
+	Email  string `json:"email"`
+	Role   string `json:"role"`
+	Method string `json:"method"`
+}
+
+// Session is a persisted browser session. Only a SHA-256 token digest is stored.
+type Session struct {
+	TokenHash []byte
+	UserID    string
+	ExpiresAt time.Time
+}
+
+// APIToken is a named bearer token. Only a SHA-256 token digest is stored.
+type APIToken struct {
+	ID        string
+	TokenHash []byte
+	UserID    string
+	Name      string
+	ExpiresAt time.Time
+}
+
+// AuditEvent records security-relevant identity actions without secrets.
+type AuditEvent struct {
+	ID        string
+	UserID    string
+	Action    string
+	Outcome   string
+	IPAddress string
+	UserAgent string
+	CreatedAt time.Time
+}
+
+// Store is the persistence boundary for identity use cases.
+type Store interface {
+	CreateUser(context.Context, User) error
+	UserByEmail(context.Context, string) (User, error)
+	CreateSession(context.Context, Session) error
+	DeleteSession(context.Context, []byte) error
+	UserBySession(context.Context, []byte, time.Time) (User, error)
+	CreateAPIToken(context.Context, APIToken) error
+	DeleteAPIToken(context.Context, string) error
+	UserByAPIToken(context.Context, []byte, time.Time) (User, error)
+	AppendAudit(context.Context, AuditEvent) error
+}

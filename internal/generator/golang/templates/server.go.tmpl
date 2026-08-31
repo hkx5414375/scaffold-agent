@@ -1,0 +1,41 @@
+// Package httpserver owns the generated service's HTTP transport boundary.
+package httpserver
+
+import (
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+const defaultReadHeaderTimeout = 5 * time.Second
+
+// RegisterRoutes adds one feature's routes to the application mux.
+type RegisterRoutes func(*http.ServeMux)
+
+// NewHandler returns the complete HTTP routing tree.
+func NewHandler(register RegisterRoutes) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", health)
+	if register != nil {
+		register(mux)
+	}
+	return mux
+}
+
+// New returns a production-safe HTTP server with bounded header reads.
+func New(address string, register RegisterRoutes) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           NewHandler(register),
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+	}
+}
+
+func health(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(response).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Error("encode health response", "error", err)
+	}
+}

@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. Until the first Go adapter lands in M4, `scaffold_plan` validates the Blueprint and returns the stable `generator.adapter.unavailable` diagnostic instead of producing an incomplete application.
+The six-tool surface and storage contracts are implemented. The first Go adapter generates a PostgreSQL-backed HTTP service with embedded migrations, session and token authentication, and audit events. It rejects unsupported database, frontend, authentication, and business-module selections instead of silently omitting them. Java and Python currently return the stable `generator.adapter.unavailable` diagnostic.
 
 ## STDIO protocol
 

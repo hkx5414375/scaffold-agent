@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。在 M4 的第一个 Go 适配器完成前，`scaffold_plan` 会校验 Blueprint，然后返回稳定诊断 `generator.adapter.unavailable`，不会生成一套不完整的应用。
+六个工具和存储协议已实现。第一个 Go 适配器已能生成带 PostgreSQL、内嵌迁移、Session 与 Token 双认证及审计事件的 HTTP 服务。对尚未支持的数据库、前端、认证方式和业务模块，它会明确拒绝，不会静默漏生代码。Java 和 Python 目前会返回稳定诊断 `generator.adapter.unavailable`。
 
 ## STDIO 协议
 

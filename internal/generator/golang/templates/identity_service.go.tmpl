@@ -1,0 +1,190 @@
+package identity
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+)
+
+const (
+	sessionLifetime   = 24 * time.Hour
+	apiTokenLifetime  = 90 * 24 * time.Hour
+	dummyPasswordHash = "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+// Service implements authentication use cases independent from HTTP and PostgreSQL.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns an identity application service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// EnsureAdmin creates the initial administrator when the account does not exist.
+func (service *Service) EnsureAdmin(ctx context.Context, email, password string) error {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return err
+	}
+	existing, err := service.store.UserByEmail(ctx, email)
+	if err == nil {
+		if existing.Role != "admin" || existing.Disabled {
+			return errors.New("bootstrap email belongs to a non-administrator or disabled account")
+		}
+		return nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return fmt.Errorf("look up bootstrap administrator: %w", err)
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return err
+	}
+	if err := service.store.CreateUser(ctx, User{ID: newID(), Email: email, PasswordHash: hash, Role: "admin"}); err != nil {
+		return fmt.Errorf("create bootstrap administrator: %w", err)
+	}
+	return nil
+}
+
+// Login verifies credentials and returns a raw session token exactly once.
+func (service *Service) Login(ctx context.Context, email, password, ipAddress, userAgent string) (string, Principal, error) {
+	normalizedEmail, err := normalizeEmail(email)
+	if err != nil {
+		VerifyPassword(dummyPasswordHash, password)
+		return "", Principal{}, service.denyLogin(ctx, "", ipAddress, userAgent)
+	}
+	user, err := service.store.UserByEmail(ctx, normalizedEmail)
+	if errors.Is(err, ErrNotFound) {
+		VerifyPassword(dummyPasswordHash, password)
+		return "", Principal{}, service.denyLogin(ctx, "", ipAddress, userAgent)
+	}
+	if err != nil {
+		return "", Principal{}, fmt.Errorf("look up login account: %w", err)
+	}
+	if user.Disabled || !VerifyPassword(user.PasswordHash, password) {
+		return "", Principal{}, service.denyLogin(ctx, user.ID, ipAddress, userAgent)
+	}
+	token := rand.Text()
+	digest := tokenDigest(token)
+	if err := service.store.CreateSession(ctx, Session{TokenHash: digest, UserID: user.ID, ExpiresAt: service.now().UTC().Add(sessionLifetime)}); err != nil {
+		return "", Principal{}, fmt.Errorf("create session: %w", err)
+	}
+	if err := service.audit(ctx, user.ID, "identity.login", "succeeded", ipAddress, userAgent); err != nil {
+		if rollbackErr := service.store.DeleteSession(ctx, digest); rollbackErr != nil {
+			return "", Principal{}, errors.Join(
+				fmt.Errorf("record successful login: %w", err),
+				fmt.Errorf("remove unaudited session: %w", rollbackErr),
+			)
+		}
+		return "", Principal{}, fmt.Errorf("record successful login: %w", err)
+	}
+	return token, principal(user, "session"), nil
+}
+
+// Authenticate accepts either a browser session or bearer API token.
+func (service *Service) Authenticate(ctx context.Context, sessionToken, bearerToken string) (Principal, error) {
+	now := service.now().UTC()
+	if bearerToken != "" {
+		user, err := service.store.UserByAPIToken(ctx, tokenDigest(bearerToken), now)
+		return authenticated(user, err, "token")
+	}
+	if sessionToken == "" {
+		return Principal{}, ErrInvalidCredentials
+	}
+	user, err := service.store.UserBySession(ctx, tokenDigest(sessionToken), now)
+	return authenticated(user, err, "session")
+}
+
+// Logout revokes one browser session.
+func (service *Service) Logout(ctx context.Context, sessionToken string) error {
+	if sessionToken == "" {
+		return nil
+	}
+	if err := service.store.DeleteSession(ctx, tokenDigest(sessionToken)); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	return nil
+}
+
+// CreateAPIToken creates a named bearer token and returns the raw secret exactly once.
+func (service *Service) CreateAPIToken(ctx context.Context, owner Principal, name string) (string, error) {
+	if owner.UserID == "" {
+		return "", ErrInvalidCredentials
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 80 {
+		return "", ErrInvalidTokenName
+	}
+	raw := rand.Text()
+	value := APIToken{
+		ID: newID(), TokenHash: tokenDigest(raw), UserID: owner.UserID,
+		Name: name, ExpiresAt: service.now().UTC().Add(apiTokenLifetime),
+	}
+	if err := service.store.CreateAPIToken(ctx, value); err != nil {
+		return "", fmt.Errorf("create API token: %w", err)
+	}
+	if err := service.audit(ctx, owner.UserID, "identity.api_token.create", "succeeded", "", ""); err != nil {
+		if rollbackErr := service.store.DeleteAPIToken(ctx, value.ID); rollbackErr != nil {
+			return "", errors.Join(
+				fmt.Errorf("record API token creation: %w", err),
+				fmt.Errorf("remove unaudited API token: %w", rollbackErr),
+			)
+		}
+		return "", fmt.Errorf("record API token creation: %w", err)
+	}
+	return raw, nil
+}
+
+func (service *Service) denyLogin(ctx context.Context, userID, ipAddress, userAgent string) error {
+	if err := service.audit(ctx, userID, "identity.login", "denied", ipAddress, userAgent); err != nil {
+		return fmt.Errorf("record denied login: %w", err)
+	}
+	return ErrInvalidCredentials
+}
+
+func (service *Service) audit(ctx context.Context, userID, action, outcome, ipAddress, userAgent string) error {
+	return service.store.AppendAudit(ctx, AuditEvent{
+		ID: newID(), UserID: userID, Action: action, Outcome: outcome,
+		IPAddress: ipAddress, UserAgent: userAgent, CreatedAt: service.now().UTC(),
+	})
+}
+
+func authenticated(user User, err error, method string) (Principal, error) {
+	if errors.Is(err, ErrNotFound) || (err == nil && user.Disabled) {
+		return Principal{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("look up %s credential: %w", method, err)
+	}
+	return principal(user, method), nil
+}
+
+func normalizeEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || len(value) > 254 {
+		return "", errors.New("email address is invalid")
+	}
+	return value, nil
+}
+
+func tokenDigest(value string) []byte {
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
+}
+
+func principal(user User, method string) Principal {
+	return Principal{UserID: user.ID, Email: user.Email, Role: user.Role, Method: method}
+}
+
+func newID() string {
+	return rand.Text()
+}

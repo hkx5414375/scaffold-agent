@@ -1,0 +1,186 @@
+// Package httpapi exposes identity use cases over a small, versioned HTTP API.
+package httpapi
+
+import (
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strings"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumRequestBytes = 1 << 20
+	sessionCookieName   = "scaffold_session"
+	sessionMaxAge       = 24 * 60 * 60
+)
+
+// Handler maps HTTP requests to the identity application service.
+type Handler struct {
+	service       *identity.Service
+	secureCookies bool
+}
+
+// New returns an identity HTTP adapter.
+func New(service *identity.Service, secureCookies bool) *Handler {
+	return &Handler{service: service, secureCookies: secureCookies}
+}
+
+// Register adds all identity routes to one application mux.
+func (handler *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/v1/auth/login", handler.login)
+	mux.HandleFunc("POST /api/v1/auth/logout", handler.logout)
+	mux.HandleFunc("GET /api/v1/auth/me", handler.me)
+	mux.HandleFunc("POST /api/v1/auth/tokens", handler.createAPIToken)
+}
+
+func (handler *Handler) login(response http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(response, request, &input); err != nil {
+		writeError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	token, principal, err := handler.service.Login(
+		request.Context(), input.Email, input.Password, clientIP(request), request.UserAgent(),
+	)
+	if errors.Is(err, identity.ErrInvalidCredentials) {
+		writeError(response, http.StatusUnauthorized, "identity.invalid_credentials", "email or password is incorrect")
+		return
+	}
+	if err != nil {
+		slog.Error("log in", "error", err)
+		writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+		return
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name: sessionCookieName, Value: token, Path: "/", MaxAge: sessionMaxAge,
+		HttpOnly: true, Secure: handler.secureCookies, SameSite: http.SameSiteLaxMode,
+	})
+	writeJSON(response, http.StatusOK, map[string]any{"principal": principal})
+}
+
+func (handler *Handler) logout(response http.ResponseWriter, request *http.Request) {
+	cookie, err := request.Cookie(sessionCookieName)
+	if err != nil && !errors.Is(err, http.ErrNoCookie) {
+		writeError(response, http.StatusBadRequest, "request.invalid", "session cookie is invalid")
+		return
+	}
+	if err == nil {
+		if err := handler.service.Logout(request.Context(), cookie.Value); err != nil {
+			slog.Error("log out", "error", err)
+			writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+			return
+		}
+	}
+	http.SetCookie(response, &http.Cookie{
+		Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: handler.secureCookies, SameSite: http.SameSiteLaxMode,
+	})
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *Handler) me(response http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.authenticate(response, request)
+	if !ok {
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"principal": principal})
+}
+
+func (handler *Handler) createAPIToken(response http.ResponseWriter, request *http.Request) {
+	principal, ok := handler.authenticate(response, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(response, request, &input); err != nil {
+		writeError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	token, err := handler.service.CreateAPIToken(request.Context(), principal, input.Name)
+	if errors.Is(err, identity.ErrInvalidTokenName) {
+		writeError(response, http.StatusBadRequest, "identity.token_invalid", err.Error())
+		return
+	}
+	if err != nil {
+		slog.Error("create API token", "error", err)
+		writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+		return
+	}
+	writeJSON(response, http.StatusCreated, map[string]string{"token": token})
+}
+
+func (handler *Handler) authenticate(response http.ResponseWriter, request *http.Request) (identity.Principal, bool) {
+	var sessionToken string
+	if cookie, err := request.Cookie(sessionCookieName); err == nil {
+		sessionToken = cookie.Value
+	} else if !errors.Is(err, http.ErrNoCookie) {
+		writeError(response, http.StatusBadRequest, "request.invalid", "session cookie is invalid")
+		return identity.Principal{}, false
+	}
+	bearerToken := bearer(request.Header.Get("Authorization"))
+	principal, err := handler.service.Authenticate(request.Context(), sessionToken, bearerToken)
+	if errors.Is(err, identity.ErrInvalidCredentials) {
+		writeError(response, http.StatusUnauthorized, "identity.unauthenticated", "authentication is required")
+		return identity.Principal{}, false
+	}
+	if err != nil {
+		slog.Error("authenticate request", "error", err)
+		writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+		return identity.Principal{}, false
+	}
+	return principal, true
+}
+
+func decodeJSON(response http.ResponseWriter, request *http.Request, destination any) error {
+	request.Body = http.MaxBytesReader(response, request.Body, maximumRequestBytes)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return errors.New("request body must be one valid JSON object")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("request body must contain exactly one JSON object")
+	}
+	return nil
+}
+
+func bearer(value string) string {
+	parts := strings.Fields(value)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+	return parts[1]
+}
+
+func clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	if net.ParseIP(request.RemoteAddr) != nil {
+		return request.RemoteAddr
+	}
+	return ""
+}
+
+func writeError(response http.ResponseWriter, status int, code, message string) {
+	writeJSON(response, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+func writeJSON(response http.ResponseWriter, status int, value any) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.WriteHeader(status)
+	if err := json.NewEncoder(response).Encode(value); err != nil {
+		slog.Error("encode HTTP response", "error", err)
+	}
+}

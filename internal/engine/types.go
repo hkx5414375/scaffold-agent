@@ -69,6 +69,16 @@ type validationData struct {
 	ModuleCount     int    `json:"module_count"`
 }
 
+type planData struct {
+	PlanID         string            `json:"plan_id"`
+	Action         plan.Action       `json:"action"`
+	Backend        string            `json:"backend"`
+	BlueprintHash  string            `json:"blueprint_hash"`
+	ProjectHash    string            `json:"project_hash"`
+	CapabilityLock map[string]string `json:"capability_lock"`
+	ChangeCount    int               `json:"change_count"`
+}
+
 type previewData struct {
 	PlanID         string            `json:"plan_id"`
 	Action         plan.Action       `json:"action"`

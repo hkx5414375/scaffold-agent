@@ -1,0 +1,108 @@
+package identity
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+func TestLoginAndDualAuthentication(t *testing.T) {
+	t.Parallel()
+
+	store := newMemoryStore()
+	passwordHash, err := HashPassword("correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("HashPassword() error = %v", err)
+	}
+	store.user = User{ID: "user-1", Email: "admin@example.com", PasswordHash: passwordHash, Role: "admin"}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+
+	sessionToken, loggedIn, err := service.Login(context.Background(), "ADMIN@example.com", "correct-horse-battery-staple", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	if sessionToken == "" || loggedIn.Role != "admin" {
+		t.Fatalf("Login() token = %q, principal = %#v", sessionToken, loggedIn)
+	}
+	fromSession, err := service.Authenticate(context.Background(), sessionToken, "")
+	if err != nil || fromSession.Method != "session" {
+		t.Fatalf("Authenticate(session) = %#v, %v", fromSession, err)
+	}
+	bearerToken, err := service.CreateAPIToken(context.Background(), fromSession, "automation")
+	if err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	fromToken, err := service.Authenticate(context.Background(), "", bearerToken)
+	if err != nil || fromToken.Method != "token" {
+		t.Fatalf("Authenticate(token) = %#v, %v", fromToken, err)
+	}
+}
+
+type memoryStore struct {
+	user     User
+	sessions map[string]Session
+	tokens   map[string]APIToken
+	audits   []AuditEvent
+}
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{sessions: map[string]Session{}, tokens: map[string]APIToken{}}
+}
+
+func (store *memoryStore) CreateUser(_ context.Context, user User) error {
+	store.user = user
+	return nil
+}
+
+func (store *memoryStore) UserByEmail(_ context.Context, email string) (User, error) {
+	if store.user.Email != email {
+		return User{}, ErrNotFound
+	}
+	return store.user, nil
+}
+
+func (store *memoryStore) CreateSession(_ context.Context, session Session) error {
+	store.sessions[string(session.TokenHash)] = session
+	return nil
+}
+
+func (store *memoryStore) DeleteSession(_ context.Context, tokenHash []byte) error {
+	delete(store.sessions, string(tokenHash))
+	return nil
+}
+
+func (store *memoryStore) UserBySession(_ context.Context, tokenHash []byte, now time.Time) (User, error) {
+	session, exists := store.sessions[string(tokenHash)]
+	if !exists || !session.ExpiresAt.After(now) || session.UserID != store.user.ID {
+		return User{}, ErrNotFound
+	}
+	return store.user, nil
+}
+
+func (store *memoryStore) CreateAPIToken(_ context.Context, token APIToken) error {
+	store.tokens[string(token.TokenHash)] = token
+	return nil
+}
+
+func (store *memoryStore) DeleteAPIToken(_ context.Context, id string) error {
+	for hash, token := range store.tokens {
+		if token.ID == id {
+			delete(store.tokens, hash)
+		}
+	}
+	return nil
+}
+
+func (store *memoryStore) UserByAPIToken(_ context.Context, tokenHash []byte, now time.Time) (User, error) {
+	token, exists := store.tokens[string(tokenHash)]
+	if !exists || !token.ExpiresAt.After(now) || token.UserID != store.user.ID {
+		return User{}, ErrNotFound
+	}
+	return store.user, nil
+}
+
+func (store *memoryStore) AppendAudit(_ context.Context, event AuditEvent) error {
+	store.audits = append(store.audits, event)
+	return nil
+}

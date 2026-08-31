@@ -1,0 +1,112 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/identity/httpapi"
+	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
+	"{{.ModulePath}}/internal/platform/httpserver"
+	"{{.ModulePath}}/internal/platform/migrate"
+	platformpostgres "{{.ModulePath}}/internal/platform/postgres"
+)
+
+const (
+	shutdownTimeout = 10 * time.Second
+	startupTimeout  = 30 * time.Second
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("application stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	applicationContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	startupContext, cancelStartup := context.WithTimeout(applicationContext, startupTimeout)
+	defer cancelStartup()
+	pool, err := platformpostgres.Open(startupContext, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := migrate.Run(startupContext, pool); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+
+	identityService := identity.NewService(identitypostgres.New(pool))
+	if err := bootstrapAdmin(startupContext, identityService); err != nil {
+		return err
+	}
+	secureCookies, err := secureCookieSetting(os.Getenv("COOKIE_SECURE"))
+	if err != nil {
+		return err
+	}
+	identityAPI := httpapi.New(identityService, secureCookies)
+	address := strings.TrimSpace(os.Getenv("HTTP_ADDRESS"))
+	if address == "" {
+		address = ":8080"
+	}
+	server := httpserver.New(address, identityAPI.Register)
+	serveError := make(chan error, 1)
+	go func() {
+		slog.Info("start HTTP server", "address", address)
+		serveError <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveError:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve HTTP: %w", err)
+	case <-applicationContext.Done():
+		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancelShutdown()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			return fmt.Errorf("shut down HTTP server: %w", err)
+		}
+		return nil
+	}
+}
+
+func bootstrapAdmin(ctx context.Context, service *identity.Service) error {
+	email := strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))
+	password := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
+	if (email == "") != (password == "") {
+		return errors.New("BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must be set together")
+	}
+	if email == "" {
+		return nil
+	}
+	if err := service.EnsureAdmin(ctx, email, password); err != nil {
+		return fmt.Errorf("bootstrap administrator: %w", err)
+	}
+	return nil
+}
+
+func secureCookieSetting(value string) (bool, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true, nil
+	}
+	secure, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, errors.New("COOKIE_SECURE must be true or false")
+	}
+	return secure, nil
+}

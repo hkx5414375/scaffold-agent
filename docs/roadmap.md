@@ -18,7 +18,14 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M4 — Go and PostgreSQL reference application
 
-Session and token authentication, RBAC, audit logging, one stateful CRUD module, Vue admin, OpenAPI, migrations, and end-to-end tests.
+- [x] Deterministic Go adapter and generated-module dependency lock.
+- [x] Bounded PostgreSQL pool and serialized embedded migrations.
+- [x] PBKDF2 password hashing, administrator bootstrap, browser sessions, API tokens, and audit events.
+- [x] Generated-module formatting, dependency, unit-test, vet, apply, and ownership verification.
+- [ ] Permission-based RBAC with deny-by-default HTTP middleware.
+- [ ] One stateful CRUD module with optimistic concurrency and audit coverage.
+- [ ] OpenAPI contract and Vue/Element Plus administration UI.
+- [ ] PostgreSQL integration tests against an ephemeral database.
 
 ## M5 — MySQL and platform capabilities
 
@@ -31,4 +38,3 @@ Membership, CRM, ERP and inventory, commerce, marketing, payment abstraction, sa
 ## M7–M9 — Language parity and 1.0
 
 Java adapter, Python adapter, cross-agent conformance, token benchmarks, signed cross-platform releases, and stable public schemas.
-

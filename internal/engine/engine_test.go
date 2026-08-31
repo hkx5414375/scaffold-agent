@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hkx5414375/scaffold-agent/internal/artifactstore"
@@ -87,6 +89,61 @@ func TestVerifyStoresPageableFinding(t *testing.T) {
 	data := envelope.Data.(resultPageData)
 	if len(data.Items) != 1 {
 		t.Fatalf("Verify() findings = %d, want 1", len(data.Items))
+	}
+}
+
+func TestGoPlanApplyVerifyEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	writeBlueprint(t, root, `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-demo
+spec:
+  stack:
+    backend: go
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+`)
+	application := New("test")
+	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
+	if planned.Status != result.StatusOK {
+		t.Fatalf("Plan() = %#v, want ok", planned)
+	}
+	plannedData := planned.Data.(planData)
+	if plannedData.ChangeCount != 19 || plannedData.CapabilityLock["go-service"] != "0.1.0" {
+		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
+	if previewed.Status != result.StatusOK {
+		t.Fatalf("Preview() = %#v, want ok", previewed)
+	}
+	previewedData := previewed.Data.(previewData)
+	applied := application.Apply(ctx, ApplyInput{ProjectRoot: root, PlanID: plannedData.PlanID, ApplyToken: previewedData.ApplyToken})
+	if applied.Status != result.StatusOK {
+		t.Fatalf("Apply() = %#v, want ok", applied)
+	}
+	commands := [][]string{
+		{"go", "mod", "verify"},
+		{"go", "test", "./..."},
+		{"go", "vet", "./..."},
+	}
+	for _, arguments := range commands {
+		command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("generated %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+		}
+	}
+	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+	if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+		t.Fatalf("Verify() = %#v, want no findings", verified)
 	}
 }
 

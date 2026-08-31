@@ -1,0 +1,66 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestMeRequiresAuthentication(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	New(identity.NewService(emptyStore{}), false).Register(mux)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestLoginRejectsUnknownJSONFields(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	New(identity.NewService(emptyStore{}), false).Register(mux)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"admin@example.com","password":"not-used","extra":true}`))
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	}
+}
+
+type emptyStore struct{}
+
+func (emptyStore) CreateUser(context.Context, identity.User) error { return nil }
+
+func (emptyStore) UserByEmail(context.Context, string) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+
+func (emptyStore) CreateSession(context.Context, identity.Session) error { return nil }
+
+func (emptyStore) DeleteSession(context.Context, []byte) error { return nil }
+
+func (emptyStore) UserBySession(context.Context, []byte, time.Time) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+
+func (emptyStore) CreateAPIToken(context.Context, identity.APIToken) error { return nil }
+
+func (emptyStore) DeleteAPIToken(context.Context, string) error { return nil }
+
+func (emptyStore) UserByAPIToken(context.Context, []byte, time.Time) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+
+func (emptyStore) AppendAudit(context.Context, identity.AuditEvent) error { return nil }
+
+var _ identity.Store = emptyStore{}

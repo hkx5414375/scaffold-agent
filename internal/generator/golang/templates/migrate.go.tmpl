@@ -1,0 +1,104 @@
+// Package migrate applies embedded, ordered PostgreSQL migrations exactly once.
+package migrate
+
+import (
+	"context"
+	"embed"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	migrationLockID = int64(7_324_091_317)
+	cleanupTimeout  = 5 * time.Second
+)
+
+//go:embed migrations/*.sql
+var migrations embed.FS
+
+// Run serializes migration execution with a PostgreSQL advisory lock.
+func Run(ctx context.Context, pool *pgxpool.Pool) (returnErr error) {
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `select pg_advisory_lock($1)`, migrationLockID); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	defer func() {
+		unlockContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		if _, err := connection.Exec(unlockContext, `select pg_advisory_unlock($1)`, migrationLockID); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("unlock migrations: %w", err))
+		}
+	}()
+	if _, err := connection.Exec(ctx, `
+		create table if not exists scaffold_schema_migrations (
+			version text primary key,
+			applied_at timestamptz not null default now()
+		)`); err != nil {
+		return fmt.Errorf("create migration ledger: %w", err)
+	}
+	entries, err := migrations.ReadDir("migrations")
+	if err != nil {
+		return fmt.Errorf("list embedded migrations: %w", err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if err := apply(ctx, connection, entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type beginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+func apply(ctx context.Context, connection beginner, version string) error {
+	content, err := migrations.ReadFile("migrations/" + version)
+	if err != nil {
+		return fmt.Errorf("read migration %q: %w", version, err)
+	}
+	transaction, err := connection.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin migration %q: %w", version, err)
+	}
+	var applied bool
+	if err := transaction.QueryRow(ctx, `
+		select exists(select 1 from scaffold_schema_migrations where version = $1)`, version).Scan(&applied); err != nil {
+		return rollback(transaction, fmt.Errorf("inspect migration %q: %w", version, err))
+	}
+	if applied {
+		return rollback(transaction, nil)
+	}
+	if _, err := transaction.Exec(ctx, string(content), pgx.QueryExecModeSimpleProtocol); err != nil {
+		return rollback(transaction, fmt.Errorf("execute migration %q: %w", version, err))
+	}
+	if _, err := transaction.Exec(ctx, `insert into scaffold_schema_migrations (version) values ($1)`, version); err != nil {
+		return rollback(transaction, fmt.Errorf("record migration %q: %w", version, err))
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migration %q: %w", version, err)
+	}
+	return nil
+}
+
+func rollback(transaction pgx.Tx, cause error) error {
+	rollbackContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := transaction.Rollback(rollbackContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return errors.Join(cause, fmt.Errorf("roll back migration: %w", err))
+	}
+	return cause
+}

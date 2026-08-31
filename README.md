@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, content-addressed artifact storage, and pageable results are implemented. The first Go generator is the next milestone, and schemas remain experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the first Go/PostgreSQL generator are implemented. Generated Go services include migrations, password hashing, browser sessions, API tokens, and security audit events. RBAC, business CRUD, and frontends remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 

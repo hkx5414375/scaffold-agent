@@ -14,6 +14,8 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/artifactstore"
 	"github.com/hkx5414375/scaffold-agent/internal/canonicaljson"
 	"github.com/hkx5414375/scaffold-agent/internal/change"
+	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	gogen "github.com/hkx5414375/scaffold-agent/internal/generator/golang"
 	"github.com/hkx5414375/scaffold-agent/internal/manifest"
 	"github.com/hkx5414375/scaffold-agent/internal/paging"
 	"github.com/hkx5414375/scaffold-agent/internal/plan"
@@ -36,12 +38,18 @@ var MCPProtocolVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "20
 
 // Engine coordinates the stable application use cases without depending on a transport.
 type Engine struct {
-	version string
+	version    string
+	generators generator.Registry
 }
 
 // New returns an Engine with build-version reporting.
 func New(version string) *Engine {
-	return &Engine{version: version}
+	return NewWithRegistry(version, generator.NewRegistry(gogen.New()))
+}
+
+// NewWithRegistry returns an Engine with an explicit language-adapter registry.
+func NewWithRegistry(version string, registry generator.Registry) *Engine {
+	return &Engine{version: version, generators: registry}
 }
 
 // Query returns compact support, workflow, or current project facts.
@@ -61,6 +69,8 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"artifact-storage",
 				"result-pagination",
 				"mcp-stdio",
+				"go-base-generator",
+				"go-postgresql-identity",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},
@@ -84,6 +94,10 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 // Validate strictly decodes, schema-checks, and semantically validates one Blueprint.
 func (engine *Engine) Validate(ctx context.Context, input ValidateInput) result.Envelope {
 	project, hash, diagnostics := engine.validateProject(ctx, input)
+	return validationEnvelope(project, hash, diagnostics)
+}
+
+func validationEnvelope(project spec.Project, hash string, diagnostics []spec.Diagnostic) result.Envelope {
 	data := validationData{
 		BlueprintHash:   hash,
 		ProjectName:     project.Metadata.Name,
@@ -111,14 +125,37 @@ func (engine *Engine) Validate(ctx context.Context, input ValidateInput) result.
 
 // Plan validates the request before dispatching to a language adapter.
 func (engine *Engine) Plan(ctx context.Context, input PlanInput) result.Envelope {
-	validation := engine.Validate(ctx, ValidateInput{ProjectRoot: input.ProjectRoot, BlueprintPath: input.BlueprintPath})
-	if validation.Status == result.StatusError {
-		return validation
-	}
 	if !validAction(input.Action) {
 		return failure("plan.action.invalid", "action", "action must be create, modify, extend, reduce, repair, or upgrade")
 	}
-	return failure("generator.adapter.unavailable", "action", "the selected language generator is not installed in this build yet")
+	project, blueprintHash, diagnostics := engine.validateProject(ctx, ValidateInput{ProjectRoot: input.ProjectRoot, BlueprintPath: input.BlueprintPath})
+	if spec.HasErrors(diagnostics) {
+		return validationEnvelope(project, blueprintHash, diagnostics)
+	}
+	adapter, exists := engine.generators.Get(project.Spec.Stack.Backend)
+	if !exists {
+		return failure("generator.adapter.unavailable", "spec.stack.backend", "the selected language generator is not installed in this build yet")
+	}
+	generated, err := adapter.Generate(ctx, project)
+	if err != nil {
+		return failure("generator.generate.failed", "blueprint_path", safeMessage(err))
+	}
+	artifact, err := change.Build(input.ProjectRoot, input.Action, blueprintHash, generated.CapabilityLock, generated.Outputs)
+	if err != nil {
+		return failure("plan.build.failed", "project_root", safeMessage(err))
+	}
+	if err := artifactstore.Save(input.ProjectRoot, artifact); err != nil {
+		return failure("plan.save.failed", "project_root", safeMessage(err))
+	}
+	return success(fmt.Sprintf("Stored plan with %d filesystem changes", len(artifact.Plan.Changes)), planData{
+		PlanID:         artifact.Plan.ID,
+		Action:         artifact.Plan.Action,
+		Backend:        project.Spec.Stack.Backend,
+		BlueprintHash:  artifact.Plan.BlueprintHash,
+		ProjectHash:    artifact.Plan.ProjectHash,
+		CapabilityLock: cloneLock(artifact.Plan.CapabilityLock),
+		ChangeCount:    len(artifact.Plan.Changes),
+	})
 }
 
 // Preview returns a bounded change list and a token required by Apply.
