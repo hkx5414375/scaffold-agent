@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaffold-agent.dev/schema/v1alpha1/result.schema.json",
+  "title": "Scaffold Agent Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "status", "summary"],
+  "properties": {
+    "api_version": { "const": "scaffold-agent.io/result/v1alpha1" },
+    "status": { "enum": ["ok", "warning", "error"] },
+    "summary": { "type": "string" },
+    "result_id": { "type": "string", "minLength": 1 },
+    "next_cursor": { "type": "string", "minLength": 1 },
+    "has_more": { "type": "boolean" },
+    "estimated_tokens": { "type": "integer", "minimum": 0 },
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "severity": { "enum": ["error", "warning", "info"] },
+          "path": { "type": "string" },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "data": true
+  }
+}
+

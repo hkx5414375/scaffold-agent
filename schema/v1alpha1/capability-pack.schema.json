@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaffold-agent.dev/schema/v1alpha1/capability-pack.schema.json",
+  "title": "Scaffold Agent Capability Pack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "kind", "metadata", "spec"],
+  "properties": {
+    "api_version": { "const": "scaffold-agent.io/v1alpha1" },
+    "kind": { "const": "CapabilityPack" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/resourceName" },
+        "display_name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "version": { "$ref": "#/$defs/semver" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "backends", "databases"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "requires": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "constraint"],
+            "properties": {
+              "name": { "$ref": "#/$defs/resourceName" },
+              "constraint": {
+                "type": "string",
+                "pattern": "^(\\*|\\^|>=)?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$|^\\*$"
+              }
+            }
+          }
+        },
+        "conflicts": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/resourceName" } },
+        "backends": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["go", "java", "python"] } },
+        "databases": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["postgresql", "mysql"] } },
+        "input_schema": { "type": "object" },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "owner"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "owner": { "$ref": "#/$defs/resourceName" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "resourceName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    }
+  }
+}
+

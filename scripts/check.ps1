@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$unformatted = gofmt -l .
+$unformatted = git ls-files '*.go' | ForEach-Object { gofmt -l $_ }
 if ($unformatted) {
     Write-Error "Go files require gofmt:`n$unformatted"
 }
@@ -8,4 +8,3 @@ if ($unformatted) {
 go vet ./...
 go test ./...
 go run ./cmd/scaffold-agent doctor --json
-

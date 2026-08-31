@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scaffold-agent.dev/schema/v1alpha1/plan.schema.json",
+  "title": "Scaffold Agent Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "id", "action", "project_root", "blueprint_hash", "project_hash", "capability_lock", "changes"],
+  "properties": {
+    "api_version": { "const": "scaffold-agent.io/plan/v1alpha1" },
+    "id": { "type": "string", "pattern": "^plan_[a-f0-9]{64}$" },
+    "action": { "enum": ["create", "modify", "extend", "reduce", "repair", "upgrade"] },
+    "project_root": { "type": "string", "minLength": 1 },
+    "blueprint_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "project_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "capability_lock": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/semver" }
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation", "path", "owner"],
+        "properties": {
+          "operation": { "enum": ["create", "modify", "delete"] },
+          "path": { "type": "string", "minLength": 1 },
+          "owner": { "$ref": "#/$defs/resourceName" },
+          "before_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "after_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    },
+    "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/diagnostic" } }
+  },
+  "$defs": {
+    "resourceName": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "path": { "type": "string" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
+

@@ -25,14 +25,16 @@ jobs:
       - name: Check formatting
         shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
+          unformatted="$(git ls-files '*.go' | xargs gofmt -l)"
           test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
       - name: Vet
         run: go vet ./...
       - name: Test
+        run: go test ./...
+      - name: Race detector
+        if: matrix.os == 'ubuntu-latest'
         run: go test -race ./...
       - name: Build
         run: go build ./cmd/scaffold-agent
       - name: Doctor
         run: go run ./cmd/scaffold-agent doctor --json
-
