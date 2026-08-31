@@ -36,6 +36,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 选择 `file-assets` `0.1.0` 后，生成项目会加入租户范围内的文件元数据、流式上传、有界游标列表、附件下载、可恢复的元数据删除，以及原子本地对象存储。业务代码必须调用 `files.Service`，不得用用户文件名拼接对象路径，也不得暴露 `Asset.StorageKey`。`FILE_STORAGE_ROOT` 只能放在运行时配置中。AI 可以替换 `BlobStore` 适配器，但必须保留 10 MiB 请求上限、不覆盖发布、SHA-256 元数据、失败补偿，以及跨租户标识统一返回未找到的行为。
 
+选择 `application-cache` `0.1.0` 后，生成项目会加入跨实例一致的数据库 TTL 缓存和有大小限制的 JSON 值。业务代码应给键增加业务命名空间并选择稳定的 TTL，把 `cache.ErrMiss` 统一理解为不存在、已过期或跨租户不可见。AI 不得增加通用缓存 HTTP 接口、缓存秘密、绕过组织范围或执行无界清理。维护任务可调用带批次上限的 `cache.Service.PurgeExpired`；以后替换为 Redis 适配器时也必须保持同一服务契约。
+
 ## STDIO 协议
 
 启动服务：

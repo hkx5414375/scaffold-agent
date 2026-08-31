@@ -1,0 +1,142 @@
+// Package cache owns bounded, tenant-aware application cache operations.
+package cache
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode"
+)
+
+const (
+	MaximumValueBytes = 256 << 10
+	MaximumTTL        = 30 * 24 * time.Hour
+)
+
+var (
+	ErrInvalidInput = errors.New("cache input is invalid")
+	ErrMiss         = errors.New("cache entry was not found")
+)
+
+// Entry is one encoded cache value with an absolute expiration time.
+type Entry struct {
+	ScopeKey string
+	Key      string
+	Value    json.RawMessage
+	ExpiresAt time.Time
+}
+
+// Store persists cache values across application instances.
+type Store interface {
+	Set(context.Context, Entry) error
+	Get(context.Context, string, string, time.Time) (Entry, error)
+	Delete(context.Context, string, string) error
+	PurgeExpired(context.Context, time.Time, int) (int64, error)
+}
+
+// Service enforces cache key, scope, payload, and TTL invariants.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns application cache use cases.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Set encodes one JSON value and replaces the existing scoped key.
+func (service *Service) Set(ctx context.Context, organizationID, key string, value any, ttl time.Duration) error {
+	scopeKey, key, err := validate(organizationID, key)
+	if err != nil || ttl <= 0 || ttl > MaximumTTL {
+		return ErrInvalidInput
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("encode cache value: %w", ErrInvalidInput)
+	}
+	if len(encoded) > MaximumValueBytes {
+		return ErrInvalidInput
+	}
+	entry := Entry{ScopeKey: scopeKey, Key: key, Value: encoded, ExpiresAt: service.now().UTC().Add(ttl)}
+	if err := service.store.Set(ctx, entry); err != nil {
+		return fmt.Errorf("set cache entry: %w", err)
+	}
+	return nil
+}
+
+// Get returns an independent copy of one unexpired encoded value.
+func (service *Service) Get(ctx context.Context, organizationID, key string) (json.RawMessage, error) {
+	scopeKey, key, err := validate(organizationID, key)
+	if err != nil {
+		return nil, err
+	}
+	entry, err := service.store.Get(ctx, scopeKey, key, service.now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("get cache entry: %w", err)
+	}
+	return append(json.RawMessage(nil), entry.Value...), nil
+}
+
+// Decode loads one unexpired value into a non-nil destination.
+func (service *Service) Decode(ctx context.Context, organizationID, key string, destination any) error {
+	if destination == nil {
+		return ErrInvalidInput
+	}
+	value, err := service.Get(ctx, organizationID, key)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(value, destination); err != nil {
+		return fmt.Errorf("decode cache value: %w", err)
+	}
+	return nil
+}
+
+// Delete invalidates one scoped key. Missing entries are already invalidated.
+func (service *Service) Delete(ctx context.Context, organizationID, key string) error {
+	scopeKey, key, err := validate(organizationID, key)
+	if err != nil {
+		return err
+	}
+	if err := service.store.Delete(ctx, scopeKey, key); err != nil {
+		return fmt.Errorf("delete cache entry: %w", err)
+	}
+	return nil
+}
+
+// PurgeExpired removes a bounded batch for an operator or scheduled maintenance task.
+func (service *Service) PurgeExpired(ctx context.Context, limit int) (int64, error) {
+	if limit < 1 || limit > 10_000 {
+		return 0, ErrInvalidInput
+	}
+	count, err := service.store.PurgeExpired(ctx, service.now().UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge expired cache entries: %w", err)
+	}
+	return count, nil
+}
+
+func validate(organizationID, key string) (string, string, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 191 {
+		return "", "", ErrInvalidInput
+	}
+	for _, character := range key {
+		if unicode.IsControl(character) {
+			return "", "", ErrInvalidInput
+		}
+	}
+{{- if .Tenancy}}
+	organizationID = strings.TrimSpace(organizationID)
+	if organizationID == "" {
+		return "", "", ErrInvalidInput
+	}
+	return organizationID, key, nil
+{{- else}}
+	return "global", key, nil
+{{- end}}
+}

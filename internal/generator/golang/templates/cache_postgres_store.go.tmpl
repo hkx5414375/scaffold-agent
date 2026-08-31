@@ -1,0 +1,77 @@
+// Package postgres persists application cache entries in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	applicationcache "{{.ModulePath}}/internal/cache"
+)
+
+// Store is a cross-instance PostgreSQL cache store.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL application cache store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Set atomically inserts or replaces one scoped key.
+func (store *Store) Set(ctx context.Context, entry applicationcache.Entry) error {
+	_, err := store.pool.Exec(ctx, `
+		insert into application_cache (scope_key, cache_key, organization_id, value, expires_at, updated_at)
+		values ($1, $2, nullif($3, ''), $4, $5, now())
+		on conflict (scope_key, cache_key) do update set
+			value = excluded.value, expires_at = excluded.expires_at, updated_at = now()`,
+		entry.ScopeKey, entry.Key, {{if .Tenancy}}entry.ScopeKey{{else}}""{{end}}, string(entry.Value), entry.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert application cache: %w", err)
+	}
+	return nil
+}
+
+// Get returns only an unexpired entry.
+func (store *Store) Get(ctx context.Context, scopeKey, key string, now time.Time) (applicationcache.Entry, error) {
+	var entry applicationcache.Entry
+	err := store.pool.QueryRow(ctx, `
+		select scope_key, cache_key, value, expires_at
+		from application_cache
+		where scope_key = $1 and cache_key = $2 and expires_at > $3`, scopeKey, key, now).Scan(
+		&entry.ScopeKey, &entry.Key, &entry.Value, &entry.ExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return applicationcache.Entry{}, applicationcache.ErrMiss
+	}
+	if err != nil {
+		return applicationcache.Entry{}, fmt.Errorf("select application cache: %w", err)
+	}
+	return entry, nil
+}
+
+// Delete idempotently invalidates one scoped key.
+func (store *Store) Delete(ctx context.Context, scopeKey, key string) error {
+	if _, err := store.pool.Exec(ctx, `delete from application_cache where scope_key = $1 and cache_key = $2`, scopeKey, key); err != nil {
+		return fmt.Errorf("delete application cache: %w", err)
+	}
+	return nil
+}
+
+// PurgeExpired removes one bounded oldest-expiry batch.
+func (store *Store) PurgeExpired(ctx context.Context, now time.Time, limit int) (int64, error) {
+	command, err := store.pool.Exec(ctx, `
+		delete from application_cache where ctid in (
+			select ctid from application_cache where expires_at <= $1 order by expires_at limit $2
+		)`, now, limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge application cache: %w", err)
+	}
+	return command.RowsAffected(), nil
+}

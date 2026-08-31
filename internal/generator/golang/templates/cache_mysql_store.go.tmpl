@@ -1,0 +1,76 @@
+// Package mysql persists application cache entries in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	applicationcache "{{.ModulePath}}/internal/cache"
+)
+
+// Store is a cross-instance MySQL cache store.
+type Store struct {
+	database *sql.DB
+}
+
+// New returns a MySQL application cache store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
+}
+
+// Set atomically inserts or replaces one scoped key.
+func (store *Store) Set(ctx context.Context, entry applicationcache.Entry) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into application_cache (scope_key, cache_key, organization_id, value, expires_at, updated_at)
+		values (?, ?, nullif(?, ''), ?, ?, utc_timestamp(6))
+		on duplicate key update value = values(value), expires_at = values(expires_at), updated_at = utc_timestamp(6)`,
+		entry.ScopeKey, entry.Key, {{if .Tenancy}}entry.ScopeKey{{else}}""{{end}}, []byte(entry.Value), entry.ExpiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert application cache: %w", err)
+	}
+	return nil
+}
+
+// Get returns only an unexpired entry.
+func (store *Store) Get(ctx context.Context, scopeKey, key string, now time.Time) (applicationcache.Entry, error) {
+	var entry applicationcache.Entry
+	err := store.database.QueryRowContext(ctx, `
+		select scope_key, cache_key, value, expires_at
+		from application_cache
+		where scope_key = ? and cache_key = ? and expires_at > ?`, scopeKey, key, now).Scan(
+		&entry.ScopeKey, &entry.Key, &entry.Value, &entry.ExpiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return applicationcache.Entry{}, applicationcache.ErrMiss
+	}
+	if err != nil {
+		return applicationcache.Entry{}, fmt.Errorf("select application cache: %w", err)
+	}
+	return entry, nil
+}
+
+// Delete idempotently invalidates one scoped key.
+func (store *Store) Delete(ctx context.Context, scopeKey, key string) error {
+	if _, err := store.database.ExecContext(ctx, `delete from application_cache where scope_key = ? and cache_key = ?`, scopeKey, key); err != nil {
+		return fmt.Errorf("delete application cache: %w", err)
+	}
+	return nil
+}
+
+// PurgeExpired removes one bounded oldest-expiry batch.
+func (store *Store) PurgeExpired(ctx context.Context, now time.Time, limit int) (int64, error) {
+	command, err := store.database.ExecContext(ctx, `
+		delete from application_cache where expires_at <= ? order by expires_at limit ?`, now, limit)
+	if err != nil {
+		return 0, fmt.Errorf("purge application cache: %w", err)
+	}
+	count, err := command.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("inspect application cache purge: %w", err)
+	}
+	return count, nil
+}

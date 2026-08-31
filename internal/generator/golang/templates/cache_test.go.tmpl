@@ -1,0 +1,111 @@
+package cache
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestServiceSetDecodeDeleteAndPurge(t *testing.T) {
+	store := &memoryStore{entries: map[string]Entry{}}
+	service := NewService(store)
+	now := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	organizationID := {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}}
+
+	value := struct {
+		Name string `json:"name"`
+	}{Name: "cached"}
+	if err := service.Set(context.Background(), organizationID, "task:1", value, time.Hour); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	entry := store.entries[storeKey({{if .Tenancy}}"organization-1"{{else}}"global"{{end}}, "task:1")]
+	if entry.ExpiresAt != now.Add(time.Hour) || string(entry.Value) != `{"name":"cached"}` {
+		t.Fatalf("Set() entry = %#v", entry)
+	}
+	var decoded struct {
+		Name string `json:"name"`
+	}
+	if err := service.Decode(context.Background(), organizationID, "task:1", &decoded); err != nil || decoded.Name != "cached" {
+		t.Fatalf("Decode() = %#v, %v", decoded, err)
+	}
+	if err := service.Delete(context.Background(), organizationID, "task:1"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := service.Get(context.Background(), organizationID, "task:1"); !errors.Is(err, ErrMiss) {
+		t.Fatalf("Get(deleted) error = %v, want ErrMiss", err)
+	}
+	if count, err := service.PurgeExpired(context.Background(), 100); err != nil || count != 0 {
+		t.Fatalf("PurgeExpired() = %d, %v", count, err)
+	}
+}
+
+func TestServiceRejectsInvalidInput(t *testing.T) {
+	service := NewService(&memoryStore{entries: map[string]Entry{}})
+	organizationID := {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}}
+	tests := []struct {
+		organizationID string
+		key            string
+		value          any
+		ttl            time.Duration
+	}{
+		{organizationID, "", "value", time.Minute},
+		{organizationID, "unsafe\nkey", "value", time.Minute},
+		{organizationID, strings.Repeat("x", 192), "value", time.Minute},
+		{organizationID, "key", "value", 0},
+		{organizationID, "key", "value", MaximumTTL + time.Second},
+		{organizationID, "key", strings.Repeat("x", MaximumValueBytes+1), time.Minute},
+{{- if .Tenancy}}
+		{"", "key", "value", time.Minute},
+{{- end}}
+	}
+	for _, test := range tests {
+		if err := service.Set(context.Background(), test.organizationID, test.key, test.value, test.ttl); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("Set(%q) error = %v, want ErrInvalidInput", test.key, err)
+		}
+	}
+}
+
+type memoryStore struct {
+	entries map[string]Entry
+}
+
+func (store *memoryStore) Set(_ context.Context, entry Entry) error {
+	entry.Value = append(json.RawMessage(nil), entry.Value...)
+	store.entries[storeKey(entry.ScopeKey, entry.Key)] = entry
+	return nil
+}
+
+func (store *memoryStore) Get(_ context.Context, scopeKey, key string, now time.Time) (Entry, error) {
+	entry, found := store.entries[storeKey(scopeKey, key)]
+	if !found || !entry.ExpiresAt.After(now) {
+		return Entry{}, ErrMiss
+	}
+	return entry, nil
+}
+
+func (store *memoryStore) Delete(_ context.Context, scopeKey, key string) error {
+	delete(store.entries, storeKey(scopeKey, key))
+	return nil
+}
+
+func (store *memoryStore) PurgeExpired(_ context.Context, now time.Time, limit int) (int64, error) {
+	var count int64
+	for key, entry := range store.entries {
+		if count == int64(limit) {
+			break
+		}
+		if !entry.ExpiresAt.After(now) {
+			delete(store.entries, key)
+			count++
+		}
+	}
+	return count, nil
+}
+
+func storeKey(scopeKey, key string) string {
+	return scopeKey + "\x00" + key
+}

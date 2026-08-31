@@ -23,6 +23,10 @@ database leases, heartbeat renewal, bounded retry, and dead-letter state.
 It also contains the `file-assets` capability with tenant-scoped metadata,
 streaming uploads, SHA-256 integrity metadata, and atomic local object writes.
 {{end}}
+{{if .Cache}}
+It also contains the `application-cache` capability with cross-instance database
+storage, tenant-aware keys, bounded JSON values, and explicit TTL cleanup.
+{{end}}
 
 ## Requirements
 
@@ -30,6 +34,7 @@ streaming uploads, SHA-256 integrity metadata, and atomic local object writes.
 {{if eq .Database.Engine "postgresql"}}- PostgreSQL 14 or later
 {{else}}- MySQL 8.4 or later
 {{end}}
+
 {{if .Admin}}- Node.js 22.12 or later
 {{end}}
 
@@ -53,6 +58,13 @@ go run ./cmd/server
 The bootstrap account is created once; omit both bootstrap variables after that.
 Embedded migrations run automatically under a {{.Database.DisplayName}} database lock.
 The machine-readable HTTP contract is `api/openapi.yaml`.
+{{if .Cache}}
+
+Feature code uses `cache.Service` for derived or expensive-to-compute values. Keys
+must include a feature namespace, and cached values must not contain secrets.
+Missing, expired, and cross-tenant entries return `cache.ErrMiss`. Schedule bounded
+calls to `cache.Service.PurgeExpired`; never issue an unbounded cache-table delete.
+{{end}}
 {{if .Jobs}}
 
 Run the independent background worker with the same database:

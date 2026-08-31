@@ -84,6 +84,14 @@ may replace the `BlobStore` adapter but must preserve the 10 MiB request bound,
 create-only publication, SHA-256 metadata, compensation, and not-found behavior
 for cross-tenant identifiers.
 
+Selecting `application-cache` version `0.1.0` generates a cross-instance database
+TTL cache with bounded JSON values. Feature code should namespace keys, select a
+stable TTL, and treat `cache.ErrMiss` as the common missing, expired, or
+cross-tenant result. Agents must not add a generic cache HTTP endpoint, place
+secrets in cached values, bypass organization scope, or run unbounded cleanup.
+`cache.Service.PurgeExpired` accepts a bounded maintenance batch; a later store
+adapter may use Redis while preserving the same service contract.
+
 ## STDIO protocol
 
 Run the server with:

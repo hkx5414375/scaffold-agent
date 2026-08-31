@@ -187,6 +187,22 @@ func TestGoFilesWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", filesSelection, "", 57, false)
 }
 
+func TestGoTenantCachePostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCacheSelection, "0.3.0", 71, false)
+}
+
+func TestGoTenantCacheMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCacheSelection, "0.3.0", 72, false)
+}
+
+func TestGoCacheWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", cacheSelection, "", 51, false)
+}
+
+func TestGoCacheWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", cacheSelection, "", 52, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -235,6 +251,18 @@ const tenancyFilesSelection = `  capabilities:
 
 const filesSelection = `  capabilities:
     - name: file-assets
+      version: 0.1.0
+`
+
+const tenancyCacheSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: application-cache
+      version: 0.1.0
+`
+
+const cacheSelection = `  capabilities:
+    - name: application-cache
       version: 0.1.0
 `
 
@@ -302,6 +330,9 @@ CAPABILITIES
 	}
 	if strings.Contains(capabilities, "file-assets") && plannedData.CapabilityLock["file-assets"] != "0.1.0" {
 		t.Fatalf("Plan() file assets lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "application-cache") && plannedData.CapabilityLock["application-cache"] != "0.1.0" {
+		t.Fatalf("Plan() application cache lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

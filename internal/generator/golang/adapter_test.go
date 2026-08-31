@@ -524,6 +524,54 @@ func TestGenerateGlobalMySQLFileAssetsCapability(t *testing.T) {
 	}
 }
 
+func TestGenerateTenantApplicationCacheCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+		{Name: cacheCapability, Version: cacheVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[cacheCapability] != cacheVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, path := range []string{
+		"internal/cache/cache.go",
+		"internal/cache/cache_test.go",
+		"internal/cache/postgres/store.go",
+		"internal/platform/migrate/migrations/000220_application_cache.sql",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000220_application_cache.sql"))
+	if !strings.Contains(migration, "references organizations") {
+		t.Fatal("Generate() did not scope application cache persistence by organization")
+	}
+}
+
+func TestGenerateGlobalMySQLApplicationCacheCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Database.Engine = "mysql"
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: cacheCapability, Version: cacheVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000220_application_cache.sql"))
+	service := string(outputContent(generated, "internal/cache/cache.go"))
+	if strings.Contains(migration, "references organizations") || !strings.Contains(service, `return "global", key, nil`) {
+		t.Fatal("Generate() did not produce an explicit global application cache scope")
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

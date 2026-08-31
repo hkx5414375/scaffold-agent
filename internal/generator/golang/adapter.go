@@ -35,6 +35,8 @@ const (
 	notificationsVersion    = "0.1.0"
 	filesCapability         = "file-assets"
 	filesVersion            = "0.1.0"
+	cacheCapability         = "application-cache"
+	cacheVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -89,6 +91,9 @@ type databaseTemplateSet struct {
 	FilesStorePath                    string
 	FilesStoreTemplate                string
 	FilesMigrationTemplate            string
+	CacheStorePath                    string
+	CacheStoreTemplate                string
+	CacheMigrationTemplate            string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -122,6 +127,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		FilesStorePath:                    "internal/files/postgres/store.go",
 		FilesStoreTemplate:                "templates/files_postgres_store.go.tmpl",
 		FilesMigrationTemplate:            "templates/files_postgres.sql.tmpl",
+		CacheStorePath:                    "internal/cache/postgres/store.go",
+		CacheStoreTemplate:                "templates/cache_postgres_store.go.tmpl",
+		CacheMigrationTemplate:            "templates/cache_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -154,6 +162,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		FilesStorePath:                    "internal/files/mysql/store.go",
 		FilesStoreTemplate:                "templates/files_mysql_store.go.tmpl",
 		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
+		CacheStorePath:                    "internal/cache/mysql/store.go",
+		CacheStoreTemplate:                "templates/cache_mysql_store.go.tmpl",
+		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
 	},
 }
 
@@ -219,6 +230,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: cacheCapability, Version: cacheVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware database TTL cache with bounded JSON values",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -267,6 +288,11 @@ var filesTemplates = map[string]string{
 	"internal/files/httpapi/handler_test.go": "templates/files_handler_test.go.tmpl",
 	"internal/files/local/store.go":          "templates/files_local_store.go.tmpl",
 	"internal/files/local/store_test.go":     "templates/files_local_store_test.go.tmpl",
+}
+
+var cacheTemplates = map[string]string{
+	"internal/cache/cache.go":      "templates/cache.go.tmpl",
+	"internal/cache/cache_test.go": "templates/cache_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -336,6 +362,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobsEnabled := false
 	notificationsEnabled := false
 	filesEnabled := false
+	cacheEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -356,6 +383,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == filesCapability {
 			filesEnabled = true
 		}
+		if pack.Metadata.Name == cacheCapability {
+			cacheEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
@@ -373,6 +403,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Jobs:             jobsEnabled,
 		Notifications:    notificationsEnabled,
 		Files:            filesEnabled,
+		Cache:            cacheEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -391,6 +422,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if filesEnabled {
+		data.MigrationCount++
+	}
+	if cacheEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
@@ -500,6 +534,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if cacheEnabled {
+		for path, templatePath := range cacheTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: cacheCapability}
+		}
+		targets[database.CacheStorePath] = renderTarget{TemplatePath: database.CacheStoreTemplate, Owner: cacheCapability}
+		targets["internal/platform/migrate/migrations/000220_application_cache.sql"] = renderTarget{
+			TemplatePath: database.CacheMigrationTemplate,
+			Owner:        cacheCapability,
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -562,6 +606,7 @@ type templateData struct {
 	Jobs             bool
 	Notifications    bool
 	Files            bool
+	Cache            bool
 	MigrationCount   int
 }
 

@@ -7,7 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-{{- if and .Jobs (not .Notifications)}}
+{{- if or .Cache (and .Jobs (not .Notifications))}}
 	"encoding/json"
 {{- end}}
 	"errors"
@@ -24,6 +24,10 @@ import (
 
 	"{{.ModulePath}}/internal/identity"
 	identitymysql "{{.ModulePath}}/internal/identity/mysql"
+	{{- if .Cache}}
+	applicationcache "{{.ModulePath}}/internal/cache"
+	cachemysql "{{.ModulePath}}/internal/cache/mysql"
+	{{- end}}
 	{{- if .Files}}
 	"{{.ModulePath}}/internal/files"
 	"{{.ModulePath}}/internal/files/local"
@@ -234,6 +238,34 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	}
 	if _, err := fileService.Get(ctx, fileAsset.ID, fileActor); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("files.Get(deleted) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+
+{{- if .Cache}}
+	cacheStore := cachemysql.New(database)
+	cacheService := applicationcache.NewService(cacheStore)
+	if err := cacheService.Set(ctx, organizationID, "integration:key", map[string]string{"value": "cached"}, time.Hour); err != nil {
+		t.Fatalf("cache.Set() error = %v", err)
+	}
+	var cachedValue map[string]string
+	if err := cacheService.Decode(ctx, organizationID, "integration:key", &cachedValue); err != nil || cachedValue["value"] != "cached" {
+		t.Fatalf("cache.Decode() = %#v, %v", cachedValue, err)
+	}
+{{- if .Tenancy}}
+	if _, err := cacheService.Get(ctx, "different-organization", "integration:key"); !errors.Is(err, applicationcache.ErrMiss) {
+		t.Fatalf("cache.Get(cross-tenant) error = %v, want ErrMiss", err)
+	}
+{{- end}}
+	if err := cacheStore.Set(ctx, applicationcache.Entry{
+		ScopeKey: {{if .Tenancy}}organizationID{{else}}"global"{{end}}, Key: "expired", Value: json.RawMessage(`{"expired":true}`), ExpiresAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("cache.Store.Set(expired) error = %v", err)
+	}
+	if count, err := cacheService.PurgeExpired(ctx, 100); err != nil || count != 1 {
+		t.Fatalf("cache.PurgeExpired() = %d, %v, want 1", count, err)
+	}
+	if err := cacheService.Delete(ctx, organizationID, "integration:key"); err != nil {
+		t.Fatalf("cache.Delete() error = %v", err)
 	}
 {{- end}}
 
