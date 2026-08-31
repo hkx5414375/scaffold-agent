@@ -1,0 +1,22 @@
+insert into identity_permissions (code, description) values
+    ('{{.Business.PermissionPrefix}}:create', 'Create {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:read', 'Read {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:update', 'Update {{.Business.EntityName}} records'),
+    ('{{.Business.PermissionPrefix}}:delete', 'Delete {{.Business.EntityName}} records');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', '{{.Business.PermissionPrefix}}:create'),
+    ('admin', '{{.Business.PermissionPrefix}}:read'),
+    ('admin', '{{.Business.PermissionPrefix}}:update'),
+    ('admin', '{{.Business.PermissionPrefix}}:delete');
+
+create table {{sql .Business.TableName}} (
+    id varchar(191) primary key,
+{{- range .Business.Fields}}
+    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
+{{- end}}
+    version bigint not null default 1 check (version > 0),
+    created_at datetime(6) not null,
+    updated_at datetime(6) not null,
+    index business_created_at_idx (created_at desc, id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

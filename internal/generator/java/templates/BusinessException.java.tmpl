@@ -1,0 +1,21 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+public final class {{.Business.EntityClass}}Exception extends RuntimeException {
+
+    private final Kind kind;
+
+    public {{.Business.EntityClass}}Exception(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+
+    public enum Kind {
+        INVALID_INPUT,
+        NOT_FOUND,
+        CONFLICT
+    }
+}

@@ -1,0 +1,76 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("{{.Business.RoutePath}}")
+public final class {{.Business.EntityClass}}Controller {
+
+    private final {{.Business.EntityClass}}Service service;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "The application service is a process-scoped Spring dependency")
+    public {{.Business.EntityClass}}Controller({{.Business.EntityClass}}Service service) {
+        this.service = service;
+    }
+
+    @PostMapping
+    @RequirePermission("{{.Business.PermissionPrefix}}:create")
+    public ResponseEntity<{{.Business.EntityClass}}> create(
+            @RequestBody {{.Business.EntityClass}}Service.WriteInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(input, actor));
+    }
+
+    @GetMapping("/{id}")
+    @RequirePermission("{{.Business.PermissionPrefix}}:read")
+    public {{.Business.EntityClass}} get(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.get(id, actor);
+    }
+
+    @GetMapping
+    @RequirePermission("{{.Business.PermissionPrefix}}:read")
+    public {{.Business.EntityClass}}Service.Page list(
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.list(cursor, limit, actor);
+    }
+
+    @PutMapping("/{id}")
+    @RequirePermission("{{.Business.PermissionPrefix}}:update")
+    public {{.Business.EntityClass}} update(
+            @PathVariable String id,
+            @RequestBody {{.Business.EntityClass}}Service.UpdateInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.update(id, input, actor);
+    }
+
+    @DeleteMapping("/{id}")
+    @RequirePermission("{{.Business.PermissionPrefix}}:delete")
+    public ResponseEntity<Void> delete(
+            @PathVariable String id,
+            @RequestParam Long version,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        service.delete(id, version, actor);
+        return ResponseEntity.noContent().build();
+    }
+}

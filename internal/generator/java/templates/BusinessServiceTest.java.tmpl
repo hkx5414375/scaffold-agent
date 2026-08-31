@@ -1,0 +1,194 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.PropertyNamingStrategies;
+import tools.jackson.databind.json.JsonMapper;
+
+class {{.Business.EntityClass}}ServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final Principal ACTOR =
+            new Principal("administrator", "admin@example.com", "admin", "session");
+
+    @Test
+    void validatesAndRunsAuditedOptimisticCrud() {
+        FakeRepository repository = new FakeRepository();
+        {{.Business.EntityClass}}Service service =
+                new {{.Business.EntityClass}}Service(
+                        repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(() -> service.create(null, ACTOR))
+                .isInstanceOf({{.Business.EntityClass}}Exception.class);
+
+        {{.Business.EntityClass}} created =
+                service.create(
+                        new {{.Business.EntityClass}}Service.WriteInput(
+{{- range $index, $field := .Business.Fields}}
+{{- if $index}},{{end}}
+                                {{$field.SampleOne}}
+{{- end}}),
+                        ACTOR);
+        assertThat(created.id()).isNotBlank();
+        assertThat(created.version()).isEqualTo(1L);
+        assertThat(service.get(created.id(), ACTOR)).isEqualTo(created);
+        assertThat(service.list("", 20, ACTOR).items()).containsExactly(created);
+
+        {{.Business.EntityClass}} updated =
+                service.update(
+                        created.id(),
+                        new {{.Business.EntityClass}}Service.UpdateInput(
+{{- range .Business.Fields}}
+                                {{.SampleTwo}},
+{{- end}}
+                                1L),
+                        ACTOR);
+        assertThat(updated.version()).isEqualTo(2L);
+        assertThatThrownBy(
+                        () ->
+                                service.update(
+                                        created.id(),
+                                        new {{.Business.EntityClass}}Service.UpdateInput(
+{{- range .Business.Fields}}
+                                                {{.SampleOne}},
+{{- end}}
+                                                1L),
+                                        ACTOR))
+                .isInstanceOf({{.Business.EntityClass}}Exception.class)
+                .satisfies(
+                        exception ->
+                                assertThat((({{.Business.EntityClass}}Exception) exception).kind())
+                                        .isEqualTo({{.Business.EntityClass}}Exception.Kind.CONFLICT));
+
+        service.delete(created.id(), 2L, ACTOR);
+        assertThatThrownBy(() -> service.get(created.id(), ACTOR))
+                .isInstanceOf({{.Business.EntityClass}}Exception.class);
+        assertThat(repository.auditActions)
+                .containsExactly(
+                        "{{.Business.PermissionPrefix}}:create",
+                        "{{.Business.PermissionPrefix}}:update",
+                        "{{.Business.PermissionPrefix}}:delete");
+    }
+
+    @Test
+    void serializesLongValuesAsPortableDecimalStrings() throws Exception {
+        JsonMapper mapper =
+                JsonMapper.builder()
+                        .findAndAddModules()
+                        .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+                        .build();
+        {{.Business.EntityClass}} value =
+                new {{.Business.EntityClass}}(
+                        "entity-id",
+{{- range .Business.Fields}}
+                        {{.SampleOne}},
+{{- end}}
+                        1L,
+                        NOW,
+                        NOW);
+
+        String json = mapper.writeValueAsString(value);
+        assertThat(json).contains("\"version\":\"1\"");
+{{- range .Business.Fields}}
+{{- if eq .JavaType "Long"}}
+        assertThat(json).contains("\"{{.Name}}\":\"1\"");
+{{- end}}
+{{- end}}
+        String updateJson =
+                "{"
+{{- range $index, $field := .Business.Fields}}
+                        + "{{if $index}},{{end}}\"{{$field.Name}}\":{{$field.JSONSampleOne}}"
+{{- end}}
+                        + ",\"version\":\"1\"}";
+        {{.Business.EntityClass}}Service.UpdateInput input =
+                mapper.readValue(updateJson, {{.Business.EntityClass}}Service.UpdateInput.class);
+        assertThat(input.version()).isEqualTo(1L);
+{{- range .Business.Fields}}
+{{- if eq .JavaType "Long"}}
+        assertThat(input.{{.JavaName}}()).isEqualTo(1L);
+{{- end}}
+{{- end}}
+    }
+
+    private static final class FakeRepository
+            implements {{.Business.EntityClass}}Repository {
+
+        private {{.Business.EntityClass}} value;
+        private final List<String> auditActions = new ArrayList<>();
+
+        @Override
+        public void create({{.Business.EntityClass}} candidate, AuditEvent auditEvent) {
+            if (value != null) {
+                throw conflict();
+            }
+            value = candidate;
+            auditActions.add(auditEvent.action());
+        }
+
+        @Override
+        public Optional<{{.Business.EntityClass}}> get(String id) {
+            return value != null && value.id().equals(id)
+                    ? Optional.of(value)
+                    : Optional.empty();
+        }
+
+        @Override
+        public PageResult list(String cursor, int limit) {
+            return new PageResult(value == null ? List.of() : List.of(value), "");
+        }
+
+        @Override
+        public {{.Business.EntityClass}} update(
+                {{.Business.EntityClass}} candidate, AuditEvent auditEvent) {
+            if (value == null) {
+                throw missing();
+            }
+            if (candidate.version() != value.version()) {
+                throw conflict();
+            }
+            value =
+                    new {{.Business.EntityClass}}(
+                            candidate.id(),
+{{- range .Business.Fields}}
+                            candidate.{{.JavaName}}(),
+{{- end}}
+                            candidate.version() + 1L,
+                            value.createdAt(),
+                            candidate.updatedAt());
+            auditActions.add(auditEvent.action());
+            return value;
+        }
+
+        @Override
+        public void delete(String id, long version, AuditEvent auditEvent) {
+            if (value == null) {
+                throw missing();
+            }
+            if (!value.id().equals(id) || value.version() != version) {
+                throw conflict();
+            }
+            value = null;
+            auditActions.add(auditEvent.action());
+        }
+
+        private static {{.Business.EntityClass}}Exception missing() {
+            return new {{.Business.EntityClass}}Exception(
+                    {{.Business.EntityClass}}Exception.Kind.NOT_FOUND, "not found");
+        }
+
+        private static {{.Business.EntityClass}}Exception conflict() {
+            return new {{.Business.EntityClass}}Exception(
+                    {{.Business.EntityClass}}Exception.Kind.CONFLICT, "conflict");
+        }
+    }
+}

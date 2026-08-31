@@ -1,0 +1,182 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class {{.Business.EntityClass}}Service {
+
+    private final {{.Business.EntityClass}}Repository repository;
+    private final Clock clock;
+
+    public {{.Business.EntityClass}}Service({{.Business.EntityClass}}Repository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    {{.Business.EntityClass}}Service(
+            {{.Business.EntityClass}}Repository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public {{.Business.EntityClass}} create(WriteInput input, Principal actor) {
+        requireActor(actor);
+        validate(input);
+        Instant now = clock.instant();
+        {{.Business.EntityClass}} value =
+                new {{.Business.EntityClass}}(
+                        newId(),
+{{- range .Business.Fields}}
+                        input.{{.JavaName}}(),
+{{- end}}
+                        1L,
+                        now,
+                        now);
+        repository.create(value, audit(actor, "{{.Business.PermissionPrefix}}:create", value.id(), now));
+        return value;
+    }
+
+    public {{.Business.EntityClass}} get(String id, Principal actor) {
+        requireActor(actor);
+        String normalizedId = requireId(id);
+        return repository
+                .get(normalizedId)
+                .orElseThrow(() -> notFound(normalizedId));
+    }
+
+    public Page list(String cursor, int limit, Principal actor) {
+        requireActor(actor);
+        if (limit < 1 || limit > 100) {
+            throw invalid("limit must be between 1 and 100");
+        }
+        String normalizedCursor = cursor == null ? "" : cursor.trim();
+        {{.Business.EntityClass}}Repository.PageResult result =
+                repository.list(normalizedCursor, limit);
+        return new Page(result.items(), result.nextCursor());
+    }
+
+    public {{.Business.EntityClass}} update(String id, UpdateInput input, Principal actor) {
+        requireActor(actor);
+        String normalizedId = requireId(id);
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid("version must be a positive decimal string");
+        }
+        WriteInput replacement =
+                new WriteInput(
+{{- range $index, $field := .Business.Fields}}
+{{- if $index}},{{end}}
+                        input.{{$field.JavaName}}()
+{{- end}});
+        validate(replacement);
+        Instant now = clock.instant();
+        {{.Business.EntityClass}} value =
+                new {{.Business.EntityClass}}(
+                        normalizedId,
+{{- range .Business.Fields}}
+                        input.{{.JavaName}}(),
+{{- end}}
+                        input.version(),
+                        now,
+                        now);
+        return repository.update(
+                value,
+                audit(actor, "{{.Business.PermissionPrefix}}:update", normalizedId, now));
+    }
+
+    public void delete(String id, Long version, Principal actor) {
+        requireActor(actor);
+        String normalizedId = requireId(id);
+        if (version == null || version < 1L) {
+            throw invalid("version must be a positive decimal string");
+        }
+        repository.delete(
+                normalizedId,
+                version,
+                audit(actor, "{{.Business.PermissionPrefix}}:delete", normalizedId, clock.instant()));
+    }
+
+    private static void validate(WriteInput input) {
+        if (input == null) {
+            throw invalid("request body is required");
+        }
+{{- range .Business.Fields}}
+{{- if .Required}}
+        if (input.{{.JavaName}}() == null) {
+            throw invalid("{{.Name}} is required");
+        }
+{{- end}}
+{{- if .StringLike}}
+        validateText("{{.Name}}", input.{{.JavaName}}(), {{.MaximumLength}});
+{{- end}}
+{{- end}}
+    }
+
+    private static void validateText(String name, String value, int maximumLength) {
+        if (value == null) {
+            return;
+        }
+        if (value.isBlank()
+                || value.length() > maximumLength
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw invalid(name + " is invalid");
+        }
+    }
+
+    private static void requireActor(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank()) {
+            throw invalid("authenticated actor is required");
+        }
+    }
+
+    private static String requireId(String id) {
+        String normalized = id == null ? "" : id.trim();
+        if (normalized.isEmpty() || normalized.length() > 191) {
+            throw invalid("id is invalid");
+        }
+        return normalized;
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(
+                newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static {{.Business.EntityClass}}Exception invalid(String message) {
+        return new {{.Business.EntityClass}}Exception(
+                {{.Business.EntityClass}}Exception.Kind.INVALID_INPUT, message);
+    }
+
+    private static {{.Business.EntityClass}}Exception notFound(String id) {
+        return new {{.Business.EntityClass}}Exception(
+                {{.Business.EntityClass}}Exception.Kind.NOT_FOUND,
+                "{{.Business.EntityName}} " + id + " was not found");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record WriteInput(
+{{- range $index, $field := .Business.Fields}}
+{{- if $index}},{{end}}
+            {{$field.JavaType}} {{$field.JavaName}}
+{{- end}}) {}
+
+    public record UpdateInput(
+{{- range .Business.Fields}}
+            {{.JavaType}} {{.JavaName}},
+{{- end}}
+            Long version) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record Page(List<{{.Business.EntityClass}}> items, String nextCursor) {}
+}

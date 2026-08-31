@@ -1,0 +1,24 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.util.List;
+import java.util.Optional;
+
+public interface {{.Business.EntityClass}}Repository {
+
+    void create({{.Business.EntityClass}} value, AuditEvent auditEvent);
+
+    Optional<{{.Business.EntityClass}}> get(String id);
+
+    PageResult list(String cursor, int limit);
+
+    {{.Business.EntityClass}} update({{.Business.EntityClass}} value, AuditEvent auditEvent);
+
+    void delete(String id, long version, AuditEvent auditEvent);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult(List<{{.Business.EntityClass}}> items, String nextCursor) {}
+}

@@ -1,6 +1,9 @@
 package {{.PackageName}}.http;
 
 import {{.PackageName}}.identity.IdentityException;
+{{- if .Business}}
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}}Exception;
+{{- end}}
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -29,6 +32,20 @@ public final class ApiExceptionHandler {
                     response(HttpStatus.BAD_REQUEST, "request.invalid", exception.getMessage());
         };
     }
+
+{{- if .Business}}
+    @ExceptionHandler({{.Business.EntityClass}}Exception.class)
+    public ResponseEntity<ApiError> business({{.Business.EntityClass}}Exception exception) {
+        return switch (exception.kind()) {
+            case INVALID_INPUT ->
+                    response(HttpStatus.BAD_REQUEST, "{{.Business.ModuleName}}.invalid", exception.getMessage());
+            case NOT_FOUND ->
+                    response(HttpStatus.NOT_FOUND, "{{.Business.ModuleName}}.not_found", exception.getMessage());
+            case CONFLICT ->
+                    response(HttpStatus.CONFLICT, "{{.Business.ModuleName}}.conflict", exception.getMessage());
+        };
+    }
+{{- end}}
 
     @ExceptionHandler({MethodArgumentNotValidException.class, HttpMessageNotReadableException.class})
     public ResponseEntity<ApiError> invalidRequest(Exception exception) {

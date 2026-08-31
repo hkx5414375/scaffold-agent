@@ -1,0 +1,177 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Instant;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class {{.Business.EntityClass}}DatabaseIntegrationTest {
+
+    @Test
+    @Timeout(30)
+    void migratesAndPersistsAuditedOptimisticCrud() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_crud_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo(2);
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identityService =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbcTemplate, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identityService.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal actor =
+                    identityService
+                            .login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+
+            {{.Business.EntityClass}}Service service =
+                    new {{.Business.EntityClass}}Service(
+                            new Jdbc{{.Business.EntityClass}}Repository(jdbcTemplate, transactions));
+            {{.Business.EntityClass}} created =
+                    service.create(
+                            new {{.Business.EntityClass}}Service.WriteInput(
+{{- range $index, $field := .Business.Fields}}
+{{- if $index}},{{end}}
+                                    {{$field.SampleOne}}
+{{- end}}),
+                            actor);
+            assertThat(service.get(created.id(), actor)).isEqualTo(created);
+            assertThat(service.list("", 20, actor).items()).containsExactly(created);
+{{- range .Business.Fields}}
+{{- if .Unique}}
+            assertThatThrownBy(
+                            () ->
+                                    service.create(
+                                            new {{$.Business.EntityClass}}Service.WriteInput(
+{{- range $index, $candidate := $.Business.Fields}}
+{{- if $index}},{{end}}
+                                                    {{$candidate.SampleOne}}
+{{- end}}),
+                                            actor))
+                    .isInstanceOf({{$.Business.EntityClass}}Exception.class)
+                    .satisfies(
+                            exception ->
+                                    assertThat(
+                                                    (({{$.Business.EntityClass}}Exception) exception)
+                                                            .kind())
+                                            .isEqualTo(
+                                                    {{$.Business.EntityClass}}Exception.Kind.CONFLICT));
+{{- break}}
+{{- end}}
+{{- end}}
+
+            {{.Business.EntityClass}} updated =
+                    service.update(
+                            created.id(),
+                            new {{.Business.EntityClass}}Service.UpdateInput(
+{{- range .Business.Fields}}
+                                    {{.SampleTwo}},
+{{- end}}
+                                    created.version()),
+                            actor);
+            assertThat(updated.version()).isEqualTo(2L);
+            assertThatThrownBy(
+                            () ->
+                                    service.update(
+                                            created.id(),
+                                            new {{.Business.EntityClass}}Service.UpdateInput(
+{{- range .Business.Fields}}
+                                                    {{.SampleOne}},
+{{- end}}
+                                                    created.version()),
+                                            actor))
+                    .isInstanceOf({{.Business.EntityClass}}Exception.class);
+
+            service.delete(updated.id(), updated.version(), actor);
+            assertThatThrownBy(() -> service.get(updated.id(), actor))
+                    .isInstanceOf({{.Business.EntityClass}}Exception.class);
+            assertThat(
+                            jdbcTemplate.queryForObject(
+                                    "select count(*) from audit_events where action like ?",
+                                    Integer.class,
+                                    "{{.Business.PermissionPrefix}}:%"))
+                    .isEqualTo(3);
+            assertThat(
+                            jdbcTemplate.queryForObject(
+                                    "select count(*) from identity_role_permissions "
+                                            + "where role_code = 'admin' and permission_code like ?",
+                                    Integer.class,
+                                    "{{.Business.PermissionPrefix}}:%"))
+                    .isEqualTo(4);
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

@@ -272,11 +272,19 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 }
 
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql")
+	runGeneratedJavaReference(t, "postgresql", false)
 }
 
 func TestJavaMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql")
+	runGeneratedJavaReference(t, "mysql", false)
+}
+
+func TestJavaPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql", true)
+}
+
+func TestJavaMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql", true)
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -535,7 +543,7 @@ WORKFLOWS
 	}
 }
 
-func runGeneratedJavaReference(t *testing.T, database string) {
+func runGeneratedJavaReference(t *testing.T, database string, business bool) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -553,8 +561,29 @@ spec:
     engine: DATABASE_ENGINE
   auth:
     modes: [session, token]
+MODULES
 `
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	modules := ""
+	if business {
+		modules = `  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - {name: title, type: string, required: true, unique: true}
+            - {name: description, type: text}
+            - {name: done, type: bool, required: true}
+            - {name: priority, type: int64, required: true}
+            - {name: due_at, type: datetime}
+      permissions:
+        - {code: "tasks:task:create"}
+        - {code: "tasks:task:read"}
+        - {code: "tasks:task:update"}
+        - {code: "tasks:task:delete"}
+`
+	}
+	blueprint = strings.ReplaceAll(blueprint, "MODULES", modules)
 	writeBlueprint(t, root, blueprint)
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
@@ -562,8 +591,15 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 32 || plannedData.CapabilityLock["java-service"] != "0.2.0" {
+	wantChanges := 32
+	if business {
+		wantChanges = 41
+	}
+	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	if business && plannedData.CapabilityLock["java-crud"] != "0.1.0" {
+		t.Fatalf("Plan() CRUD lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

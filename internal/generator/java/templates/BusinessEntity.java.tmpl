@@ -1,0 +1,18 @@
+package {{.PackageName}}.{{.Business.PackageName}};
+
+import java.time.Instant;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+public record {{.Business.EntityClass}}(
+        String id,
+{{- range .Business.Fields}}
+{{- if eq .JavaType "Long"}}
+        @JsonSerialize(using = ToStringSerializer.class) {{.EntityType}} {{.JavaName}},
+{{- else}}
+        {{.EntityType}} {{.JavaName}},
+{{- end}}
+{{- end}}
+        @JsonSerialize(using = ToStringSerializer.class) long version,
+        Instant createdAt,
+        Instant updatedAt) {}

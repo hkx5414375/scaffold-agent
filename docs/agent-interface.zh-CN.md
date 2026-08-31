@@ -21,9 +21,9 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器现可生成 Java 21/Spring Boot 4.1 + Maven 的 PostgreSQL 或 MySQL 服务，包含有界数据库就绪检查、PBKDF2-SHA256 密码、HttpOnly 浏览器会话、只保存摘要的 Bearer Token、权限 RBAC、事务安全审计、OpenAPI 和锁定的质量门禁；在完整模块、能力包和前端切片完成前会明确拒绝这些选择。Python 当前仍返回稳定诊断 `generator.adapter.unavailable`。所有不支持的选择都会失败，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器现可生成 Java 21/Spring Boot 4.1 + Maven 的 PostgreSQL 或 MySQL 服务，包含有界数据库就绪检查、PBKDF2-SHA256 密码、HttpOnly 浏览器会话、只保存摘要的 Bearer Token、权限 RBAC、事务安全审计、蓝图驱动 CRUD、有界游标分页、乐观锁、OpenAPI 和锁定的质量门禁；尚未实现的能力包和前端选择会被明确拒绝。Python 当前仍返回稳定诊断 `generator.adapter.unavailable`。所有不支持的选择都会失败，不会生成残缺项目。
 
-当前支持的业务模块写法参见 `examples/task-service/scaffold.yaml`。
+Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
 
 选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组织创建与查询、成员身份范围内的权限校验、管理端组织选择，以及所有业务读写的 `X-Organization-ID` 租户条件。`0.2.0` 进一步加入成员列表、72 小时且绑定邮箱的邀请、邀请接受、角色变更、成员移除和最后管理员保护。邀请明文只在创建响应中返回一次，数据库只保存摘要，AI 不应尝试从数据库恢复邀请明文。`0.3.0` 再加入独立所有者、组织改名、原子所有权转移、可逆停用和重新启用；所有权只能转给现有成员且会自动把新所有者提升为管理员。AI 不得绕过所有者保护或自行补一个级联删除组织的接口。停用组织仍可查询，但不能再授权租户业务请求。
