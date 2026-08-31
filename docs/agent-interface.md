@@ -43,7 +43,7 @@ business mutation and query. Agents should select an organization once and send
 its identifier through `X-Organization-ID`; they do not need to rediscover the
 tenant propagation rules from handlers or SQL stores.
 
-The Go `0.2.0` version additionally generates organization member discovery, 72-hour
+The Go and Java `0.2.0` versions additionally generate organization member discovery, 72-hour
 email-bound invitation tokens, invitation acceptance, role changes, removals,
 last-administrator protection, additive database migrations, OpenAPI operations,
 and a member administration view. The raw invitation token is returned once for

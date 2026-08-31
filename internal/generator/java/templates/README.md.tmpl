@@ -50,6 +50,15 @@ uses that user's membership role, and every business query and mutation includes
 the same organization predicate; never bypass the generated tenant service or
 repository methods.
 {{end}}
+{{if .TenancyMembers}}
+
+Organization administrators can list members, create 72-hour email-bound
+invitations, change member roles, and remove access. Invitation tokens are returned
+only once; persistence stores only a SHA-256 digest. Invitation acceptance requires
+an authenticated identity with the invited email. Keep member mutations inside the
+generated repository transaction so concurrent changes cannot remove the final
+administrator.
+{{end}}
 {{if .Admin}}
 
 ## Administration UI

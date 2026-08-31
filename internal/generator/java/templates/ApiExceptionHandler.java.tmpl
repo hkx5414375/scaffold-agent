@@ -52,7 +52,31 @@ public final class ApiExceptionHandler {
 {{- if .Tenancy}}
     @ExceptionHandler(TenancyException.class)
     public ResponseEntity<ApiError> tenancy(TenancyException exception) {
-        return response(HttpStatus.BAD_REQUEST, "tenancy.invalid", exception.getMessage());
+        return switch (exception.kind()) {
+            case INVALID_INPUT ->
+                    response(HttpStatus.BAD_REQUEST, "tenancy.invalid", exception.getMessage());
+{{- if .TenancyMembers}}
+            case MEMBER_INVALID ->
+                    response(
+                            HttpStatus.BAD_REQUEST,
+                            "tenancy.member.invalid",
+                            exception.getMessage());
+            case INVITATION_INVALID ->
+                    response(
+                            HttpStatus.BAD_REQUEST,
+                            "tenancy.invitation.invalid",
+                            exception.getMessage());
+            case MEMBER_CONFLICT ->
+                    response(HttpStatus.CONFLICT, "tenancy.member.conflict", exception.getMessage());
+            case LAST_ADMINISTRATOR ->
+                    response(
+                            HttpStatus.CONFLICT,
+                            "tenancy.last_administrator",
+                            exception.getMessage());
+            case MEMBER_NOT_FOUND ->
+                    response(HttpStatus.NOT_FOUND, "tenancy.member.not_found", exception.getMessage());
+{{- end}}
+        };
     }
 {{- end}}
 

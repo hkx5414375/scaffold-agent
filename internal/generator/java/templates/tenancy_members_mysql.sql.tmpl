@@ -1,0 +1,33 @@
+insert into identity_permissions (code, description) values
+    ('tenancy:members:read', 'Read organization members'),
+    ('tenancy:members:manage', 'Invite, update, and remove organization members')
+on duplicate key update description = values(description);
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'tenancy:members:read'),
+    ('admin', 'tenancy:members:manage'),
+    ('user', 'tenancy:members:read')
+on duplicate key update role_code = role_code;
+
+create table organization_invitations (
+    id varchar(191) primary key,
+    organization_id varchar(191) not null,
+    email varchar(254) not null,
+    role_code varchar(191) not null,
+    token_hash char(64) not null unique,
+    invited_by varchar(191) not null,
+    expires_at datetime(6) not null,
+    accepted_at datetime(6),
+    accepted_by varchar(191),
+    created_at datetime(6) not null,
+    constraint organization_invitations_organization_fk foreign key (organization_id)
+        references organizations (id) on delete cascade,
+    constraint organization_invitations_role_fk foreign key (role_code)
+        references identity_roles (code),
+    constraint organization_invitations_inviter_fk foreign key (invited_by)
+        references identity_users (id),
+    constraint organization_invitations_acceptor_fk foreign key (accepted_by)
+        references identity_users (id),
+    index organization_invitations_organization_idx (organization_id, created_at desc),
+    index organization_invitations_email_idx (email, expires_at desc)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

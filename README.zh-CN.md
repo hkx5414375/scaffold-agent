@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 适配器现已能针对 PostgreSQL、MySQL 生成 Maven 服务，包含存活/数据库就绪、PBKDF2 密码、Session 与 Bearer 双认证、权限 RBAC、原子安全审计、蓝图驱动 CRUD、游标分页、乐观并发控制、组织租户隔离、OpenAPI，以及与 Go 共用并通过构建验收的 Vue/Element Plus 管理端，同时强制执行 JUnit、ArchUnit、Checkstyle、Spotless、SpotBugs 与 Maven Enforcer。Java 平台能力、Python 适配器与 Nuxt 商城仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 适配器现已能针对 PostgreSQL、MySQL 生成 Maven 服务，包含存活/数据库就绪、PBKDF2 密码、Session 与 Bearer 双认证、权限 RBAC、原子安全审计、蓝图驱动 CRUD、游标分页、乐观并发控制、组织租户隔离、邮箱绑定邀请、成员管理、并发最后管理员保护、OpenAPI，以及与 Go 共用并通过构建验收的 Vue/Element Plus 管理端，同时强制执行 JUnit、ArchUnit、Checkstyle、Spotless、SpotBugs 与 Maven Enforcer。Java 平台能力、Python 适配器与 Nuxt 商城仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 

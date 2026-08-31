@@ -1,0 +1,375 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcTenancyMemberRepository implements TenancyMemberRepository {
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcTenancyMemberRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public List<OrganizationMember> listMembers(String organizationId) {
+        return jdbcTemplate.query(
+                "select memberships.organization_id, users.id, users.email, "
+                        + "memberships.role_code, memberships.created_at "
+                        + "from organization_memberships memberships "
+                        + "join identity_users users on users.id = memberships.user_id "
+                        + "where memberships.organization_id = ? "
+                        + "order by users.email, users.id",
+                (resultSet, rowNumber) ->
+                        new OrganizationMember(
+                                resultSet.getString("organization_id"),
+                                resultSet.getString("id"),
+                                resultSet.getString("email"),
+                                resultSet.getString("role_code"),
+                                resultSet.getTimestamp("created_at").toInstant()),
+                organizationId);
+    }
+
+    @Override
+    public void createInvitation(InvitationRecord invitation, AuditEvent auditEvent) {
+        Operation<Boolean> result =
+                transactionTemplate.execute(
+                        status -> {
+                            if (!lockOrganization(invitation.organizationId())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.MEMBER_NOT_FOUND,
+                                        "organization member was not found");
+                            }
+                            if (hasMemberEmail(invitation.organizationId(), invitation.email())
+                                    || hasActiveInvitation(
+                                            invitation.organizationId(),
+                                            invitation.email(),
+                                            invitation.createdAt())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.MEMBER_CONFLICT,
+                                        "member or active invitation already exists");
+                            }
+                            jdbcTemplate.update(
+                                    "insert into organization_invitations "
+                                            + "(id, organization_id, email, role_code, token_hash, "
+                                            + "invited_by, expires_at, created_at) "
+                                            + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    invitation.id(),
+                                    invitation.organizationId(),
+                                    invitation.email(),
+                                    invitation.role(),
+                                    invitation.tokenHash(),
+                                    invitation.invitedBy(),
+                                    Timestamp.from(invitation.expiresAt()),
+                                    Timestamp.from(invitation.createdAt()));
+                            appendAudit(auditEvent);
+                            return Operation.success(Boolean.TRUE);
+                        });
+        requireSuccess(result);
+    }
+
+    @Override
+    public OrganizationMember acceptInvitation(
+            String tokenHash,
+            String email,
+            String userId,
+            Instant acceptedAt,
+            AuditEvent auditEvent) {
+        Operation<OrganizationMember> result =
+                transactionTemplate.execute(
+                        status -> {
+                            List<InvitationRow> invitations =
+                                    jdbcTemplate.query(
+                                            "select id, organization_id, role_code "
+                                                    + "from organization_invitations "
+                                                    + "where token_hash = ? and email = ? "
+                                                    + "and accepted_at is null and expires_at > ? for update",
+                                            (resultSet, rowNumber) ->
+                                                    new InvitationRow(
+                                                            resultSet.getString("id"),
+                                                            resultSet.getString("organization_id"),
+                                                            resultSet.getString("role_code")),
+                                            tokenHash,
+                                            email,
+                                            Timestamp.from(acceptedAt));
+                            if (invitations.isEmpty()) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.INVITATION_INVALID,
+                                        "invitation is invalid or expired");
+                            }
+                            InvitationRow invitation = invitations.getFirst();
+                            if (!lockOrganization(invitation.organizationId())) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.INVITATION_INVALID,
+                                        "invitation is invalid or expired");
+                            }
+                            Integer memberships =
+                                    jdbcTemplate.queryForObject(
+                                            "select count(*) from organization_memberships "
+                                                    + "where organization_id = ? and user_id = ?",
+                                            Integer.class,
+                                            invitation.organizationId(),
+                                            userId);
+                            AuditEvent targetedAudit =
+                                    withTarget(auditEvent, invitation.organizationId() + ":" + userId);
+                            if (memberships != null && memberships > 0) {
+                                return denied(
+                                        targetedAudit,
+                                        TenancyException.Kind.MEMBER_CONFLICT,
+                                        "member or active invitation already exists");
+                            }
+                            jdbcTemplate.update(
+                                    "insert into organization_memberships "
+                                            + "(organization_id, user_id, role_code, created_at) "
+                                            + "values (?, ?, ?, ?)",
+                                    invitation.organizationId(),
+                                    userId,
+                                    invitation.role(),
+                                    Timestamp.from(acceptedAt));
+                            jdbcTemplate.update(
+                                    "update organization_invitations "
+                                            + "set accepted_at = ?, accepted_by = ? where id = ?",
+                                    Timestamp.from(acceptedAt),
+                                    userId,
+                                    invitation.id());
+                            appendAudit(targetedAudit);
+                            return Operation.success(
+                                    new OrganizationMember(
+                                            invitation.organizationId(),
+                                            userId,
+                                            email,
+                                            invitation.role(),
+                                            acceptedAt));
+                        });
+        return requireSuccess(result);
+    }
+
+    @Override
+    public OrganizationMember changeMemberRole(
+            String organizationId, String userId, String role, AuditEvent auditEvent) {
+        Operation<OrganizationMember> result =
+                transactionTemplate.execute(
+                        status -> {
+                            if (!lockOrganization(organizationId)) {
+                                return memberNotFound(auditEvent);
+                            }
+                            List<OrganizationMember> members = memberForUpdate(organizationId, userId);
+                            if (members.isEmpty()) {
+                                return memberNotFound(auditEvent);
+                            }
+                            OrganizationMember member = members.getFirst();
+                            if ("admin".equals(member.role())
+                                    && !"admin".equals(role)
+                                    && administratorCount(organizationId) <= 1) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.LAST_ADMINISTRATOR,
+                                        "organization must retain an administrator");
+                            }
+                            jdbcTemplate.update(
+                                    "update organization_memberships set role_code = ? "
+                                            + "where organization_id = ? and user_id = ?",
+                                    role,
+                                    organizationId,
+                                    userId);
+                            appendAudit(auditEvent);
+                            return Operation.success(
+                                    new OrganizationMember(
+                                            member.organizationId(),
+                                            member.userId(),
+                                            member.email(),
+                                            role,
+                                            member.joinedAt()));
+                        });
+        return requireSuccess(result);
+    }
+
+    @Override
+    public void removeMember(String organizationId, String userId, AuditEvent auditEvent) {
+        Operation<Boolean> result =
+                transactionTemplate.execute(
+                        status -> {
+                            if (!lockOrganization(organizationId)) {
+                                return memberNotFound(auditEvent);
+                            }
+                            List<OrganizationMember> members = memberForUpdate(organizationId, userId);
+                            if (members.isEmpty()) {
+                                return memberNotFound(auditEvent);
+                            }
+                            OrganizationMember member = members.getFirst();
+                            if ("admin".equals(member.role())
+                                    && administratorCount(organizationId) <= 1) {
+                                return denied(
+                                        auditEvent,
+                                        TenancyException.Kind.LAST_ADMINISTRATOR,
+                                        "organization must retain an administrator");
+                            }
+                            jdbcTemplate.update(
+                                    "delete from organization_memberships "
+                                            + "where organization_id = ? and user_id = ?",
+                                    organizationId,
+                                    userId);
+                            appendAudit(auditEvent);
+                            return Operation.success(Boolean.TRUE);
+                        });
+        requireSuccess(result);
+    }
+
+    private boolean lockOrganization(String organizationId) {
+        return !jdbcTemplate
+                .query(
+                        "select id from organizations where id = ? for update",
+                        (resultSet, rowNumber) -> resultSet.getString("id"),
+                        organizationId)
+                .isEmpty();
+    }
+
+    private boolean hasMemberEmail(String organizationId, String email) {
+        Integer count =
+                jdbcTemplate.queryForObject(
+                        "select count(*) from organization_memberships memberships "
+                                + "join identity_users users on users.id = memberships.user_id "
+                                + "where memberships.organization_id = ? and users.email = ?",
+                        Integer.class,
+                        organizationId,
+                        email);
+        return count != null && count > 0;
+    }
+
+    private boolean hasActiveInvitation(String organizationId, String email, Instant now) {
+        Integer count =
+                jdbcTemplate.queryForObject(
+                        "select count(*) from organization_invitations "
+                                + "where organization_id = ? and email = ? "
+                                + "and accepted_at is null and expires_at > ?",
+                        Integer.class,
+                        organizationId,
+                        email,
+                        Timestamp.from(now));
+        return count != null && count > 0;
+    }
+
+    private List<OrganizationMember> memberForUpdate(String organizationId, String userId) {
+        return jdbcTemplate.query(
+                "select memberships.organization_id, users.id, users.email, "
+                        + "memberships.role_code, memberships.created_at "
+                        + "from organization_memberships memberships "
+                        + "join identity_users users on users.id = memberships.user_id "
+                        + "where memberships.organization_id = ? and memberships.user_id = ? for update",
+                (resultSet, rowNumber) ->
+                        new OrganizationMember(
+                                resultSet.getString("organization_id"),
+                                resultSet.getString("id"),
+                                resultSet.getString("email"),
+                                resultSet.getString("role_code"),
+                                resultSet.getTimestamp("created_at").toInstant()),
+                organizationId,
+                userId);
+    }
+
+    private int administratorCount(String organizationId) {
+        Integer count =
+                jdbcTemplate.queryForObject(
+                        "select count(*) from organization_memberships "
+                                + "where organization_id = ? and role_code = 'admin'",
+                        Integer.class,
+                        organizationId);
+        return count == null ? 0 : count;
+    }
+
+    private <T> Operation<T> memberNotFound(AuditEvent auditEvent) {
+        return denied(
+                auditEvent,
+                TenancyException.Kind.MEMBER_NOT_FOUND,
+                "organization member was not found");
+    }
+
+    private <T> Operation<T> denied(
+            AuditEvent auditEvent, TenancyException.Kind kind, String message) {
+        appendAudit(withOutcome(auditEvent, "denied"));
+        return Operation.failure(new TenancyException(kind, message));
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static AuditEvent withOutcome(AuditEvent event, String outcome) {
+        return new AuditEvent(
+                event.id(),
+                event.userId(),
+                event.action(),
+                outcome,
+                event.target(),
+                event.ipAddress(),
+                event.userAgent(),
+                event.createdAt());
+    }
+
+    private static AuditEvent withTarget(AuditEvent event, String target) {
+        return new AuditEvent(
+                event.id(),
+                event.userId(),
+                event.action(),
+                event.outcome(),
+                target,
+                event.ipAddress(),
+                event.userAgent(),
+                event.createdAt());
+    }
+
+    private static <T> T requireSuccess(Operation<T> result) {
+        if (result == null) {
+            throw new IllegalStateException("member transaction did not return a result");
+        }
+        if (result.failure() != null) {
+            throw result.failure();
+        }
+        return result.value();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private record InvitationRow(String id, String organizationId, String role) {}
+
+    private record Operation<T>(T value, TenancyException failure) {
+
+        private static <T> Operation<T> success(T value) {
+            return new Operation<>(value, null);
+        }
+
+        private static <T> Operation<T> failure(TenancyException failure) {
+            return new Operation<>(null, failure);
+        }
+    }
+}

@@ -173,6 +173,98 @@ func TestGenerateOrganizationTenancyForBothDatabases(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationMemberAdministrationForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyMembersVersion,
+			}}
+			project.Spec.Modules = []spec.Module{businessModule()}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 79 ||
+				result.CapabilityLock[tenancyOwner] != tenancyMembersVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/TenancyMemberService.java",
+				"src/main/java/com/scaffold/generated/demoservice/tenancy/OrganizationMemberController.java",
+				"src/test/java/com/scaffold/generated/demoservice/tenancy/TenancyMemberDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000060__organization_members.sql",
+				"web/admin/src/views/MembersView.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != tenancyOwner {
+					t.Errorf("Generate() member output %s is missing or has the wrong owner", path)
+				}
+			}
+			migration := string(outputContent(
+				result, "src/main/resources/db/migration/V000060__organization_members.sql",
+			))
+			if !strings.Contains(migration, "tenancy:members:manage") ||
+				!strings.Contains(migration, "token_hash") {
+				t.Fatalf("generated member migration is incomplete:\n%s", migration)
+			}
+			application := string(outputContent(result, "web/admin/src/App.vue"))
+			if !strings.Contains(application, "MembersView") ||
+				!strings.Contains(application, "acceptInvitation") {
+				t.Fatalf("generated administration UI lacks member workflows:\n%s", application)
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated member OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI),
+				"/api/v1/organizations/{organizationId}/members:") ||
+				!strings.Contains(string(openAPI), "tenancy:members:manage") {
+				t.Fatalf("generated OpenAPI lacks member workflows:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestOrganizationMemberUpgradePreservesFoundationMigration(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			versionOne := validProject()
+			versionOne.Spec.Database.Engine = database
+			versionOne.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyVersion,
+			}}
+			versionTwo := validProject()
+			versionTwo.Spec.Database.Engine = database
+			versionTwo.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyMembersVersion,
+			}}
+			base, err := New().Generate(context.Background(), versionOne)
+			if err != nil {
+				t.Fatalf("Generate(0.1.0) error = %v", err)
+			}
+			members, err := New().Generate(context.Background(), versionTwo)
+			if err != nil {
+				t.Fatalf("Generate(0.2.0) error = %v", err)
+			}
+			const migration = "src/main/resources/db/migration/V000050__organization_tenancy.sql"
+			if !reflect.DeepEqual(outputContent(base, migration), outputContent(members, migration)) {
+				t.Fatal("organization-tenancy 0.2.0 rewrites the already-applied 0.1.0 migration")
+			}
+		})
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

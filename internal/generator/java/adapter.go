@@ -19,15 +19,16 @@ import (
 )
 
 const (
-	backend         = "java"
-	baseOwner       = "java-service"
-	baseVersion     = "0.3.0"
-	businessOwner   = "java-crud"
-	businessVersion = "0.1.0"
-	adminOwner      = adminui.Owner
-	adminVersion    = adminui.Version
-	tenancyOwner    = "organization-tenancy"
-	tenancyVersion  = "0.1.0"
+	backend               = "java"
+	baseOwner             = "java-service"
+	baseVersion           = "0.3.0"
+	businessOwner         = "java-crud"
+	businessVersion       = "0.1.0"
+	adminOwner            = adminui.Owner
+	adminVersion          = adminui.Version
+	tenancyOwner          = "organization-tenancy"
+	tenancyVersion        = "0.1.0"
+	tenancyMembersVersion = "0.2.0"
 )
 
 //go:embed all:templates
@@ -44,52 +45,67 @@ var outputTemplates = map[string]string{
 }
 
 type databaseData struct {
-	Engine                    string
-	DisplayName               string
-	DriverGroupID             string
-	DriverArtifactID          string
-	FlywayGroupID             string
-	FlywayArtifactID          string
-	IdentityMigrationTemplate string
-	BusinessMigrationTemplate string
-	TenancyMigrationTemplate  string
+	Engine                          string
+	DisplayName                     string
+	DriverGroupID                   string
+	DriverArtifactID                string
+	FlywayGroupID                   string
+	FlywayArtifactID                string
+	IdentityMigrationTemplate       string
+	BusinessMigrationTemplate       string
+	TenancyMigrationTemplate        string
+	TenancyMembersMigrationTemplate string
 }
 
 var databases = map[string]databaseData{
 	"postgresql": {
-		Engine:                    "postgresql",
-		DisplayName:               "PostgreSQL",
-		DriverGroupID:             "org.postgresql",
-		DriverArtifactID:          "postgresql",
-		FlywayGroupID:             "org.flywaydb",
-		FlywayArtifactID:          "flyway-database-postgresql",
-		IdentityMigrationTemplate: "templates/identity_postgresql.sql.tmpl",
-		BusinessMigrationTemplate: "templates/business_postgresql.sql.tmpl",
-		TenancyMigrationTemplate:  "templates/tenancy_postgresql.sql.tmpl",
+		Engine:                          "postgresql",
+		DisplayName:                     "PostgreSQL",
+		DriverGroupID:                   "org.postgresql",
+		DriverArtifactID:                "postgresql",
+		FlywayGroupID:                   "org.flywaydb",
+		FlywayArtifactID:                "flyway-database-postgresql",
+		IdentityMigrationTemplate:       "templates/identity_postgresql.sql.tmpl",
+		BusinessMigrationTemplate:       "templates/business_postgresql.sql.tmpl",
+		TenancyMigrationTemplate:        "templates/tenancy_postgresql.sql.tmpl",
+		TenancyMembersMigrationTemplate: "templates/tenancy_members_postgresql.sql.tmpl",
 	},
 	"mysql": {
-		Engine:                    "mysql",
-		DisplayName:               "MySQL",
-		DriverGroupID:             "com.mysql",
-		DriverArtifactID:          "mysql-connector-j",
-		FlywayGroupID:             "org.flywaydb",
-		FlywayArtifactID:          "flyway-mysql",
-		IdentityMigrationTemplate: "templates/identity_mysql.sql.tmpl",
-		BusinessMigrationTemplate: "templates/business_mysql.sql.tmpl",
-		TenancyMigrationTemplate:  "templates/tenancy_mysql.sql.tmpl",
+		Engine:                          "mysql",
+		DisplayName:                     "MySQL",
+		DriverGroupID:                   "com.mysql",
+		DriverArtifactID:                "mysql-connector-j",
+		FlywayGroupID:                   "org.flywaydb",
+		FlywayArtifactID:                "flyway-mysql",
+		IdentityMigrationTemplate:       "templates/identity_mysql.sql.tmpl",
+		BusinessMigrationTemplate:       "templates/business_mysql.sql.tmpl",
+		TenancyMigrationTemplate:        "templates/tenancy_mysql.sql.tmpl",
+		TenancyMembersMigrationTemplate: "templates/tenancy_members_mysql.sql.tmpl",
 	},
 }
 
-var javaCapabilityCatalog = capability.NewCatalog(spec.CapabilityPack{
-	APIVersion: spec.APIVersionV1Alpha1,
-	Kind:       spec.KindCapabilityPack,
-	Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
-	Spec: spec.CapabilityPackSpec{
-		Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
-		Backends:    []string{backend},
-		Databases:   []string{"postgresql", "mysql"},
+var javaCapabilityCatalog = capability.NewCatalog(
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
 	},
-})
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyMembersVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization invitations, member administration, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+)
 
 type templateData struct {
 	ProjectName      string
@@ -106,6 +122,7 @@ type templateData struct {
 	JobAdmin         bool
 	CSVTransfer      bool
 	Approvals        bool
+	MigrationCount   int
 }
 
 type businessData struct {
@@ -196,9 +213,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 	}
 	tenancyEnabled := false
+	tenancyMembersEnabled := false
+	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
 			tenancyEnabled = true
+			selectedTenancyVersion = pack.Metadata.Version
+			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -206,16 +227,28 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		return generator.Result{}, err
 	}
 
+	migrationCount := 1
+	if business != nil {
+		migrationCount++
+	}
+	if tenancyEnabled {
+		migrationCount++
+	}
+	if tenancyMembersEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
-		ProjectName: project.Metadata.Name,
-		ArtifactID:  project.Metadata.Name,
-		PackageName: "com.scaffold.generated." + packageSegment,
-		PackagePath: "com/scaffold/generated/" + packageSegment,
-		Database:    database,
-		Business:    business,
-		Admin:       adminEnabled,
-		Tenancy:     tenancyEnabled,
+		ProjectName:    project.Metadata.Name,
+		ArtifactID:     project.Metadata.Name,
+		PackageName:    "com.scaffold.generated." + packageSegment,
+		PackagePath:    "com/scaffold/generated/" + packageSegment,
+		Database:       database,
+		Business:       business,
+		Admin:          adminEnabled,
+		Tenancy:        tenancyEnabled,
+		TenancyMembers: tenancyMembersEnabled,
+		MigrationCount: migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
 	for path, templatePath := range outputTemplates {
@@ -223,7 +256,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	businessPaths := make(map[string]struct{}, 9)
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
-	tenancyPaths := make(map[string]struct{}, 9)
+	tenancyPaths := make(map[string]struct{}, 19)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -234,6 +267,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	addTenancyTarget := func(path, templatePath string) {
 		targets[path] = templatePath
+		tenancyPaths[path] = struct{}{}
+	}
+	addTenancyAdminTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
 		tenancyPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
@@ -276,7 +314,27 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			"src/main/resources/db/migration/V000050__organization_tenancy.sql",
 			database.TenancyMigrationTemplate,
 		)
-		capabilityLock[tenancyOwner] = tenancyVersion
+		capabilityLock[tenancyOwner] = selectedTenancyVersion
+	}
+	if tenancyMembersEnabled {
+		addTenancyTarget(mainRoot+"/tenancy/OrganizationMember.java", "templates/OrganizationMember.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/OrganizationInvitation.java", "templates/OrganizationInvitation.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyMemberRepository.java", "templates/TenancyMemberRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/TenancyMemberService.java", "templates/TenancyMemberService.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/JdbcTenancyMemberRepository.java", "templates/JdbcTenancyMemberRepository.java.tmpl")
+		addTenancyTarget(mainRoot+"/tenancy/OrganizationMemberController.java", "templates/OrganizationMemberController.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyMemberServiceTest.java", "templates/TenancyMemberServiceTest.java.tmpl")
+		addTenancyTarget(testRoot+"/tenancy/TenancyMemberDatabaseIntegrationTest.java", "templates/TenancyMemberDatabaseIntegrationTest.java.tmpl")
+		addTenancyTarget(
+			"src/main/resources/db/migration/V000060__organization_members.sql",
+			database.TenancyMembersMigrationTemplate,
+		)
+		if adminEnabled {
+			addTenancyAdminTarget(
+				"web/admin/src/views/MembersView.vue",
+				"templates/src/views/MembersView.vue",
+			)
+		}
 	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath

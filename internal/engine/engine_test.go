@@ -272,35 +272,43 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 }
 
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", false, false, false)
+	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
 
 func TestJavaMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", false, false, false)
+	runGeneratedJavaReference(t, "mysql", false, false, "")
 }
 
 func TestJavaPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true, false, false)
+	runGeneratedJavaReference(t, "postgresql", true, false, "")
 }
 
 func TestJavaMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true, false, false)
+	runGeneratedJavaReference(t, "mysql", true, false, "")
 }
 
 func TestJavaPostgreSQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true, true, false)
+	runGeneratedJavaReference(t, "postgresql", true, true, "")
 }
 
 func TestJavaMySQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true, true, false)
+	runGeneratedJavaReference(t, "mysql", true, true, "")
 }
 
 func TestJavaPostgreSQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "postgresql", true, true, true)
+	runGeneratedJavaReference(t, "postgresql", true, true, "0.1.0")
 }
 
 func TestJavaMySQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedJavaReference(t, "mysql", true, true, true)
+	runGeneratedJavaReference(t, "mysql", true, true, "0.1.0")
+}
+
+func TestJavaPostgreSQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "postgresql", true, true, "0.2.0")
+}
+
+func TestJavaMySQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaReference(t, "mysql", true, true, "0.2.0")
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -559,7 +567,9 @@ WORKFLOWS
 	}
 }
 
-func runGeneratedJavaReference(t *testing.T, database string, business, admin, tenancy bool) {
+func runGeneratedJavaReference(
+	t *testing.T, database string, business, admin bool, tenancyVersion string,
+) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -587,11 +597,12 @@ MODULES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if tenancy {
+	if tenancyVersion != "" {
 		capabilities = `  capabilities:
     - name: organization-tenancy
-      version: 0.1.0
+      version: TENANCY_VERSION
 `
+		capabilities = strings.ReplaceAll(capabilities, "TENANCY_VERSION", tenancyVersion)
 	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
@@ -628,8 +639,14 @@ MODULES
 	if admin {
 		wantChanges += 20
 	}
-	if tenancy {
+	if tenancyVersion != "" {
 		wantChanges += 9
+	}
+	if tenancyVersion == "0.2.0" {
+		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
 	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
@@ -640,7 +657,8 @@ MODULES
 	if admin && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
-	if tenancy && plannedData.CapabilityLock["organization-tenancy"] != "0.1.0" {
+	if tenancyVersion != "" &&
+		plannedData.CapabilityLock["organization-tenancy"] != tenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

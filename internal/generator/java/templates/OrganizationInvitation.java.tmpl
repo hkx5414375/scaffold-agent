@@ -1,0 +1,12 @@
+package {{.PackageName}}.tenancy;
+
+import java.time.Instant;
+
+public record OrganizationInvitation(
+        String id,
+        String organizationId,
+        String email,
+        String role,
+        String acceptanceToken,
+        Instant expiresAt,
+        Instant createdAt) {}

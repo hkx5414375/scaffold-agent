@@ -1,0 +1,216 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.Principal;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class TenancyMemberService {
+
+    private static final Duration INVITATION_LIFETIME = Duration.ofHours(72);
+    private static final int MAXIMUM_EMAIL_LENGTH = 254;
+    private static final Pattern EMAIL_PATTERN =
+            Pattern.compile(
+                    "^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+                            + "(?:[a-z0-9-]{0,61}[a-z0-9])?"
+                            + "(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$");
+
+    private final TenancyMemberRepository repository;
+    private final Clock clock;
+    private final SecureRandom secureRandom;
+
+    public TenancyMemberService(TenancyMemberRepository repository) {
+        this(repository, Clock.systemUTC(), new SecureRandom());
+    }
+
+    TenancyMemberService(TenancyMemberRepository repository, Clock clock) {
+        this(repository, clock, new SecureRandom());
+    }
+
+    TenancyMemberService(
+            TenancyMemberRepository repository, Clock clock, SecureRandom secureRandom) {
+        this.repository = repository;
+        this.clock = clock;
+        this.secureRandom = secureRandom;
+    }
+
+    public List<OrganizationMember> list(Principal actor) {
+        requireScopedActor(actor);
+        return List.copyOf(repository.listMembers(actor.organizationId()));
+    }
+
+    public OrganizationInvitation invite(String email, String role, Principal actor) {
+        requireScopedActor(actor);
+        String normalizedEmail = normalizeEmail(email);
+        String normalizedRole = normalizeRole(role);
+        Instant now = clock.instant();
+        String rawToken = secureToken();
+        OrganizationInvitation invitation =
+                new OrganizationInvitation(
+                        newId(),
+                        actor.organizationId(),
+                        normalizedEmail,
+                        normalizedRole,
+                        rawToken,
+                        now.plus(INVITATION_LIFETIME),
+                        now);
+        repository.createInvitation(
+                new TenancyMemberRepository.InvitationRecord(
+                        invitation.id(),
+                        invitation.organizationId(),
+                        invitation.email(),
+                        invitation.role(),
+                        tokenDigest(invitation.acceptanceToken()),
+                        actor.userId(),
+                        invitation.expiresAt(),
+                        invitation.createdAt()),
+                audit(
+                        actor.userId(),
+                        "tenancy.member.invite",
+                        actor.organizationId() + ":" + normalizedEmail,
+                        now));
+        return invitation;
+    }
+
+    public OrganizationMember accept(String rawToken, Principal actor) {
+        requireActor(actor);
+        if (rawToken == null || rawToken.isBlank() || rawToken.length() > 512) {
+            throw invitationInvalid();
+        }
+        String normalizedEmail;
+        try {
+            normalizedEmail = normalizeEmail(actor.email());
+        } catch (TenancyException exception) {
+            throw invitationInvalid();
+        }
+        Instant now = clock.instant();
+        return repository.acceptInvitation(
+                tokenDigest(rawToken.trim()),
+                normalizedEmail,
+                actor.userId(),
+                now,
+                audit(actor.userId(), "tenancy.invitation.accept", "", now));
+    }
+
+    public OrganizationMember changeRole(String userId, String role, Principal actor) {
+        requireScopedActor(actor);
+        String normalizedUserId = normalizeUserId(userId);
+        String normalizedRole = normalizeRole(role);
+        Instant now = clock.instant();
+        return repository.changeMemberRole(
+                actor.organizationId(),
+                normalizedUserId,
+                normalizedRole,
+                audit(
+                        actor.userId(),
+                        "tenancy.member.role.change",
+                        actor.organizationId() + ":" + normalizedUserId + ":" + normalizedRole,
+                        now));
+    }
+
+    public void remove(String userId, Principal actor) {
+        requireScopedActor(actor);
+        String normalizedUserId = normalizeUserId(userId);
+        Instant now = clock.instant();
+        repository.removeMember(
+                actor.organizationId(),
+                normalizedUserId,
+                audit(
+                        actor.userId(),
+                        "tenancy.member.remove",
+                        actor.organizationId() + ":" + normalizedUserId,
+                        now));
+    }
+
+    static String tokenDigest(String rawToken) {
+        try {
+            byte[] digest =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(rawToken.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static String normalizeEmail(String value) {
+        String normalized = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()
+                || normalized.length() > MAXIMUM_EMAIL_LENGTH
+                || !EMAIL_PATTERN.matcher(normalized).matches()) {
+            throw invalidInput("member email and role must be valid");
+        }
+        return normalized;
+    }
+
+    private static String normalizeRole(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (!"admin".equals(normalized) && !"user".equals(normalized)) {
+            throw invalidInput("member email and role must be valid");
+        }
+        return normalized;
+    }
+
+    private static String normalizeUserId(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.isEmpty() || normalized.length() > 191) {
+            throw invalidInput("organization member identifier must be valid");
+        }
+        return normalized;
+    }
+
+    private static void requireScopedActor(Principal actor) {
+        requireActor(actor);
+        if (actor.organizationId() == null || actor.organizationId().isBlank()) {
+            throw invalidCredentials();
+        }
+    }
+
+    private static void requireActor(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank()) {
+            throw invalidCredentials();
+        }
+    }
+
+    private static AuditEvent audit(String userId, String action, String target, Instant now) {
+        return new AuditEvent(newId(), userId, action, "succeeded", target, "", "", now);
+    }
+
+    private String secureToken() {
+        byte[] bytes = new byte[32];
+        secureRandom.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    private static TenancyException invalidInput(String message) {
+        return new TenancyException(TenancyException.Kind.MEMBER_INVALID, message);
+    }
+
+    private static TenancyException invitationInvalid() {
+        return new TenancyException(
+                TenancyException.Kind.INVITATION_INVALID, "invitation is invalid or expired");
+    }
+
+    private static IdentityException invalidCredentials() {
+        return new IdentityException(
+                IdentityException.Kind.INVALID_CREDENTIALS,
+                "valid session or bearer credentials are required");
+    }
+}

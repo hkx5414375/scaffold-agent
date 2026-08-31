@@ -41,7 +41,7 @@ class IdentityDatabaseIntegrationTest {
                     new DriverManagerDataSource(applicationUrl, username, password);
             Flyway flyway = Flyway.configure().dataSource(dataSource).load();
             assertThat(flyway.migrate().migrationsExecuted)
-                    .isEqualTo({{if .Business}}{{if .Tenancy}}3{{else}}2{{end}}{{else}}{{if .Tenancy}}2{{else}}1{{end}}{{end}});
+                    .isEqualTo({{.MigrationCount}});
             assertThat(flyway.migrate().migrationsExecuted).isZero();
 
             JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);

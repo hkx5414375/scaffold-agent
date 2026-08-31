@@ -1,0 +1,121 @@
+package {{.PackageName}}.tenancy;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class TenancyMemberServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final Principal ADMIN =
+            new Principal("admin-1", "admin@example.com", "admin", "session", "organization-1");
+
+    @Test
+    void invitationReturnsRawTokenButRepositoryReceivesOnlyDigest() {
+        FakeRepository repository = new FakeRepository();
+        TenancyMemberService service =
+                new TenancyMemberService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        OrganizationInvitation invitation =
+                service.invite(" Member@Example.com ", "user", ADMIN);
+
+        assertThat(invitation.email()).isEqualTo("member@example.com");
+        assertThat(invitation.acceptanceToken()).isNotBlank();
+        assertThat(invitation.expiresAt()).isEqualTo(NOW.plusSeconds(72 * 60 * 60));
+        assertThat(repository.invitation.tokenHash())
+                .isEqualTo(TenancyMemberService.tokenDigest(invitation.acceptanceToken()))
+                .doesNotContain(invitation.acceptanceToken());
+    }
+
+    @Test
+    void acceptanceUsesAuthenticatedNormalizedEmail() {
+        FakeRepository repository = new FakeRepository();
+        TenancyMemberService service =
+                new TenancyMemberService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+        Principal invited =
+                new Principal("user-1", "MEMBER@example.com", "user", "session", "");
+
+        OrganizationMember member = service.accept(" raw-token ", invited);
+
+        assertThat(member.organizationId()).isEqualTo("organization-1");
+        assertThat(repository.acceptedEmail).isEqualTo("member@example.com");
+        assertThat(repository.acceptedUserId).isEqualTo("user-1");
+        assertThat(repository.acceptedHash)
+                .isEqualTo(TenancyMemberService.tokenDigest("raw-token"));
+    }
+
+    @Test
+    void propagatesLastAdministratorProtection() {
+        FakeRepository repository = new FakeRepository();
+        repository.failure =
+                new TenancyException(
+                        TenancyException.Kind.LAST_ADMINISTRATOR,
+                        "organization must retain an administrator");
+        TenancyMemberService service =
+                new TenancyMemberService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(() -> service.changeRole("admin-1", "user", ADMIN))
+                .isSameAs(repository.failure);
+        assertThatThrownBy(() -> service.remove("admin-1", ADMIN))
+                .isSameAs(repository.failure);
+    }
+
+    private static final class FakeRepository implements TenancyMemberRepository {
+
+        private InvitationRecord invitation;
+        private String acceptedHash;
+        private String acceptedEmail;
+        private String acceptedUserId;
+        private TenancyException failure;
+
+        @Override
+        public List<OrganizationMember> listMembers(String organizationId) {
+            return List.of(member("user-1", "member@example.com", "user"));
+        }
+
+        @Override
+        public void createInvitation(InvitationRecord value, AuditEvent auditEvent) {
+            invitation = value;
+        }
+
+        @Override
+        public OrganizationMember acceptInvitation(
+                String tokenHash,
+                String email,
+                String userId,
+                Instant acceptedAt,
+                AuditEvent auditEvent) {
+            acceptedHash = tokenHash;
+            acceptedEmail = email;
+            acceptedUserId = userId;
+            return member(userId, email, "user");
+        }
+
+        @Override
+        public OrganizationMember changeMemberRole(
+                String organizationId, String userId, String role, AuditEvent auditEvent) {
+            if (failure != null) {
+                throw failure;
+            }
+            return member(userId, "member@example.com", role);
+        }
+
+        @Override
+        public void removeMember(String organizationId, String userId, AuditEvent auditEvent) {
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        private static OrganizationMember member(String userId, String email, String role) {
+            return new OrganizationMember("organization-1", userId, email, role, NOW);
+        }
+    }
+}

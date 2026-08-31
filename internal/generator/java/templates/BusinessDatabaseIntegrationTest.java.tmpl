@@ -50,7 +50,7 @@ class {{.Business.EntityClass}}DatabaseIntegrationTest {
             DriverManagerDataSource dataSource =
                     new DriverManagerDataSource(applicationUrl, username, password);
             Flyway flyway = Flyway.configure().dataSource(dataSource).load();
-            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{if .Tenancy}}3{{else}}2{{end}});
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
             assertThat(flyway.migrate().migrationsExecuted).isZero();
 
             JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);

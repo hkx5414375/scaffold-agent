@@ -1,0 +1,110 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class OrganizationMemberController {
+
+    private static final String READ_PERMISSION = "tenancy:members:read";
+    private static final String MANAGE_PERMISSION = "tenancy:members:manage";
+
+    private final TenancyMemberService service;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring service is a process-scoped constructor dependency")
+    public OrganizationMemberController(TenancyMemberService service) {
+        this.service = service;
+    }
+
+    @GetMapping("/api/v1/organizations/{organizationId}/members")
+    @RequirePermission(value = READ_PERMISSION, tenantScoped = true)
+    public OrganizationMemberPage list(
+            @PathVariable String organizationId,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        requireMatchingOrganization(organizationId, actor);
+        return new OrganizationMemberPage(service.list(actor));
+    }
+
+    @PostMapping("/api/v1/organizations/{organizationId}/invitations")
+    @ResponseStatus(HttpStatus.CREATED)
+    @RequirePermission(value = MANAGE_PERMISSION, tenantScoped = true)
+    public OrganizationInvitation invite(
+            @PathVariable String organizationId,
+            @Valid @RequestBody CreateInvitationRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        requireMatchingOrganization(organizationId, actor);
+        return service.invite(input.email(), input.role(), actor);
+    }
+
+    @PostMapping("/api/v1/organization-invitations/accept")
+    public OrganizationMember accept(
+            @Valid @RequestBody AcceptInvitationRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.accept(input.token(), actor);
+    }
+
+    @PatchMapping("/api/v1/organizations/{organizationId}/members/{userId}")
+    @RequirePermission(value = MANAGE_PERMISSION, tenantScoped = true)
+    public OrganizationMember changeRole(
+            @PathVariable String organizationId,
+            @PathVariable String userId,
+            @Valid @RequestBody ChangeRoleRequest input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        requireMatchingOrganization(organizationId, actor);
+        return service.changeRole(userId, input.role(), actor);
+    }
+
+    @DeleteMapping("/api/v1/organizations/{organizationId}/members/{userId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    @RequirePermission(value = MANAGE_PERMISSION, tenantScoped = true)
+    public void remove(
+            @PathVariable String organizationId,
+            @PathVariable String userId,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        requireMatchingOrganization(organizationId, actor);
+        service.remove(userId, actor);
+    }
+
+    private static void requireMatchingOrganization(String organizationId, Principal actor) {
+        if (actor.organizationId() == null
+                || !actor.organizationId().equals(organizationId == null ? "" : organizationId.trim())) {
+            throw new TenancyException(
+                    TenancyException.Kind.MEMBER_NOT_FOUND,
+                    "organization member was not found");
+        }
+    }
+
+    public record CreateInvitationRequest(
+            @NotBlank @Email @Size(max = 254) String email,
+            @NotBlank @Pattern(regexp = "admin|user") String role) {}
+
+    public record AcceptInvitationRequest(@NotBlank @Size(max = 512) String token) {}
+
+    public record ChangeRoleRequest(
+            @NotBlank @Pattern(regexp = "admin|user") String role) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Member lists are immutable snapshots created by the service")
+    public record OrganizationMemberPage(List<OrganizationMember> items) {}
+}

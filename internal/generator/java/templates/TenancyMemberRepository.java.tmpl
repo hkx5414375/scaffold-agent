@@ -1,0 +1,34 @@
+package {{.PackageName}}.tenancy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import java.time.Instant;
+import java.util.List;
+
+public interface TenancyMemberRepository {
+
+    List<OrganizationMember> listMembers(String organizationId);
+
+    void createInvitation(InvitationRecord invitation, AuditEvent auditEvent);
+
+    OrganizationMember acceptInvitation(
+            String tokenHash,
+            String email,
+            String userId,
+            Instant acceptedAt,
+            AuditEvent auditEvent);
+
+    OrganizationMember changeMemberRole(
+            String organizationId, String userId, String role, AuditEvent auditEvent);
+
+    void removeMember(String organizationId, String userId, AuditEvent auditEvent);
+
+    record InvitationRecord(
+            String id,
+            String organizationId,
+            String email,
+            String role,
+            String tokenHash,
+            String invitedBy,
+            Instant expiresAt,
+            Instant createdAt) {}
+}

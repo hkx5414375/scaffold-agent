@@ -2,7 +2,29 @@ package {{.PackageName}}.tenancy;
 
 public final class TenancyException extends RuntimeException {
 
+    public enum Kind {
+        INVALID_INPUT,
+{{- if .TenancyMembers}}
+        MEMBER_INVALID,
+        INVITATION_INVALID,
+        MEMBER_CONFLICT,
+        LAST_ADMINISTRATOR,
+        MEMBER_NOT_FOUND
+{{- end}}
+    }
+
+    private final Kind kind;
+
     public TenancyException(String message) {
+        this(Kind.INVALID_INPUT, message);
+    }
+
+    public TenancyException(Kind kind, String message) {
         super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
     }
 }
