@@ -1,0 +1,127 @@
+// Package tenancy owns organization membership and tenant authorization.
+package tenancy
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+var (
+	// ErrInvalidInput means organization data is malformed.
+	ErrInvalidInput = errors.New("organization input is invalid")
+	// ErrNotFound hides persistence-specific missing membership behavior.
+	ErrNotFound = errors.New("organization membership not found")
+)
+
+// Organization is one tenant boundary visible to a member.
+type Organization struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Role      string    `json:"role,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Membership grants one identity role inside an organization.
+type Membership struct {
+	OrganizationID string
+	UserID         string
+	Role           string
+	CreatedAt      time.Time
+}
+
+// Store persists organizations, memberships, permissions, and denied audit events.
+type Store interface {
+	CreateOrganization(context.Context, Organization, Membership, identity.AuditEvent) error
+	ListOrganizations(context.Context, string) ([]Organization, error)
+	MembershipRole(context.Context, string, string) (string, error)
+	HasPermission(context.Context, string, string) (bool, error)
+	AppendAudit(context.Context, identity.AuditEvent) error
+}
+
+// Service implements organization and tenant-authorization use cases.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns an organization and tenant authorization service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Create creates an organization and makes the creator its administrator atomically.
+func (service *Service) Create(ctx context.Context, name string, actor identity.Principal) (Organization, error) {
+	name = strings.TrimSpace(name)
+	if actor.UserID == "" || name == "" || len(name) > 120 {
+		return Organization{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	organization := Organization{ID: rand.Text(), Name: name, Role: "admin", CreatedAt: now}
+	membership := Membership{
+		OrganizationID: organization.ID, UserID: actor.UserID,
+		Role: "admin", CreatedAt: now,
+	}
+	audit := identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: "tenancy.organization:create",
+		Outcome: "succeeded", Target: organization.ID, CreatedAt: now,
+	}
+	if err := service.store.CreateOrganization(ctx, organization, membership, audit); err != nil {
+		return Organization{}, fmt.Errorf("create organization: %w", err)
+	}
+	return organization, nil
+}
+
+// List returns every organization visible to the authenticated identity.
+func (service *Service) List(ctx context.Context, actor identity.Principal) ([]Organization, error) {
+	if actor.UserID == "" {
+		return nil, identity.ErrInvalidCredentials
+	}
+	organizations, err := service.store.ListOrganizations(ctx, actor.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("list organizations: %w", err)
+	}
+	return organizations, nil
+}
+
+// Authorize resolves organization membership and checks the member role's permission.
+func (service *Service) Authorize(ctx context.Context, actor identity.Principal, organizationID, permission, ipAddress, userAgent string) (identity.Principal, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if actor.UserID == "" || organizationID == "" || permission == "" {
+		return identity.Principal{}, identity.ErrForbidden
+	}
+	role, err := service.store.MembershipRole(ctx, organizationID, actor.UserID)
+	if errors.Is(err, ErrNotFound) {
+		return identity.Principal{}, service.deny(ctx, actor, organizationID, permission, ipAddress, userAgent)
+	}
+	if err != nil {
+		return identity.Principal{}, fmt.Errorf("resolve organization membership: %w", err)
+	}
+	allowed, err := service.store.HasPermission(ctx, role, permission)
+	if err != nil {
+		return identity.Principal{}, fmt.Errorf("check tenant permission: %w", err)
+	}
+	if !allowed {
+		return identity.Principal{}, service.deny(ctx, actor, organizationID, permission, ipAddress, userAgent)
+	}
+	actor.OrganizationID = organizationID
+	actor.Role = role
+	return actor, nil
+}
+
+func (service *Service) deny(ctx context.Context, actor identity.Principal, organizationID, permission, ipAddress, userAgent string) error {
+	event := identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: "tenancy.authorization",
+		Outcome: "denied", Target: organizationID + ":" + permission,
+		IPAddress: ipAddress, UserAgent: userAgent, CreatedAt: service.now().UTC(),
+	}
+	if err := service.store.AppendAudit(ctx, event); err != nil {
+		return fmt.Errorf("record denied tenant authorization: %w", err)
+	}
+	return identity.ErrForbidden
+}

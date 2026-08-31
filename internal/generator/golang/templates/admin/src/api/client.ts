@@ -23,6 +23,12 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   if (init.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+{{- if .Tenancy}}
+  if (typeof localStorage !== "undefined") {
+    const organizationId = localStorage.getItem("scaffold.organization_id");
+    if (organizationId) headers.set("X-Organization-ID", organizationId);
+  }
+{{- end}}
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
     headers,

@@ -15,7 +15,7 @@ func TestCreateUpdateDeleteUsesVersionsAndAudit(t *testing.T) {
 	store := &memoryStore{}
 	service := NewService(store)
 	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
-	actor := identity.Principal{UserID: "user-1", Role: "admin"}
+	actor := identity.Principal{UserID: "user-1", Role: "admin"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
 {{- range .Business.Fields}}
 	first{{.GoName}} := {{.SampleOne}}
 	second{{.GoName}} := {{.SampleTwo}}
@@ -77,14 +77,14 @@ func (store *memoryStore) Create(_ context.Context, value {{.Business.EntityType
 	return nil
 }
 
-func (store *memoryStore) Get(_ context.Context, id string) ({{.Business.EntityType}}, error) {
-	if !store.exists || store.value.ID != id {
+func (store *memoryStore) Get(_ context.Context, organizationID, id string) ({{.Business.EntityType}}, error) {
+	if !store.exists || store.value.ID != id{{if .Tenancy}} || store.value.OrganizationID != organizationID{{end}} {
 		return {{.Business.EntityType}}{}, ErrNotFound
 	}
 	return store.value, nil
 }
 
-func (store *memoryStore) List(context.Context, string, int) ([]{{.Business.EntityType}}, string, error) {
+func (store *memoryStore) List(context.Context, string, string, int) ([]{{.Business.EntityType}}, string, error) {
 	if !store.exists {
 		return nil, "", nil
 	}
@@ -92,7 +92,7 @@ func (store *memoryStore) List(context.Context, string, int) ([]{{.Business.Enti
 }
 
 func (store *memoryStore) Update(_ context.Context, value {{.Business.EntityType}}, audit identity.AuditEvent) ({{.Business.EntityType}}, error) {
-	if !store.exists || store.value.ID != value.ID || store.value.Version != value.Version {
+	if !store.exists || store.value.ID != value.ID || store.value.Version != value.Version{{if .Tenancy}} || store.value.OrganizationID != value.OrganizationID{{end}} {
 		return {{.Business.EntityType}}{}, ErrConflict
 	}
 	value.Version++
@@ -101,8 +101,8 @@ func (store *memoryStore) Update(_ context.Context, value {{.Business.EntityType
 	return value, nil
 }
 
-func (store *memoryStore) Delete(_ context.Context, id string, version int64, audit identity.AuditEvent) error {
-	if !store.exists || store.value.ID != id || store.value.Version != version {
+func (store *memoryStore) Delete(_ context.Context, organizationID, id string, version int64, audit identity.AuditEvent) error {
+	if !store.exists || store.value.ID != id || store.value.Version != version{{if .Tenancy}} || store.value.OrganizationID != organizationID{{end}} {
 		return ErrConflict
 	}
 	store.exists, store.audit = false, audit

@@ -1,0 +1,92 @@
+package tenancy
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestCreateAndAuthorizeOrganization(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{allowed: true}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "user-1", Email: "owner@example.com", Role: "user"}
+	organization, err := service.Create(context.Background(), " Acme ", actor)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if organization.ID == "" || organization.Name != "Acme" || organization.Role != "admin" || store.membership.Role != "admin" {
+		t.Fatalf("Create() = %#v, membership = %#v", organization, store.membership)
+	}
+	authorized, err := service.Authorize(context.Background(), actor, organization.ID, "tasks:task:read", "", "")
+	if err != nil {
+		t.Fatalf("Authorize() error = %v", err)
+	}
+	if authorized.OrganizationID != organization.ID || authorized.Role != "admin" {
+		t.Fatalf("Authorize() = %#v", authorized)
+	}
+	organizations, err := service.List(context.Background(), actor)
+	if err != nil || len(organizations) != 1 || organizations[0].ID != organization.ID {
+		t.Fatalf("List() = %#v, %v", organizations, err)
+	}
+}
+
+func TestAuthorizeDeniesUnknownMembershipAndAudits(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{membershipError: ErrNotFound}
+	service := NewService(store)
+	actor := identity.Principal{UserID: "user-1", Role: "user"}
+	_, err := service.Authorize(context.Background(), actor, "organization-2", "tasks:task:read", "127.0.0.1", "test")
+	if !errors.Is(err, identity.ErrForbidden) {
+		t.Fatalf("Authorize() error = %v, want ErrForbidden", err)
+	}
+	if store.audit.Outcome != "denied" || store.audit.Target != "organization-2:tasks:task:read" {
+		t.Fatalf("Authorize() audit = %#v", store.audit)
+	}
+}
+
+type memoryStore struct {
+	organization    Organization
+	membership      Membership
+	audit           identity.AuditEvent
+	allowed         bool
+	membershipError error
+}
+
+func (store *memoryStore) CreateOrganization(_ context.Context, organization Organization, membership Membership, audit identity.AuditEvent) error {
+	store.organization, store.membership, store.audit = organization, membership, audit
+	return nil
+}
+
+func (store *memoryStore) ListOrganizations(_ context.Context, userID string) ([]Organization, error) {
+	if store.membership.UserID != userID {
+		return nil, nil
+	}
+	organization := store.organization
+	organization.Role = store.membership.Role
+	return []Organization{organization}, nil
+}
+
+func (store *memoryStore) MembershipRole(context.Context, string, string) (string, error) {
+	if store.membershipError != nil {
+		return "", store.membershipError
+	}
+	return store.membership.Role, nil
+}
+
+func (store *memoryStore) HasPermission(context.Context, string, string) (bool, error) {
+	return store.allowed, nil
+}
+
+func (store *memoryStore) AppendAudit(_ context.Context, audit identity.AuditEvent) error {
+	store.audit = audit
+	return nil
+}
+
+var _ Store = (*memoryStore)(nil)

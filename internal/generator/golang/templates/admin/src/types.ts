@@ -3,14 +3,32 @@ export interface Principal {
   email: string;
   role: string;
   method: "session" | "token";
+  organization_id?: string;
 }
 
 export interface PrincipalResponse {
   principal: Principal;
 }
+{{- if .Tenancy}}
 
-{{if .Business}}export interface BusinessEntity {
+export interface Organization {
   id: string;
+  name: string;
+  role: string;
+  created_at: string;
+}
+
+export interface OrganizationPage {
+  items: Organization[];
+}
+{{- end}}
+{{- if .Business}}
+
+export interface BusinessEntity {
+  id: string;
+{{- if .Tenancy}}
+  organization_id: string;
+{{- end}}
 {{- range .Business.Fields}}
   {{.Name}}{{if not .Required}}?{{end}}: {{.TypeScriptType}};
 {{- end}}

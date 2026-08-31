@@ -14,11 +14,19 @@ on duplicate key update role_code = role_code;
 
 create table if not exists {{sql .Business.TableName}} (
     id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- end}}
 {{- range .Business.Fields}}
-    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
+    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if and .Unique (not $.Tenancy)}} unique{{end}},
 {{- end}}
     version bigint not null check (version > 0),
     created_at datetime(6) not null,
     updated_at datetime(6) not null,
-    index {{sql (printf "%s_updated_idx" .Business.TableName)}} (updated_at desc)
+    index {{sql (printf "%s_updated_idx" .Business.TableName)}} (updated_at desc){{if .Tenancy}},
+    index {{sql (printf "%s_organization_idx" .Business.TableName)}} (organization_id, id),
+    constraint {{sql (printf "%s_organization_fk" .Business.TableName)}} foreign key (organization_id) references organizations (id) on delete cascade{{end}}
 ) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+{{if .Tenancy}}{{range .Business.Fields}}{{if .Unique}}
+create unique index {{sql (printf "%s_%s_tenant_unique" $.Business.TableName .Name)}} on {{sql $.Business.TableName}} (organization_id, {{sql .Name}});
+{{end}}{{end}}{{end}}

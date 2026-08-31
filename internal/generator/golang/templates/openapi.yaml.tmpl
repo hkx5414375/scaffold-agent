@@ -107,8 +107,55 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "500":
           $ref: "#/components/responses/ErrorResponse"
+{{if .Tenancy}}
+  /api/v1/organizations:
+    get:
+      operationId: listOrganizations
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Organizations visible to the current identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: createOrganization
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationWrite"
+      responses:
+        "201":
+          description: Organization created with the current identity as administrator
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
     post:
       operationId: create{{.Business.EntityType}}
       x-required-permission: {{.Business.PermissionPrefix}}:create
@@ -174,6 +221,9 @@ paths:
   {{.Business.RoutePath}}/{id}:
     parameters:
       - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
     get:
       operationId: get{{.Business.EntityType}}
       x-required-permission: {{.Business.PermissionPrefix}}:read
@@ -269,6 +319,14 @@ components:
       required: true
       schema:
         type: string
+{{if .Tenancy}}
+    OrganizationId:
+      name: X-Organization-ID
+      in: header
+      required: true
+      schema:
+        type: string
+{{end}}
   responses:
     ErrorResponse:
       description: Stable public error
@@ -303,6 +361,8 @@ components:
         method:
           type: string
           enum: [session, token]
+        organization_id:
+          type: string
     PrincipalResponse:
       type: object
       required: [principal]
@@ -329,11 +389,48 @@ components:
           type: string
           minLength: 1
           maxLength: 80
+{{if .Tenancy}}
+    Organization:
+      type: object
+      required: [id, name, role, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        role:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    OrganizationWrite:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    OrganizationPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Organization"
+{{end}}
 {{if .Business}}
     {{.Business.EntityType}}:
       type: object
       required:
         - id
+{{- if .Tenancy}}
+        - organization_id
+{{- end}}
 {{- range .Business.RequiredFields}}
         - {{.}}
 {{- end}}
@@ -343,6 +440,10 @@ components:
       properties:
         id:
           type: string
+{{- if .Tenancy}}
+        organization_id:
+          type: string
+{{- end}}
 {{- range .Business.Fields}}
         {{.Name}}:
           type: {{.OpenAPIType}}

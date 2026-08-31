@@ -19,6 +19,11 @@ import (
 	"{{.ModulePath}}/internal/platform/httpserver"
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformdatabase "{{.ModulePath}}/internal/platform/{{.Database.PackageName}}"
+{{- if .Tenancy}}
+	"{{.ModulePath}}/internal/tenancy"
+	tenancyhttp "{{.ModulePath}}/internal/tenancy/httpapi"
+	tenancydatabase "{{.ModulePath}}/internal/tenancy/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Business}}
 	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	{{.Business.PackageName}}http "{{.ModulePath}}/internal/{{.Business.ModuleName}}/httpapi"
@@ -61,16 +66,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
+{{- if .Tenancy}}
+	tenancyService := tenancy.NewService(tenancydatabase.New(pool))
+	identityAPI := httpapi.New(identityService, secureCookies, httpapi.WithAuthorizer(tenancyService))
+	tenancyAPI := tenancyhttp.New(tenancyService)
+{{- else}}
 	identityAPI := httpapi.New(identityService, secureCookies)
-	registerRoutes := identityAPI.Register
+{{- end}}
 {{- if .Business}}
 	{{.Business.PackageName}}Service := {{.Business.PackageName}}.NewService({{.Business.PackageName}}database.New(pool))
 	{{.Business.PackageName}}API := {{.Business.PackageName}}http.New({{.Business.PackageName}}Service)
-	registerRoutes = func(mux *http.ServeMux) {
+	{{- end}}
+	registerRoutes := func(mux *http.ServeMux) {
 		identityAPI.Register(mux)
-		{{.Business.PackageName}}API.Register(mux, identityAPI)
-	}
+{{- if .Tenancy}}
+		tenancyAPI.Register(mux, identityAPI)
 {{- end}}
+{{- if .Business}}
+		{{.Business.PackageName}}API.Register(mux, identityAPI)
+{{- end}}
+	}
 	address := strings.TrimSpace(os.Getenv("HTTP_ADDRESS"))
 	if address == "" {
 		address = ":8080"

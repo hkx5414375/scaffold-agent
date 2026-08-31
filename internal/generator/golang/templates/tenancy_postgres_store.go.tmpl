@@ -1,0 +1,136 @@
+// Package postgres persists organizations and memberships in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+const cleanupTimeout = 5 * time.Second
+
+// Store is the PostgreSQL organization repository and tenant authorizer.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL organization store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+func (store *Store) CreateOrganization(ctx context.Context, organization tenancy.Organization, membership tenancy.Membership, audit identity.AuditEvent) error {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin organization creation: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `
+		insert into organizations (id, name, created_by, created_at, updated_at)
+		values ($1, $2, $3, $4, $4)`, organization.ID, organization.Name, membership.UserID, organization.CreatedAt); err != nil {
+		return rollback(transaction, fmt.Errorf("insert organization: %w", err))
+	}
+	if _, err := transaction.Exec(ctx, `
+		insert into organization_memberships (organization_id, user_id, role_code, created_at)
+		values ($1, $2, $3, $4)`, membership.OrganizationID, membership.UserID, membership.Role, membership.CreatedAt); err != nil {
+		return rollback(transaction, fmt.Errorf("insert organization membership: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit organization creation: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) ListOrganizations(ctx context.Context, userID string) ([]tenancy.Organization, error) {
+	rows, err := store.pool.Query(ctx, `
+		select organizations.id, organizations.name, memberships.role_code, organizations.created_at
+		from organization_memberships memberships
+		join organizations on organizations.id = memberships.organization_id
+		where memberships.user_id = $1
+		order by organizations.name, organizations.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query organizations: %w", err)
+	}
+	defer rows.Close()
+	organizations := make([]tenancy.Organization, 0)
+	for rows.Next() {
+		var organization tenancy.Organization
+		if err := rows.Scan(&organization.ID, &organization.Name, &organization.Role, &organization.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan organization: %w", err)
+		}
+		organizations = append(organizations, organization)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read organizations: %w", err)
+	}
+	return organizations, nil
+}
+
+func (store *Store) MembershipRole(ctx context.Context, organizationID, userID string) (string, error) {
+	var role string
+	if err := store.pool.QueryRow(ctx, `
+		select role_code from organization_memberships
+		where organization_id = $1 and user_id = $2`, organizationID, userID).Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", tenancy.ErrNotFound
+		}
+		return "", fmt.Errorf("scan organization membership: %w", err)
+	}
+	return role, nil
+}
+
+func (store *Store) HasPermission(ctx context.Context, role, permission string) (bool, error) {
+	var allowed bool
+	if err := store.pool.QueryRow(ctx, `
+		select exists(
+			select 1 from identity_role_permissions
+			where role_code = $1 and permission_code = $2
+		)`, role, permission).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check tenant permission: %w", err)
+	}
+	return allowed, nil
+}
+
+func (store *Store) AppendAudit(ctx context.Context, event identity.AuditEvent) error {
+	_, err := store.pool.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append tenant audit event: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {
+	_, err := transaction.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append organization audit event: %w", err)
+	}
+	return nil
+}
+
+func rollback(transaction pgx.Tx, cause error) error {
+	rollbackContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := transaction.Rollback(rollbackContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return errors.Join(cause, fmt.Errorf("roll back organization creation: %w", err))
+	}
+	return cause
+}
+
+var _ tenancy.Store = (*Store)(nil)

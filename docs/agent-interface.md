@@ -35,6 +35,13 @@ silently rounds database identifiers or counters. Before accepting a generated
 administration change, run its locked install, lint, unit tests, type check,
 production build, and format check as documented in the generated README.
 
+Selecting `organization-tenancy` version `0.1.0` adds organization creation and
+discovery, membership-scoped permission checks, dialect-specific persistence,
+tenant-aware administration state, and organization predicates on every generated
+business mutation and query. Agents should select an organization once and send
+its identifier through `X-Organization-ID`; they do not need to rediscover the
+tenant propagation rules from handlers or SQL stores.
+
 ## STDIO protocol
 
 Run the server with:

@@ -23,7 +23,8 @@ var (
 
 // {{.Business.EntityType}} is the persisted business entity.
 type {{.Business.EntityType}} struct {
-	ID string `json:"id"`
+	ID             string `json:"id"`
+	OrganizationID string `json:"organization_id,omitempty"`
 {{- range .Business.Fields}}
 	{{.GoName}} {{.EntityType}} `json:"{{.Name}}{{.JSONOptions}}{{if not .Required}},omitempty{{end}}"`
 {{- end}}
@@ -54,10 +55,10 @@ type Page struct {
 // Store persists {{.Business.EntityName}} mutations and their audit event atomically.
 type Store interface {
 	Create(context.Context, {{.Business.EntityType}}, identity.AuditEvent) error
-	Get(context.Context, string) ({{.Business.EntityType}}, error)
-	List(context.Context, string, int) ([]{{.Business.EntityType}}, string, error)
+	Get(context.Context, string, string) ({{.Business.EntityType}}, error)
+	List(context.Context, string, string, int) ([]{{.Business.EntityType}}, string, error)
 	Update(context.Context, {{.Business.EntityType}}, identity.AuditEvent) ({{.Business.EntityType}}, error)
-	Delete(context.Context, string, int64, identity.AuditEvent) error
+	Delete(context.Context, string, string, int64, identity.AuditEvent) error
 }
 
 // Service implements {{.Business.EntityName}} use cases independently from HTTP and PostgreSQL.
@@ -73,14 +74,14 @@ func NewService(store Store) *Service {
 
 // Create validates and persists one {{.Business.EntityName}} with an audit event.
 func (service *Service) Create(ctx context.Context, input WriteInput, actor identity.Principal) ({{.Business.EntityType}}, error) {
-	if actor.UserID == "" {
+	if actor.UserID == ""{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return {{.Business.EntityType}}{}, identity.ErrInvalidCredentials
 	}
 	if err := validateWrite(input); err != nil {
 		return {{.Business.EntityType}}{}, err
 	}
 	now := service.now().UTC()
-	value := {{.Business.EntityType}}{ID: rand.Text(), Version: 1, CreatedAt: now, UpdatedAt: now}
+	value := {{.Business.EntityType}}{ID: rand.Text(), OrganizationID: actor.OrganizationID, Version: 1, CreatedAt: now, UpdatedAt: now}
 	assign(&value, input)
 	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:create", value.ID, now)
 	if err := service.store.Create(ctx, value, audit); err != nil {
@@ -90,12 +91,12 @@ func (service *Service) Create(ctx context.Context, input WriteInput, actor iden
 }
 
 // Get returns one {{.Business.EntityName}} by identifier.
-func (service *Service) Get(ctx context.Context, id string) ({{.Business.EntityType}}, error) {
+func (service *Service) Get(ctx context.Context, id string, actor identity.Principal) ({{.Business.EntityType}}, error) {
 	id = strings.TrimSpace(id)
-	if id == "" {
+	if id == "" || actor.UserID == ""{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return {{.Business.EntityType}}{}, ErrInvalidInput
 	}
-	value, err := service.store.Get(ctx, id)
+	value, err := service.store.Get(ctx, actor.OrganizationID, id)
 	if err != nil {
 		return {{.Business.EntityType}}{}, fmt.Errorf("get {{.Business.EntityName}}: %w", err)
 	}
@@ -103,11 +104,11 @@ func (service *Service) Get(ctx context.Context, id string) ({{.Business.EntityT
 }
 
 // List returns a bounded keyset page.
-func (service *Service) List(ctx context.Context, cursor string, limit int) (Page, error) {
-	if limit < 1 || limit > 100 {
+func (service *Service) List(ctx context.Context, cursor string, limit int, actor identity.Principal) (Page, error) {
+	if limit < 1 || limit > 100 || actor.UserID == ""{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return Page{}, ErrInvalidInput
 	}
-	items, nextCursor, err := service.store.List(ctx, cursor, limit)
+	items, nextCursor, err := service.store.List(ctx, actor.OrganizationID, cursor, limit)
 	if err != nil {
 		return Page{}, fmt.Errorf("list {{.Business.EntityName}}: %w", err)
 	}
@@ -116,7 +117,7 @@ func (service *Service) List(ctx context.Context, cursor string, limit int) (Pag
 
 // Update replaces mutable fields when the caller's version matches.
 func (service *Service) Update(ctx context.Context, id string, input UpdateInput, actor identity.Principal) ({{.Business.EntityType}}, error) {
-	if actor.UserID == "" {
+	if actor.UserID == ""{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return {{.Business.EntityType}}{}, identity.ErrInvalidCredentials
 	}
 	id = strings.TrimSpace(id)
@@ -126,7 +127,7 @@ func (service *Service) Update(ctx context.Context, id string, input UpdateInput
 	if err := validateWrite(input.WriteInput); err != nil {
 		return {{.Business.EntityType}}{}, err
 	}
-	value := {{.Business.EntityType}}{ID: id, Version: input.Version, UpdatedAt: service.now().UTC()}
+	value := {{.Business.EntityType}}{ID: id, OrganizationID: actor.OrganizationID, Version: input.Version, UpdatedAt: service.now().UTC()}
 	assign(&value, input.WriteInput)
 	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:update", id, value.UpdatedAt)
 	updated, err := service.store.Update(ctx, value, audit)
@@ -138,15 +139,15 @@ func (service *Service) Update(ctx context.Context, id string, input UpdateInput
 
 // Delete removes one {{.Business.EntityName}} when the caller's version matches.
 func (service *Service) Delete(ctx context.Context, id string, version int64, actor identity.Principal) error {
-	if actor.UserID == "" {
+	if actor.UserID == ""{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return identity.ErrInvalidCredentials
 	}
 	id = strings.TrimSpace(id)
-	if id == "" || version < 1 {
+	if id == "" || version < 1{{if .Tenancy}} || actor.OrganizationID == ""{{end}} {
 		return ErrInvalidInput
 	}
 	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:delete", id, service.now().UTC())
-	if err := service.store.Delete(ctx, id, version, audit); err != nil {
+	if err := service.store.Delete(ctx, actor.OrganizationID, id, version, audit); err != nil {
 		return fmt.Errorf("delete {{.Business.EntityName}}: %w", err)
 	}
 	return nil

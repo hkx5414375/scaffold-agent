@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net"
@@ -16,17 +17,43 @@ const (
 	sessionCookieName     = "scaffold_session"
 	sessionMaxAge         = 24 * 60 * 60
 	createTokenPermission = "identity:token:create"
+	organizationHeader    = "X-Organization-ID"
 )
+
+// Authorizer can replace global role checks with a capability-specific scope check.
+type Authorizer interface {
+	Authorize(context.Context, identity.Principal, string, string, string, string) (identity.Principal, error)
+}
+
+// Option configures optional identity transport integrations.
+type Option func(*Handler)
 
 // Handler maps HTTP requests to the identity application service.
 type Handler struct {
 	service       *identity.Service
 	secureCookies bool
+	authorizer    Authorizer
 }
 
 // New returns an identity HTTP adapter.
-func New(service *identity.Service, secureCookies bool) *Handler {
-	return &Handler{service: service, secureCookies: secureCookies}
+func New(service *identity.Service, secureCookies bool, options ...Option) *Handler {
+	handler := &Handler{
+		service: service, secureCookies: secureCookies,
+		authorizer: globalAuthorizer{service: service},
+	}
+	for _, option := range options {
+		option(handler)
+	}
+	return handler
+}
+
+// WithAuthorizer installs a scoped permission checker for protected business routes.
+func WithAuthorizer(authorizer Authorizer) Option {
+	return func(handler *Handler) {
+		if authorizer != nil {
+			handler.authorizer = authorizer
+		}
+	}
 }
 
 // Register adds all identity routes to one application mux.
@@ -34,7 +61,7 @@ func (handler *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/auth/login", handler.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", handler.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", handler.Authenticated(handler.me))
-	mux.HandleFunc("POST /api/v1/auth/tokens", handler.Authorized(createTokenPermission, handler.createAPIToken))
+	mux.HandleFunc("POST /api/v1/auth/tokens", handler.AuthorizedGlobal(createTokenPermission, handler.createAPIToken))
 }
 
 func (handler *Handler) login(response http.ResponseWriter, request *http.Request) {
@@ -126,8 +153,20 @@ func (handler *Handler) Authenticated(next PrincipalHandler) http.HandlerFunc {
 
 // Authorized requires authentication and one explicit permission assignment.
 func (handler *Handler) Authorized(permission string, next PrincipalHandler) http.HandlerFunc {
+	return handler.authorized(handler.authorizer, permission, next)
+}
+
+// AuthorizedGlobal applies the identity role assignment without an organization scope.
+func (handler *Handler) AuthorizedGlobal(permission string, next PrincipalHandler) http.HandlerFunc {
+	return handler.authorized(globalAuthorizer{service: handler.service}, permission, next)
+}
+
+func (handler *Handler) authorized(authorizer Authorizer, permission string, next PrincipalHandler) http.HandlerFunc {
 	return handler.Authenticated(func(response http.ResponseWriter, request *http.Request, principal identity.Principal) {
-		err := handler.service.Authorize(request.Context(), principal, permission, clientIP(request), request.UserAgent())
+		authorizedPrincipal, err := authorizer.Authorize(
+			request.Context(), principal, strings.TrimSpace(request.Header.Get(organizationHeader)),
+			permission, clientIP(request), request.UserAgent(),
+		)
 		if errors.Is(err, identity.ErrForbidden) {
 			writeError(response, http.StatusForbidden, "identity.forbidden", "permission is required")
 			return
@@ -137,8 +176,19 @@ func (handler *Handler) Authorized(permission string, next PrincipalHandler) htt
 			writeError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
 			return
 		}
-		next(response, request, principal)
+		next(response, request, authorizedPrincipal)
 	})
+}
+
+type globalAuthorizer struct {
+	service *identity.Service
+}
+
+func (authorizer globalAuthorizer) Authorize(ctx context.Context, actor identity.Principal, _ string, permission, ipAddress, userAgent string) (identity.Principal, error) {
+	if err := authorizer.service.Authorize(ctx, actor, permission, ipAddress, userAgent); err != nil {
+		return identity.Principal{}, err
+	}
+	return actor, nil
 }
 
 func (handler *Handler) authenticate(response http.ResponseWriter, request *http.Request) (identity.Principal, bool) {

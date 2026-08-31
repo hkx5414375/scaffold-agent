@@ -48,8 +48,8 @@ func (handler *Handler) create(response http.ResponseWriter, request *http.Reque
 	httpjson.Write(response, http.StatusCreated, value)
 }
 
-func (handler *Handler) get(response http.ResponseWriter, request *http.Request, _ identity.Principal) {
-	value, err := handler.service.Get(request.Context(), request.PathValue("id"))
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.Get(request.Context(), request.PathValue("id"), actor)
 	if err != nil {
 		handleError(response, "get {{.Business.EntityName}}", err)
 		return
@@ -57,7 +57,7 @@ func (handler *Handler) get(response http.ResponseWriter, request *http.Request,
 	httpjson.Write(response, http.StatusOK, value)
 }
 
-func (handler *Handler) list(response http.ResponseWriter, request *http.Request, _ identity.Principal) {
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
 	limit := defaultPageLimit
 	if raw := request.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
@@ -67,7 +67,7 @@ func (handler *Handler) list(response http.ResponseWriter, request *http.Request
 		}
 		limit = parsed
 	}
-	page, err := handler.service.List(request.Context(), request.URL.Query().Get("cursor"), limit)
+	page, err := handler.service.List(request.Context(), request.URL.Query().Get("cursor"), limit, actor)
 	if err != nil {
 		handleError(response, "list {{.Business.EntityName}}", err)
 		return

@@ -1,0 +1,17 @@
+create table organizations (
+    id text primary key,
+    name text not null,
+    created_by text not null references identity_users (id),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+
+create table organization_memberships (
+    organization_id text not null references organizations (id) on delete cascade,
+    user_id text not null references identity_users (id) on delete cascade,
+    role_code text not null references identity_roles (code),
+    created_at timestamptz not null,
+    primary key (organization_id, user_id)
+);
+
+create index organization_memberships_user_idx on organization_memberships (user_id, organization_id);

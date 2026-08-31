@@ -45,6 +45,7 @@ go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-mysql --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/tenant-task-service --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

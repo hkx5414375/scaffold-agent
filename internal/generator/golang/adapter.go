@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/hkx5414375/scaffold-agent/internal/capability"
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
@@ -24,6 +25,8 @@ const (
 	businessVersion    = "0.3.0"
 	adminCapability    = "vue-admin"
 	adminVersion       = "0.1.0"
+	tenancyCapability  = "organization-tenancy"
+	tenancyVersion     = "0.1.0"
 )
 
 //go:embed all:templates
@@ -63,6 +66,9 @@ type databaseTemplateSet struct {
 	BusinessMigrationTemplate string
 	IntegrationPath           string
 	IntegrationTemplate       string
+	TenancyStorePath          string
+	TenancyStoreTemplate      string
+	TenancyMigrationTemplate  string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -81,6 +87,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		BusinessMigrationTemplate: "templates/business.sql.tmpl",
 		IntegrationPath:           "internal/integration/postgres_test.go",
 		IntegrationTemplate:       "templates/postgres_integration_test.go.tmpl",
+		TenancyStorePath:          "internal/tenancy/postgres/store.go",
+		TenancyStoreTemplate:      "templates/tenancy_postgres_store.go.tmpl",
+		TenancyMigrationTemplate:  "templates/tenancy_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -98,7 +107,30 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		BusinessMigrationTemplate: "templates/mysql_business.sql.tmpl",
 		IntegrationPath:           "internal/integration/mysql_test.go",
 		IntegrationTemplate:       "templates/mysql_integration_test.go.tmpl",
+		TenancyStorePath:          "internal/tenancy/mysql/store.go",
+		TenancyStoreTemplate:      "templates/tenancy_mysql_store.go.tmpl",
+		TenancyMigrationTemplate:  "templates/tenancy_mysql.sql.tmpl",
 	},
+}
+
+var goCapabilityCatalog = map[string]spec.CapabilityPack{
+	tenancyCapability: {
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyCapability, Version: tenancyVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization membership and tenant-scoped authorization",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+}
+
+var tenancyTemplates = map[string]string{
+	"internal/tenancy/service.go":              "templates/tenancy_service.go.tmpl",
+	"internal/tenancy/service_test.go":         "templates/tenancy_service_test.go.tmpl",
+	"internal/tenancy/httpapi/handler.go":      "templates/tenancy_handler.go.tmpl",
+	"internal/tenancy/httpapi/handler_test.go": "templates/tenancy_handler_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -158,8 +190,20 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Go adapter currently requires both session and token authentication")
 	}
-	if len(project.Spec.Capabilities) > 0 {
-		return generator.Result{}, fmt.Errorf("go capability packs are not available in the base adapter yet")
+	resolvedCapabilities, diagnostics := capability.Resolve(goCapabilityCatalog, project.Spec.Capabilities)
+	if len(diagnostics) > 0 {
+		return generator.Result{}, fmt.Errorf("resolve Go capabilities: %s", diagnostics[0].Message)
+	}
+	tenancyEnabled := false
+	for _, selection := range project.Spec.Capabilities {
+		if len(selection.Config) > 0 {
+			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
+		}
+	}
+	for _, pack := range resolvedCapabilities {
+		if pack.Metadata.Name == tenancyCapability {
+			tenancyEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
@@ -171,6 +215,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Database:    database.Data,
 		Business:    business,
 		Admin:       adminEnabled,
+		Tenancy:     tenancyEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -180,6 +225,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = renderTarget{TemplatePath: templatePath, Owner: baseCapability}
 	}
 	capabilityLock := map[string]string{baseCapability: baseVersion}
+	for _, pack := range resolvedCapabilities {
+		capabilityLock[pack.Metadata.Name] = pack.Metadata.Version
+	}
 	if business != nil {
 		for _, target := range businessTemplates {
 			path := "internal/" + business.ModuleName + "/" + target.PathSuffix
@@ -204,6 +252,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[path] = renderTarget{TemplatePath: "templates/admin/src/views/BusinessView.vue.tmpl", Owner: adminCapability}
 		}
 		capabilityLock[adminCapability] = adminVersion
+	}
+	if tenancyEnabled {
+		for path, templatePath := range tenancyTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: tenancyCapability}
+		}
+		targets[database.TenancyStorePath] = renderTarget{TemplatePath: database.TenancyStoreTemplate, Owner: tenancyCapability}
+		tenancyMigrationPath := "internal/platform/migrate/migrations/000050_organization_tenancy.sql"
+		targets[tenancyMigrationPath] = renderTarget{TemplatePath: database.TenancyMigrationTemplate, Owner: tenancyCapability}
 	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -261,6 +317,7 @@ type templateData struct {
 	Database    databaseData
 	Business    *businessData
 	Admin       bool
+	Tenancy     bool
 }
 
 type databaseData struct {

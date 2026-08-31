@@ -28,10 +28,11 @@ type User struct {
 
 // Principal is the minimum authenticated identity passed to application use cases.
 type Principal struct {
-	UserID string `json:"user_id"`
-	Email  string `json:"email"`
-	Role   string `json:"role"`
-	Method string `json:"method"`
+	UserID         string `json:"user_id"`
+	Email          string `json:"email"`
+	Role           string `json:"role"`
+	Method         string `json:"method"`
+	OrganizationID string `json:"organization_id,omitempty"`
 }
 
 // Session is a persisted browser session. Only a SHA-256 token digest is stored.

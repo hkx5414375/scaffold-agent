@@ -6,6 +6,10 @@ browser sessions, API tokens, and security audit events.
 It also contains a generated `{{.Business.EntityName}}` CRUD module with keyset
 pagination, optimistic locking, transactional audit events, and explicit RBAC.
 {{end}}
+{{if .Tenancy}}
+It also contains the `organization-tenancy` capability. Protected business data
+is scoped by organization membership and the `X-Organization-ID` request header.
+{{end}}
 
 ## Requirements
 
@@ -42,6 +46,10 @@ The machine-readable HTTP contract is `api/openapi.yaml`.
 - `POST /api/v1/auth/logout`
 - `GET /api/v1/auth/me`
 - `POST /api/v1/auth/tokens`
+{{if .Tenancy}}
+- `POST /api/v1/organizations`
+- `GET /api/v1/organizations`
+{{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
 - `GET {{.Business.RoutePath}}`
@@ -52,6 +60,13 @@ The machine-readable HTTP contract is `api/openapi.yaml`.
 
 Browser authentication uses an HttpOnly, SameSite=Lax cookie. Automation uses
 `Authorization: Bearer <token>`. Only token digests and password hashes are stored.
+{{if .Tenancy}}
+Create an organization after signing in, then send its identifier in
+`X-Organization-ID` for every protected business request. The generated stores
+include the organization in reads, writes, uniqueness, pagination, and optimistic
+locking predicates; a valid record identifier from another organization is still
+reported as not found.
+{{end}}
 {{if .Admin}}
 ## Administration UI
 

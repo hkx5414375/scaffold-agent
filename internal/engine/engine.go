@@ -76,6 +76,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"go-mysql-crud",
 				"go-openapi-contract",
 				"vue-element-plus-admin",
+				"organization-tenancy-capability",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

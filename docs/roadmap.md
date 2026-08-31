@@ -32,7 +32,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 - [x] Go/MySQL 8.4 connection pool, named-lock migrations, identity, RBAC, audit, CRUD, and isolated integration gate.
 - [x] Shared Blueprint, domain, HTTP, OpenAPI, and Vue contracts across PostgreSQL and MySQL.
-- [ ] Organization and tenant isolation.
+- [x] Organization creation, discovery, membership-scoped authorization, tenant-aware administration, and cross-tenant data isolation.
+- [ ] Member administration, invitations, organization lifecycle, and tenant-aware background work.
 - [ ] Files, notifications, jobs, cache, import/export, and observability.
 - [ ] Portable approval workflows.
 

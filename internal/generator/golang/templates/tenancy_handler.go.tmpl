@@ -1,0 +1,62 @@
+// Package httpapi exposes organization use cases over HTTP.
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+// Handler maps organization requests to the tenancy service.
+type Handler struct {
+	service *tenancy.Service
+}
+
+// New returns an organization HTTP adapter.
+func New(service *tenancy.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds authenticated organization discovery and creation routes.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/organizations", security.Authenticated(handler.create))
+	mux.HandleFunc("GET /api/v1/organizations", security.Authenticated(handler.list))
+}
+
+func (handler *Handler) create(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	organization, err := handler.service.Create(request.Context(), input.Name, actor)
+	if errors.Is(err, tenancy.ErrInvalidInput) {
+		httpjson.WriteError(response, http.StatusBadRequest, "tenancy.invalid", "organization name must contain 1 to 120 characters")
+		return
+	}
+	if err != nil {
+		slog.Error("create organization", "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, organization)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	organizations, err := handler.service.List(request.Context(), actor)
+	if err != nil {
+		slog.Error("list organizations", "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+		return
+	}
+	httpjson.Write(response, http.StatusOK, struct {
+		Items []tenancy.Organization `json:"items"`
+	}{Items: organizations})
+}

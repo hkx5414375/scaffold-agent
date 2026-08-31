@@ -12,8 +12,11 @@ insert into identity_role_permissions (role_code, permission_code) values
 
 create table {{sql .Business.TableName}} (
     id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- end}}
 {{- range .Business.Fields}}
-    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if .Unique}} unique{{end}},
+    {{sql .Name}} {{.SQLType}}{{if .Required}} not null{{end}}{{if and .Unique (not $.Tenancy)}} unique{{end}},
 {{- end}}
     version bigint not null check (version > 0),
     created_at timestamptz not null,
@@ -21,3 +24,8 @@ create table {{sql .Business.TableName}} (
 );
 
 create index {{sql (printf "%s_updated_idx" .Business.TableName)}} on {{sql .Business.TableName}} (updated_at desc);
+{{if .Tenancy}}
+create index {{sql (printf "%s_organization_idx" .Business.TableName)}} on {{sql .Business.TableName}} (organization_id, id);
+{{range .Business.Fields}}{{if .Unique}}
+create unique index {{sql (printf "%s_%s_tenant_unique" $.Business.TableName .Name)}} on {{sql $.Business.TableName}} (organization_id, {{sql .Name}});
+{{end}}{{end}}{{end}}

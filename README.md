@@ -45,6 +45,7 @@ go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-mysql --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/tenant-task-service --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

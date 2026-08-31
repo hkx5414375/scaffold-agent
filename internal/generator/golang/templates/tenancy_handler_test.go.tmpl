@@ -1,0 +1,64 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+func TestOrganizationRoutesRequireAuthentication(t *testing.T) {
+	t.Parallel()
+
+	security := identityhttp.New(identity.NewService(emptyIdentityStore{}), false)
+	mux := http.NewServeMux()
+	New(tenancy.NewService(emptyTenancyStore{})).Register(mux, security)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/organizations", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/v1/organizations status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+type emptyIdentityStore struct{}
+
+func (emptyIdentityStore) CreateUser(context.Context, identity.User) error { return nil }
+func (emptyIdentityStore) UserByEmail(context.Context, string) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+func (emptyIdentityStore) CreateSession(context.Context, identity.Session) error { return nil }
+func (emptyIdentityStore) DeleteSession(context.Context, []byte) error          { return nil }
+func (emptyIdentityStore) UserBySession(context.Context, []byte, time.Time) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+func (emptyIdentityStore) CreateAPIToken(context.Context, identity.APIToken) error { return nil }
+func (emptyIdentityStore) DeleteAPIToken(context.Context, string) error            { return nil }
+func (emptyIdentityStore) UserByAPIToken(context.Context, []byte, time.Time) (identity.User, error) {
+	return identity.User{}, identity.ErrNotFound
+}
+func (emptyIdentityStore) HasPermission(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (emptyIdentityStore) AppendAudit(context.Context, identity.AuditEvent) error { return nil }
+
+type emptyTenancyStore struct{}
+
+func (emptyTenancyStore) CreateOrganization(context.Context, tenancy.Organization, tenancy.Membership, identity.AuditEvent) error {
+	return nil
+}
+func (emptyTenancyStore) ListOrganizations(context.Context, string) ([]tenancy.Organization, error) {
+	return nil, nil
+}
+func (emptyTenancyStore) MembershipRole(context.Context, string, string) (string, error) {
+	return "", tenancy.ErrNotFound
+}
+func (emptyTenancyStore) HasPermission(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+func (emptyTenancyStore) AppendAudit(context.Context, identity.AuditEvent) error { return nil }

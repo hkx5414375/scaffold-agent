@@ -30,9 +30,12 @@ func New(pool *pgxpool.Pool) *Store {
 func (store *Store) Create(ctx context.Context, value {{.Business.PackageName}}.{{.Business.EntityType}}, audit identity.AuditEvent) error {
 	return store.mutate(ctx, func(transaction pgx.Tx) error {
 		_, err := transaction.Exec(ctx, `
-			insert into {{goSQL .Business.TableName}} (id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at)
-			values (@id{{range .Business.Fields}}, @{{.Name}}{{end}}, @version, @created_at, @updated_at)`, pgx.NamedArgs{
+			insert into {{goSQL .Business.TableName}} (id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at)
+			values (@id{{if .Tenancy}}, @organization_id{{end}}{{range .Business.Fields}}, @{{.Name}}{{end}}, @version, @created_at, @updated_at)`, pgx.NamedArgs{
 			"id": value.ID,
+{{- if .Tenancy}}
+			"organization_id": value.OrganizationID,
+{{- end}}
 {{- range .Business.Fields}}
 			"{{.Name}}": value.{{.GoName}},
 {{- end}}
@@ -45,19 +48,19 @@ func (store *Store) Create(ctx context.Context, value {{.Business.PackageName}}.
 	})
 }
 
-func (store *Store) Get(ctx context.Context, id string) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
+func (store *Store) Get(ctx context.Context, organizationID, id string) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
 	return scan{{.Business.EntityType}}(store.pool.QueryRow(ctx, `
-		select id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
-		from {{goSQL .Business.TableName}} where id = $1`, id))
+		select id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
+		from {{goSQL .Business.TableName}} where id = $1{{if .Tenancy}} and organization_id = $2{{end}}`, id{{if .Tenancy}}, organizationID{{end}}))
 }
 
-func (store *Store) List(ctx context.Context, cursor string, limit int) ([]{{.Business.PackageName}}.{{.Business.EntityType}}, string, error) {
+func (store *Store) List(ctx context.Context, organizationID, cursor string, limit int) ([]{{.Business.PackageName}}.{{.Business.EntityType}}, string, error) {
 	rows, err := store.pool.Query(ctx, `
-		select id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
+		select id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
 		from {{goSQL .Business.TableName}}
-		where ($1 = '' or id > $1)
+		where {{if .Tenancy}}organization_id = $1 and {{end}}({{if .Tenancy}}$2{{else}}$1{{end}} = '' or id > {{if .Tenancy}}$2{{else}}$1{{end}})
 		order by id
-		limit $2`, cursor, limit+1)
+		limit {{if .Tenancy}}$3{{else}}$2{{end}}`, {{if .Tenancy}}organizationID, {{end}}cursor, limit+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("query {{.Business.EntityName}} page: %w", err)
 	}
@@ -88,9 +91,12 @@ func (store *Store) Update(ctx context.Context, value {{.Business.PackageName}}.
 			update {{goSQL .Business.TableName}}
 			set {{range $index, $field := .Business.Fields}}{{if $index}}, {{end}}{{goSQL $field.Name}} = @{{$field.Name}}{{end}},
 				version = version + 1, updated_at = @updated_at
-			where id = @id and version = @version
-			returning id{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at`, pgx.NamedArgs{
+			where id = @id{{if .Tenancy}} and organization_id = @organization_id{{end}} and version = @version
+			returning id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at`, pgx.NamedArgs{
 			"id": value.ID,
+{{- if .Tenancy}}
+			"organization_id": value.OrganizationID,
+{{- end}}
 {{- range .Business.Fields}}
 			"{{.Name}}": value.{{.GoName}},
 {{- end}}
@@ -112,10 +118,10 @@ func (store *Store) Update(ctx context.Context, value {{.Business.PackageName}}.
 	return updated, nil
 }
 
-func (store *Store) Delete(ctx context.Context, id string, version int64, audit identity.AuditEvent) error {
+func (store *Store) Delete(ctx context.Context, organizationID, id string, version int64, audit identity.AuditEvent) error {
 	return store.mutate(ctx, func(transaction pgx.Tx) error {
 		command, err := transaction.Exec(ctx, `
-			delete from {{goSQL .Business.TableName}} where id = $1 and version = $2`, id, version)
+			delete from {{goSQL .Business.TableName}} where id = $1{{if .Tenancy}} and organization_id = $2 and version = $3{{else}} and version = $2{{end}}`, id{{if .Tenancy}}, organizationID{{end}}, version)
 		if err != nil {
 			return persistenceError(err)
 		}
@@ -167,7 +173,7 @@ type rowScanner interface {
 
 func scan{{.Business.EntityType}}(row rowScanner) ({{.Business.PackageName}}.{{.Business.EntityType}}, error) {
 	var value {{.Business.PackageName}}.{{.Business.EntityType}}
-	if err := row.Scan(&value.ID{{range .Business.Fields}}, &value.{{.GoName}}{{end}}, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+	if err := row.Scan(&value.ID{{if .Tenancy}}, &value.OrganizationID{{end}}{{range .Business.Fields}}, &value.{{.GoName}}{{end}}, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return {{.Business.PackageName}}.{{.Business.EntityType}}{}, {{.Business.PackageName}}.ErrNotFound
 		}

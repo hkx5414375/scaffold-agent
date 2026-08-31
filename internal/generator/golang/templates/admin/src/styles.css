@@ -74,6 +74,15 @@ textarea {
   padding: 28px;
 }
 
+.setup-card {
+  width: min(520px, 100%);
+  margin: 8vh auto 0;
+}
+
+.setup-card .el-input {
+  margin: 20px 0 14px;
+}
+
 .page-heading {
   justify-content: space-between;
   margin-bottom: 20px;

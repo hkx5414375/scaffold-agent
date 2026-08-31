@@ -1,0 +1,129 @@
+// Package mysql persists organizations and memberships in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+// Store is the MySQL organization repository and tenant authorizer.
+type Store struct {
+	database *sql.DB
+}
+
+// New returns a MySQL organization store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
+}
+
+func (store *Store) CreateOrganization(ctx context.Context, organization tenancy.Organization, membership tenancy.Membership, audit identity.AuditEvent) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin organization creation: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into organizations (id, name, created_by, created_at, updated_at)
+		values (?, ?, ?, ?, ?)`, organization.ID, organization.Name, membership.UserID, organization.CreatedAt, organization.CreatedAt); err != nil {
+		return rollback(transaction, fmt.Errorf("insert organization: %w", err))
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into organization_memberships (organization_id, user_id, role_code, created_at)
+		values (?, ?, ?, ?)`, membership.OrganizationID, membership.UserID, membership.Role, membership.CreatedAt); err != nil {
+		return rollback(transaction, fmt.Errorf("insert organization membership: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit organization creation: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) ListOrganizations(ctx context.Context, userID string) ([]tenancy.Organization, error) {
+	rows, err := store.database.QueryContext(ctx, `
+		select organizations.id, organizations.name, memberships.role_code, organizations.created_at
+		from organization_memberships memberships
+		join organizations on organizations.id = memberships.organization_id
+		where memberships.user_id = ?
+		order by organizations.name, organizations.id`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query organizations: %w", err)
+	}
+	defer rows.Close()
+	organizations := make([]tenancy.Organization, 0)
+	for rows.Next() {
+		var organization tenancy.Organization
+		if err := rows.Scan(&organization.ID, &organization.Name, &organization.Role, &organization.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan organization: %w", err)
+		}
+		organizations = append(organizations, organization)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read organizations: %w", err)
+	}
+	return organizations, nil
+}
+
+func (store *Store) MembershipRole(ctx context.Context, organizationID, userID string) (string, error) {
+	var role string
+	if err := store.database.QueryRowContext(ctx, `
+		select role_code from organization_memberships
+		where organization_id = ? and user_id = ?`, organizationID, userID).Scan(&role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", tenancy.ErrNotFound
+		}
+		return "", fmt.Errorf("scan organization membership: %w", err)
+	}
+	return role, nil
+}
+
+func (store *Store) HasPermission(ctx context.Context, role, permission string) (bool, error) {
+	var allowed bool
+	if err := store.database.QueryRowContext(ctx, `
+		select exists(
+			select 1 from identity_role_permissions
+			where role_code = ? and permission_code = ?
+		)`, role, permission).Scan(&allowed); err != nil {
+		return false, fmt.Errorf("check tenant permission: %w", err)
+	}
+	return allowed, nil
+}
+
+func (store *Store) AppendAudit(ctx context.Context, event identity.AuditEvent) error {
+	_, err := store.database.ExecContext(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append tenant audit event: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, transaction *sql.Tx, event identity.AuditEvent) error {
+	_, err := transaction.ExecContext(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append organization audit event: %w", err)
+	}
+	return nil
+}
+
+func rollback(transaction *sql.Tx, cause error) error {
+	if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return errors.Join(cause, fmt.Errorf("roll back organization creation: %w", err))
+	}
+	return cause
+}
+
+var _ tenancy.Store = (*Store)(nil)

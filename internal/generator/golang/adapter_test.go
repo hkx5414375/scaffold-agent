@@ -183,6 +183,65 @@ func TestGenerateMySQLBusinessModuleIsFormatted(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationTenancyCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[tenancyCapability] != tenancyVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"internal/tenancy/service.go":                                          false,
+		"internal/tenancy/httpapi/handler.go":                                  false,
+		"internal/tenancy/postgres/store.go":                                   false,
+		"internal/platform/migrate/migrations/000050_organization_tenancy.sql": false,
+	}
+	var businessMigration, openAPI string
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+		switch output.Path {
+		case "internal/platform/migrate/migrations/000100_tasks_task.sql":
+			businessMigration = string(output.Content)
+		case "api/openapi.yaml":
+			openAPI = string(output.Content)
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	if !strings.Contains(businessMigration, "organization_id") ||
+		!strings.Contains(openAPI, "/api/v1/organizations:") ||
+		!strings.Contains(openAPI, "X-Organization-ID") {
+		t.Fatal("Generate() did not scope persistence and the HTTP contract by organization")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated tenant OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyCapability, Version: tenancyVersion, Config: map[string]any{"header": "X-Tenant"},
+	}}
+	if _, err := New().Generate(context.Background(), project); err == nil || !strings.Contains(err.Error(), "does not accept configuration") {
+		t.Fatalf("Generate() error = %v, want unsupported configuration diagnostic", err)
+	}
+}
+
 func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
 	t.Parallel()
 

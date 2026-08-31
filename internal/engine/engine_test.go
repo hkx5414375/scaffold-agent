@@ -108,14 +108,27 @@ func TestVerifyStoresPageableFinding(t *testing.T) {
 }
 
 func TestGoPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", 47, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", "", 47, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
 }
 
 func TestGoMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "mysql", "element-plus", 48, false)
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", "", 48, false)
 }
 
-func runGeneratedGoEndToEnd(t *testing.T, database, adminUI string, wantChanges int, runAdminBuild bool) {
+func TestGoTenantPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancySelection, 53, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelection, 54, false)
+}
+
+const tenancySelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.1.0
+`
+
+func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -133,6 +146,7 @@ spec:
     engine: DATABASE_ENGINE
   auth:
     modes: [session, token]
+CAPABILITIES
   modules:
     - name: tasks
       entities:
@@ -151,6 +165,7 @@ spec:
 `
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	writeBlueprint(t, root, blueprint)
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
@@ -163,6 +178,9 @@ spec:
 	}
 	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
+	}
+	if capabilities != "" && plannedData.CapabilityLock["organization-tenancy"] != "0.1.0" {
+		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

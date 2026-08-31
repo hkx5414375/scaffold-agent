@@ -19,6 +19,10 @@ import (
 	platformmysql "{{.ModulePath}}/internal/platform/mysql"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	businessmysql "{{.ModulePath}}/internal/{{.Business.ModuleName}}/mysql"
+{{- if .Tenancy}}
+	"{{.ModulePath}}/internal/tenancy"
+	tenancymysql "{{.ModulePath}}/internal/tenancy/mysql"
+{{- end}}
 )
 
 func TestMySQLMigrationsAndStores(t *testing.T) {
@@ -36,8 +40,8 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != 2 {
-		t.Fatalf("migration count = %d, want 2", migrationCount)
+	if migrationCount != {{if .Tenancy}}3{{else}}2{{end}} {
+		t.Fatalf("migration count = %d, want {{if .Tenancy}}3{{else}}2{{end}}", migrationCount)
 	}
 
 	identityStore := identitymysql.New(database)
@@ -101,13 +105,23 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := identityStore.AppendAudit(ctx, duplicateAudit); err != nil {
 		t.Fatalf("AppendAudit() error = %v", err)
 	}
+	organizationID := ""
+{{- if .Tenancy}}
+	organizationID = "integration-organization"
+	tenancyStore := tenancymysql.New(database)
+	organization := tenancy.Organization{ID: organizationID, Name: "Integration", Role: "admin", CreatedAt: now}
+	membership := tenancy.Membership{OrganizationID: organizationID, UserID: user.ID, Role: "admin", CreatedAt: now}
+	if err := tenancyStore.CreateOrganization(ctx, organization, membership, audit(user.ID, "tenancy.organization:create", organizationID, now)); err != nil {
+		t.Fatalf("CreateOrganization() error = %v", err)
+	}
+{{- end}}
 
 {{- range .Business.Fields}}
 	first{{.GoName}} := {{.SampleOne}}
 	second{{.GoName}} := {{.SampleTwo}}
 {{- end}}
 	rolledBack := business.{{.Business.EntityType}}{
-		ID: "rolled-back", Version: 1, CreatedAt: now, UpdatedAt: now,
+		ID: "rolled-back", OrganizationID: organizationID, Version: 1, CreatedAt: now, UpdatedAt: now,
 {{- range .Business.Fields}}
 		{{.GoName}}: {{if .Required}}first{{.GoName}}{{else}}&first{{.GoName}}{{end}},
 {{- end}}
@@ -116,7 +130,7 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := businessStore.Create(ctx, rolledBack, duplicateAudit); err == nil {
 		t.Fatal("Create(with duplicate audit) error = nil, want transaction failure")
 	}
-	if _, err := businessStore.Get(ctx, rolledBack.ID); !errors.Is(err, business.ErrNotFound) {
+	if _, err := businessStore.Get(ctx, organizationID, rolledBack.ID); !errors.Is(err, business.ErrNotFound) {
 		t.Fatalf("Get(rolled-back) error = %v, want ErrNotFound", err)
 	}
 
@@ -125,10 +139,15 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := businessStore.Create(ctx, created, audit(user.ID, "{{.Business.PermissionPrefix}}:create", created.ID, now)); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	loaded, err := businessStore.Get(ctx, created.ID)
+	loaded, err := businessStore.Get(ctx, organizationID, created.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
+{{- if .Tenancy}}
+	if _, err := businessStore.Get(ctx, "different-organization", created.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(cross-tenant) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
 	if loaded.ID != created.ID || loaded.Version != 1 || !loaded.CreatedAt.Equal(created.CreatedAt) {
 		t.Fatalf("Get() = %#v, want created record", loaded)
 	}
@@ -137,7 +156,7 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("Get().{{.GoName}} = %#v, want %#v", loaded.{{.GoName}}, created.{{.GoName}})
 	}
 {{- end}}
-	page, cursor, err := businessStore.List(ctx, "", 20)
+	page, cursor, err := businessStore.List(ctx, organizationID, "", 20)
 	if err != nil || len(page) != 1 || cursor != "" || page[0].ID != created.ID {
 		t.Fatalf("List() = %#v, %q, %v", page, cursor, err)
 	}
@@ -154,10 +173,10 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if _, err := businessStore.Update(ctx, replacement, audit(user.ID, "{{.Business.PermissionPrefix}}:update", created.ID, now)); !errors.Is(err, business.ErrConflict) {
 		t.Fatalf("Update(stale) error = %v, want ErrConflict", err)
 	}
-	if err := businessStore.Delete(ctx, created.ID, updated.Version, audit(user.ID, "{{.Business.PermissionPrefix}}:delete", created.ID, now)); err != nil {
+	if err := businessStore.Delete(ctx, organizationID, created.ID, updated.Version, audit(user.ID, "{{.Business.PermissionPrefix}}:delete", created.ID, now)); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
-	if _, err := businessStore.Get(ctx, created.ID); !errors.Is(err, business.ErrNotFound) {
+	if _, err := businessStore.Get(ctx, organizationID, created.ID); !errors.Is(err, business.ErrNotFound) {
 		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
 	}
 	var mutationAuditCount int
