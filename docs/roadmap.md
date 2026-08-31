@@ -42,7 +42,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Payload-free job administration with tenant-scoped listing and audited dead-job retry.
 - [x] HTTP request correlation, safe access logs, low-cardinality metrics, and bounded database readiness.
 - [x] Atomic bounded CSV import/export with explicit permissions, tenant scope, audit, and administration UI actions.
-- [ ] Portable approval workflows.
+- [x] Portable single-stage approval workflows with separation of duties, optimistic concurrency, immutable events, and tenant-safe administration.
 
 ## M6 — Language parity
 

@@ -22,6 +22,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	{{- if .Approvals}}
+	"{{.ModulePath}}/internal/approvals"
+	approvalspostgres "{{.ModulePath}}/internal/approvals/postgres"
+	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
 	{{- if .Cache}}
@@ -138,6 +142,27 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	allowed, err = identityStore.HasPermission(ctx, "user", "{{.Business.PermissionPrefix}}:import")
 	if err != nil || allowed {
 		t.Fatalf("HasPermission(user, import) = %t, %v, want denied", allowed, err)
+	}
+{{- end}}
+{{- if .Approvals}}
+	for _, permission := range []struct {
+		role    string
+		code    string
+		allowed bool
+	}{
+		{role: "admin", code: "approvals:submit", allowed: true},
+		{role: "admin", code: "approvals:mine", allowed: true},
+		{role: "admin", code: "approvals:read", allowed: true},
+		{role: "admin", code: "approvals:decide", allowed: true},
+		{role: "user", code: "approvals:submit", allowed: true},
+		{role: "user", code: "approvals:mine", allowed: true},
+		{role: "user", code: "approvals:read", allowed: false},
+		{role: "user", code: "approvals:decide", allowed: false},
+	} {
+		allowed, err = identityStore.HasPermission(ctx, permission.role, permission.code)
+		if err != nil || allowed != permission.allowed {
+			t.Fatalf("HasPermission(%s, %s) = %t, %v, want %t", permission.role, permission.code, allowed, err, permission.allowed)
+		}
 	}
 {{- end}}
 
@@ -405,6 +430,110 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err != nil || len(page) != 1 || cursor != "" || page[0].ID != created.ID {
 		t.Fatalf("List() = %#v, %q, %v", page, cursor, err)
 	}
+{{- if .Approvals}}
+
+	approvalReviewer := identity.User{
+		ID: "approval-reviewer", Email: "approval-reviewer@example.com",
+		PasswordHash: user.PasswordHash, Role: "admin",
+	}
+	if err := identityStore.CreateUser(ctx, approvalReviewer); err != nil {
+		t.Fatalf("CreateUser(approval reviewer) error = %v", err)
+	}
+	approvalRequester := identity.Principal{
+		UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID,
+	}
+{{- if .TenancyLifecycle}}
+	approvalRequester = ownerPrincipal
+{{- end}}
+	approvalReviewerPrincipal := identity.Principal{
+		UserID: approvalReviewer.ID, Email: approvalReviewer.Email, Role: "admin", OrganizationID: organizationID,
+	}
+{{- if .TenancyMembers}}
+	reviewerInvitation, err := members.Invite(ctx, approvalReviewer.Email, "admin", approvalRequester)
+	if err != nil {
+		t.Fatalf("Invite(approval reviewer) error = %v", err)
+	}
+	if _, err := members.Accept(ctx, reviewerInvitation.AcceptanceToken, identity.Principal{
+		UserID: approvalReviewer.ID, Email: approvalReviewer.Email, Role: "admin",
+	}); err != nil {
+		t.Fatalf("Accept(approval reviewer) error = %v", err)
+	}
+{{- end}}
+	approvalService := approvals.NewService(approvalspostgres.New(pool))
+	if _, err := approvalService.Submit(ctx, approvals.SubmitInput{
+		SubjectID: "missing-subject", Summary: "Missing subject",
+	}, approvalRequester); !errors.Is(err, approvals.ErrSubjectNotFound) {
+		t.Fatalf("approvals.Submit(missing subject) error = %v, want ErrSubjectNotFound", err)
+	}
+	approvalRequest, err := approvalService.Submit(ctx, approvals.SubmitInput{
+		SubjectID: created.ID, Summary: "Approve integration record", Details: "Portable approval evidence",
+	}, approvalRequester)
+	if err != nil || approvalRequest.Status != approvals.StatusPending || approvalRequest.Version != 1 {
+		t.Fatalf("approvals.Submit() = %#v, %v", approvalRequest, err)
+	}
+	if _, err := approvalService.Submit(ctx, approvals.SubmitInput{
+		SubjectID: created.ID, Summary: "Duplicate pending request",
+	}, approvalRequester); !errors.Is(err, approvals.ErrConflict) {
+		t.Fatalf("approvals.Submit(duplicate pending) error = %v, want ErrConflict", err)
+	}
+	if _, err := approvalService.Approve(ctx, approvalRequest.ID, approvals.DecisionInput{
+		Version: approvalRequest.Version,
+	}, approvalRequester); !errors.Is(err, approvals.ErrSelfDecision) {
+		t.Fatalf("approvals.Approve(self) error = %v, want ErrSelfDecision", err)
+	}
+{{- if .Tenancy}}
+	if _, err := approvalService.Get(ctx, approvalRequest.ID, identity.Principal{
+		UserID: approvalReviewer.ID, Role: "admin", OrganizationID: "different-organization",
+	}); !errors.Is(err, approvals.ErrNotFound) {
+		t.Fatalf("approvals.Get(cross-tenant) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+	mine, err := approvalService.ListMine(ctx, approvals.StatusPending, "", 20, approvalRequester)
+	if err != nil || len(mine.Items) != 1 || mine.Items[0].ID != approvalRequest.ID {
+		t.Fatalf("approvals.ListMine() = %#v, %v", mine, err)
+	}
+	approved, err := approvalService.Approve(ctx, approvalRequest.ID, approvals.DecisionInput{
+		Version: approvalRequest.Version, Comment: "Approved in integration test",
+	}, approvalReviewerPrincipal)
+	if err != nil || approved.Status != approvals.StatusApproved || approved.Version != 2 ||
+		approved.ResolvedByUserID != approvalReviewer.ID {
+		t.Fatalf("approvals.Approve() = %#v, %v", approved, err)
+	}
+	if _, err := approvalService.Reject(ctx, approvalRequest.ID, approvals.DecisionInput{
+		Version: approvalRequest.Version, Comment: "stale",
+	}, approvalReviewerPrincipal); !errors.Is(err, approvals.ErrConflict) {
+		t.Fatalf("approvals.Reject(stale) error = %v, want ErrConflict", err)
+	}
+	history, err := approvalService.History(ctx, approvalRequest.ID, approvalReviewerPrincipal)
+	if err != nil || len(history.Items) != 2 || history.Items[0].Status != approvals.StatusPending ||
+		history.Items[1].Status != approvals.StatusApproved {
+		t.Fatalf("approvals.History() = %#v, %v", history, err)
+	}
+	withdrawal, err := approvalService.Submit(ctx, approvals.SubmitInput{
+		SubjectID: created.ID, Summary: "Withdraw integration request",
+	}, approvalRequester)
+	if err != nil {
+		t.Fatalf("approvals.Submit(withdrawal) error = %v", err)
+	}
+	if _, err := approvalService.Cancel(ctx, withdrawal.ID, approvals.DecisionInput{
+		Version: withdrawal.Version,
+	}, approvalReviewerPrincipal); !errors.Is(err, identity.ErrForbidden) {
+		t.Fatalf("approvals.Cancel(non-requester) error = %v, want ErrForbidden", err)
+	}
+	cancelled, err := approvalService.Cancel(ctx, withdrawal.ID, approvals.DecisionInput{
+		Version: withdrawal.Version, Comment: "No longer needed",
+	}, approvalRequester)
+	if err != nil || cancelled.Status != approvals.StatusCancelled || cancelled.Version != 2 {
+		t.Fatalf("approvals.Cancel() = %#v, %v", cancelled, err)
+	}
+	var approvalAuditCount int
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where action like 'approvals:%'`).Scan(&approvalAuditCount); err != nil {
+		t.Fatalf("count approval audit events: %v", err)
+	}
+	if approvalAuditCount != 4 {
+		t.Fatalf("approval audit count = %d, want 4", approvalAuditCount)
+	}
+{{- end}}
 
 	replacement := loaded
 {{- range .Business.Fields}}

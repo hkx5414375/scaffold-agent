@@ -690,6 +690,74 @@ func TestGenerateCSVImportExportRequiresBusinessEntity(t *testing.T) {
 	}
 }
 
+func TestGenerateApprovalWorkflowsCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: approvalsCapability, Version: approvalsVersion}}
+	project.Spec.Modules[0].Workflows = []spec.Workflow{{
+		Name:   "approval",
+		States: []string{"pending", "approved", "rejected", "cancelled"},
+	}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[approvalsCapability] != approvalsVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, path := range []string{
+		"internal/approvals/service.go",
+		"internal/approvals/service_test.go",
+		"internal/approvals/httpapi/handler.go",
+		"internal/approvals/httpapi/handler_test.go",
+		"internal/approvals/postgres/store.go",
+		"internal/platform/migrate/migrations/000250_approval_workflows.sql",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	mainSource := string(outputContent(generated, "cmd/server/main.go"))
+	openAPI := string(outputContent(generated, "api/openapi.yaml"))
+	if !strings.Contains(mainSource, "approvalAPI.Register") ||
+		!strings.Contains(openAPI, "/api/v1/approvals:") ||
+		!strings.Contains(openAPI, "/api/v1/approvals/{id}/approve:") {
+		t.Fatal("Generate() did not wire approval workflow routes")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated approval workflow OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestGenerateApprovalWorkflowsRequiresBusinessEntityAndExactWorkflow(t *testing.T) {
+	t.Parallel()
+
+	withoutBusiness := businessProject()
+	withoutBusiness.Spec.Modules = nil
+	withoutBusiness.Spec.Capabilities = []spec.CapabilitySelection{{Name: approvalsCapability, Version: approvalsVersion}}
+	if _, err := New().Generate(context.Background(), withoutBusiness); err == nil ||
+		!strings.Contains(err.Error(), "requires one generated business entity") {
+		t.Fatalf("Generate() without business error = %v", err)
+	}
+
+	withoutWorkflow := businessProject()
+	withoutWorkflow.Spec.Capabilities = []spec.CapabilitySelection{{Name: approvalsCapability, Version: approvalsVersion}}
+	if _, err := New().Generate(context.Background(), withoutWorkflow); err == nil ||
+		!strings.Contains(err.Error(), "requires workflow approval") {
+		t.Fatalf("Generate() without workflow error = %v", err)
+	}
+
+	wrongStates := businessProject()
+	wrongStates.Spec.Capabilities = []spec.CapabilitySelection{{Name: approvalsCapability, Version: approvalsVersion}}
+	wrongStates.Spec.Modules[0].Workflows = []spec.Workflow{{Name: "approval", States: []string{"pending", "approved"}}}
+	if _, err := New().Generate(context.Background(), wrongStates); err == nil ||
+		!strings.Contains(err.Error(), "pending, approved, rejected, cancelled") {
+		t.Fatalf("Generate() wrong workflow error = %v", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

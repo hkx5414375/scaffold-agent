@@ -1,0 +1,172 @@
+package approvals
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestSubmitApproveAndHistory(t *testing.T) {
+	store := newMemoryStore("subject-1")
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	requester := principal("requester")
+	reviewer := principal("reviewer")
+
+	request, err := service.Submit(context.Background(), SubmitInput{SubjectID: "subject-1", Summary: "Publish record"}, requester)
+	if err != nil || request.Status != StatusPending || request.Version != 1 || store.audit.Action != "approvals:submit" {
+		t.Fatalf("Submit() = %#v, %v, audit = %#v", request, err, store.audit)
+	}
+	approved, err := service.Approve(context.Background(), request.ID, DecisionInput{Version: 1, Comment: "reviewed"}, reviewer)
+	if err != nil || approved.Status != StatusApproved || approved.Version != 2 || approved.ResolvedByUserID != reviewer.UserID {
+		t.Fatalf("Approve() = %#v, %v", approved, err)
+	}
+	history, err := service.History(context.Background(), request.ID, reviewer)
+	if err != nil || len(history.Items) != 2 || history.Items[0].Status != StatusPending || history.Items[1].Status != StatusApproved {
+		t.Fatalf("History() = %#v, %v", history, err)
+	}
+}
+
+func TestSeparationOfDutiesAndCancellation(t *testing.T) {
+	store := newMemoryStore("subject-1", "subject-2")
+	service := NewService(store)
+	requester := principal("requester")
+	other := principal("other")
+
+	request, err := service.Submit(context.Background(), SubmitInput{SubjectID: "subject-1", Summary: "Review me"}, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(context.Background(), request.ID, DecisionInput{Version: 1}, requester); !errors.Is(err, ErrSelfDecision) {
+		t.Fatalf("Approve(self) error = %v", err)
+	}
+	if _, err := service.Cancel(context.Background(), request.ID, DecisionInput{Version: 1}, other); !errors.Is(err, identity.ErrForbidden) {
+		t.Fatalf("Cancel(other) error = %v", err)
+	}
+	cancelled, err := service.Cancel(context.Background(), request.ID, DecisionInput{Version: 1, Comment: "no longer needed"}, requester)
+	if err != nil || cancelled.Status != StatusCancelled {
+		t.Fatalf("Cancel() = %#v, %v", cancelled, err)
+	}
+	if _, err := service.Reject(context.Background(), request.ID, DecisionInput{Version: 2, Comment: "late"}, other); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Reject(final request) error = %v", err)
+	}
+
+	second, err := service.Submit(context.Background(), SubmitInput{SubjectID: "subject-2", Summary: "Reject me"}, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Reject(context.Background(), second.ID, DecisionInput{Version: 1}, other); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Reject(without reason) error = %v", err)
+	}
+}
+
+func TestSubmitValidatesSubjectAndDuplicatePending(t *testing.T) {
+	store := newMemoryStore("subject-1")
+	service := NewService(store)
+	actor := principal("requester")
+	if _, err := service.Submit(context.Background(), SubmitInput{SubjectID: "missing", Summary: "Missing"}, actor); !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("Submit(missing) error = %v", err)
+	}
+	if _, err := service.Submit(context.Background(), SubmitInput{SubjectID: "subject-1", Summary: "First"}, actor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Submit(context.Background(), SubmitInput{SubjectID: "subject-1", Summary: "Duplicate"}, actor); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Submit(duplicate) error = %v", err)
+	}
+	page, err := service.ListMine(context.Background(), StatusPending, "", 20, actor)
+	if err != nil || len(page.Items) != 1 || page.Items[0].RequesterUserID != actor.UserID {
+		t.Fatalf("ListMine() = %#v, %v", page, err)
+	}
+}
+
+func principal(userID string) identity.Principal {
+	return identity.Principal{UserID: userID{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+}
+
+type memoryStore struct {
+	subjects map[string]bool
+	requests map[string]Request
+	events   map[string][]Event
+	audit    identity.AuditEvent
+}
+
+func newMemoryStore(subjects ...string) *memoryStore {
+	store := &memoryStore{subjects: make(map[string]bool), requests: make(map[string]Request), events: make(map[string][]Event)}
+	for _, subject := range subjects {
+		store.subjects[subject] = true
+	}
+	return store
+}
+
+func (store *memoryStore) Create(_ context.Context, request Request, event Event, audit identity.AuditEvent) error {
+	if !store.subjects[request.SubjectID] {
+		return ErrSubjectNotFound
+	}
+	for _, existing := range store.requests {
+		if existing.OrganizationID == request.OrganizationID && existing.SubjectID == request.SubjectID && existing.Status == StatusPending {
+			return ErrConflict
+		}
+	}
+	store.requests[request.ID], store.events[request.ID], store.audit = request, []Event{event}, audit
+	return nil
+}
+
+func (store *memoryStore) Get(_ context.Context, organizationID, id string) (Request, error) {
+	request, exists := store.requests[id]
+	if !exists{{if .Tenancy}} || request.OrganizationID != organizationID{{end}} {
+		return Request{}, ErrNotFound
+	}
+	return request, nil
+}
+
+func (store *memoryStore) List(_ context.Context, organizationID, requesterID, status, cursor string, limit int) ([]Request, string, error) {
+	items := make([]Request, 0, len(store.requests))
+	for _, request := range store.requests {
+		if {{if .Tenancy}}request.OrganizationID != organizationID || {{end}}(requesterID != "" && request.RequesterUserID != requesterID) || (status != "" && request.Status != status) || request.ID <= cursor {
+			continue
+		}
+		items = append(items, request)
+	}
+	sort.Slice(items, func(left, right int) bool { return items[left].ID < items[right].ID })
+	nextCursor := ""
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+func (store *memoryStore) Transition(_ context.Context, transition Transition, event Event, audit identity.AuditEvent) (Request, error) {
+	request, exists := store.requests[transition.RequestID]
+	if !exists{{if .Tenancy}} || request.OrganizationID != transition.OrganizationID{{end}} {
+		return Request{}, ErrNotFound
+	}
+	if request.Status != transition.FromStatus || request.Version != transition.ExpectedVersion ||
+		(transition.ActorRule == ActorRuleRequester && request.RequesterUserID != transition.ActorUserID) ||
+		(transition.ActorRule == ActorRuleOther && request.RequesterUserID == transition.ActorUserID) {
+		return Request{}, ErrConflict
+	}
+	request.Status = transition.ToStatus
+	request.Version++
+	request.ResolutionComment = transition.Comment
+	request.ResolvedByUserID = transition.ActorUserID
+	request.ResolvedAt = &transition.ResolvedAt
+	request.UpdatedAt = transition.ResolvedAt
+	store.requests[request.ID] = request
+	store.events[request.ID] = append(store.events[request.ID], event)
+	store.audit = audit
+	return request, nil
+}
+
+func (store *memoryStore) Events(_ context.Context, organizationID, requestID string) ([]Event, error) {
+	if _, err := store.Get(context.Background(), organizationID, requestID); err != nil {
+		return nil, err
+	}
+	return append([]Event(nil), store.events[requestID]...), nil
+}
+
+var _ Store = (*memoryStore)(nil)

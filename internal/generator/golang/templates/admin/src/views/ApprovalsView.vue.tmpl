@@ -1,0 +1,237 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, reactive, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import type { ApprovalPage, ApprovalRequest, ApprovalStatus } from "../types";
+
+const activeTab = ref("mine");
+const status = ref<ApprovalStatus | "">("");
+const mine = ref<ApprovalRequest[]>([]);
+const queue = ref<ApprovalRequest[]>([]);
+const mineCursor = ref("");
+const queueCursor = ref("");
+const mineLoading = ref(false);
+const queueLoading = ref(false);
+const submitOpen = ref(false);
+const submitting = ref(false);
+const submission = reactive({ subject_id: "", summary: "", details: "" });
+
+onMounted(() => loadMine(true));
+
+async function loadMine(reset: boolean): Promise<void> {
+  mineLoading.value = true;
+  try {
+    const query = pageQuery(reset ? "" : mineCursor.value);
+    const page = await request<ApprovalPage>(`/api/v1/approvals/mine?${query}`);
+    mine.value = reset ? page.items : [...mine.value, ...page.items];
+    mineCursor.value = page.next_cursor ?? "";
+  } catch (error) {
+    showError(error, "Your approval requests could not be loaded");
+  } finally {
+    mineLoading.value = false;
+  }
+}
+
+async function loadQueue(reset: boolean): Promise<void> {
+  queueLoading.value = true;
+  try {
+    const query = pageQuery(reset ? "" : queueCursor.value);
+    const page = await request<ApprovalPage>(`/api/v1/approvals?${query}`);
+    queue.value = reset ? page.items : [...queue.value, ...page.items];
+    queueCursor.value = page.next_cursor ?? "";
+  } catch (error) {
+    showError(error, "The review queue requires approval read permission");
+  } finally {
+    queueLoading.value = false;
+  }
+}
+
+function pageQuery(cursor: string): URLSearchParams {
+  const query = new URLSearchParams({ limit: "50" });
+  if (cursor) query.set("cursor", cursor);
+  if (status.value) query.set("status", status.value);
+  return query;
+}
+
+async function changeTab(value: string | number): Promise<void> {
+  activeTab.value = String(value);
+  if (activeTab.value === "review") await loadQueue(true);
+}
+
+async function submit(): Promise<void> {
+  if (submitting.value) return;
+  submitting.value = true;
+  try {
+    await request<ApprovalRequest>("/api/v1/approvals", {
+      method: "POST",
+      body: JSON.stringify(submission),
+    });
+    Object.assign(submission, { subject_id: "", summary: "", details: "" });
+    submitOpen.value = false;
+    ElMessage.success("Approval request submitted");
+    await loadMine(true);
+  } catch (error) {
+    showError(error, "Approval request could not be submitted");
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function decide(value: ApprovalRequest, decision: "approve" | "reject"): Promise<void> {
+  let comment: string;
+  try {
+    const result = await ElMessageBox.prompt(
+      decision === "reject" ? "A rejection reason is required." : "Add an optional review note.",
+      decision === "reject" ? "Reject approval" : "Approve request",
+      {
+        confirmButtonText: decision === "reject" ? "Reject" : "Approve",
+        inputValidator: (input) => decision !== "reject" || Boolean(input?.trim()),
+        inputErrorMessage: "A rejection reason is required",
+      },
+    );
+    comment = result.value.trim();
+  } catch {
+    return;
+  }
+  try {
+    await request<ApprovalRequest>(`/api/v1/approvals/${value.id}/${decision}`, {
+      method: "POST",
+      body: JSON.stringify({ version: value.version, comment }),
+    });
+    ElMessage.success(decision === "approve" ? "Request approved" : "Request rejected");
+    await Promise.all([loadMine(true), loadQueue(true)]);
+  } catch (error) {
+    showError(error, "Approval decision could not be saved");
+  }
+}
+
+async function cancel(value: ApprovalRequest): Promise<void> {
+  try {
+    await ElMessageBox.confirm("Withdraw this pending approval request?", "Cancel request", {
+      type: "warning",
+      confirmButtonText: "Withdraw",
+    });
+  } catch {
+    return;
+  }
+  try {
+    await request<ApprovalRequest>(`/api/v1/approvals/${value.id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ version: value.version }),
+    });
+    ElMessage.success("Approval request withdrawn");
+    await loadMine(true);
+  } catch (error) {
+    showError(error, "Approval request could not be withdrawn");
+  }
+}
+
+async function refresh(): Promise<void> {
+  if (activeTab.value === "review") await loadQueue(true);
+  else await loadMine(true);
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section>
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">workflow</p>
+        <h1>Approvals</h1>
+      </div>
+      <div class="table-actions">
+        <el-select v-model="status" clearable placeholder="All statuses" @change="refresh">
+          <el-option label="Pending" value="pending" />
+          <el-option label="Approved" value="approved" />
+          <el-option label="Rejected" value="rejected" />
+          <el-option label="Cancelled" value="cancelled" />
+        </el-select>
+        <el-button @click="refresh">Refresh</el-button>
+        <el-button type="primary" @click="submitOpen = true">Submit request</el-button>
+      </div>
+    </div>
+
+    <el-tabs v-model="activeTab" @tab-change="changeTab">
+      <el-tab-pane label="My requests" name="mine">
+        <el-card shadow="never">
+          <el-table v-loading="mineLoading" :data="mine" row-key="id">
+            <el-table-column label="Summary" prop="summary" min-width="180" />
+            <el-table-column label="Subject" prop="subject_id" min-width="150" />
+            <el-table-column label="Status" prop="status" width="110" />
+            <el-table-column label="Version" prop="version" width="90" />
+            <el-table-column label="Actions" width="120">
+              <template #default="scope">
+                <el-button
+                  v-if="scope.row.status === 'pending'"
+                  link
+                  type="danger"
+                  @click="cancel(scope.row)"
+                >
+                  Withdraw
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-button v-if="mineCursor" :loading="mineLoading" @click="loadMine(false)">
+            Load next
+          </el-button>
+        </el-card>
+      </el-tab-pane>
+
+      <el-tab-pane label="Review queue" name="review">
+        <el-card shadow="never">
+          <el-table v-loading="queueLoading" :data="queue" row-key="id">
+            <el-table-column label="Summary" prop="summary" min-width="180" />
+            <el-table-column label="Subject" prop="subject_id" min-width="150" />
+            <el-table-column label="Requester" prop="requester_user_id" min-width="150" />
+            <el-table-column label="Status" prop="status" width="110" />
+            <el-table-column label="Actions" width="180">
+              <template #default="scope">
+                <div v-if="scope.row.status === 'pending'" class="table-actions">
+                  <el-button link type="success" @click="decide(scope.row, 'approve')">
+                    Approve
+                  </el-button>
+                  <el-button link type="danger" @click="decide(scope.row, 'reject')">
+                    Reject
+                  </el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-button v-if="queueCursor" :loading="queueLoading" @click="loadQueue(false)">
+            Load next
+          </el-button>
+        </el-card>
+      </el-tab-pane>
+    </el-tabs>
+
+    <el-dialog v-model="submitOpen" title="Submit approval request" width="min(560px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="{{.Business.EntityType}} ID" required>
+          <el-input v-model="submission.subject_id" maxlength="191" />
+        </el-form-item>
+        <el-form-item label="Summary" required>
+          <el-input v-model="submission.summary" maxlength="255" />
+        </el-form-item>
+        <el-form-item label="Details">
+          <el-input
+            v-model="submission.details"
+            :rows="4"
+            maxlength="4000"
+            show-word-limit
+            type="textarea"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="submitOpen = false">Cancel</el-button>
+        <el-button type="primary" :loading="submitting" @click="submit">Submit</el-button>
+      </template>
+    </el-dialog>
+  </section>
+</template>

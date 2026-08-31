@@ -26,4 +26,4 @@ type names.
 
 - One Blueprint can switch between PostgreSQL and MySQL without changing API or administration clients.
 - Database-specific code is limited to pools, migrations, SQL migrations, persistence stores, dependency locks, and live-test setup.
-- Platform capability packs can now target both relational engines, but organization, tenancy, files, jobs, and approval workflows remain M5 work.
+- Platform capability packs can target both relational engines; later ADRs define the completed organization, files, jobs, and approval workflow slices.

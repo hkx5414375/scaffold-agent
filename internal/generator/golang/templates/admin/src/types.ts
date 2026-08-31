@@ -97,6 +97,32 @@ export interface JobPage {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .Approvals}}
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
+
+export interface ApprovalRequest {
+  id: string;
+  organization_id?: string;
+  subject_type: string;
+  subject_id: string;
+  requester_user_id: string;
+  summary: string;
+  details?: string;
+  status: ApprovalStatus;
+  version: string;
+  resolution_comment?: string;
+  resolved_by_user_id?: string;
+  resolved_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApprovalPage {
+  items: ApprovalRequest[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

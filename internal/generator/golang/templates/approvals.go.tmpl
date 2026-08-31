@@ -1,0 +1,304 @@
+// Package approvals owns the generated single-stage approval state machine.
+package approvals
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+	"unicode"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	StatusPending   = "pending"
+	StatusApproved  = "approved"
+	StatusRejected  = "rejected"
+	StatusCancelled = "cancelled"
+
+	ActorRuleRequester = "requester"
+	ActorRuleOther     = "other"
+)
+
+var (
+	ErrInvalidInput    = errors.New("approval input is invalid")
+	ErrNotFound       = errors.New("approval request not found")
+	ErrSubjectNotFound = errors.New("approval subject not found")
+	ErrConflict       = errors.New("approval request conflicts with current state")
+	ErrSelfDecision   = errors.New("requester cannot decide their own approval")
+)
+
+// Request is one approval request over the generated business entity.
+type Request struct {
+	ID                 string     `json:"id"`
+	OrganizationID     string     `json:"organization_id,omitempty"`
+	SubjectType        string     `json:"subject_type"`
+	SubjectID          string     `json:"subject_id"`
+	RequesterUserID    string     `json:"requester_user_id"`
+	Summary            string     `json:"summary"`
+	Details            string     `json:"details,omitempty"`
+	Status             string     `json:"status"`
+	Version            int64      `json:"version,string"`
+	ResolutionComment  string     `json:"resolution_comment,omitempty"`
+	ResolvedByUserID   string     `json:"resolved_by_user_id,omitempty"`
+	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// Event is one immutable approval state transition.
+type Event struct {
+	ID          string    `json:"id"`
+	RequestID   string    `json:"request_id"`
+	ActorUserID string    `json:"actor_user_id"`
+	Status      string    `json:"status"`
+	Comment     string    `json:"comment,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Page is one bounded keyset page of approval requests.
+type Page struct {
+	Items      []Request `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// EventPage contains the immutable history of one request.
+type EventPage struct {
+	Items []Event `json:"items"`
+}
+
+// SubmitInput creates a pending approval over an existing generated business record.
+type SubmitInput struct {
+	SubjectID string `json:"subject_id"`
+	Summary   string `json:"summary"`
+	Details   string `json:"details,omitempty"`
+}
+
+// DecisionInput carries optimistic concurrency and a decision comment.
+type DecisionInput struct {
+	Version int64  `json:"version,string"`
+	Comment string `json:"comment,omitempty"`
+}
+
+// Transition is the transaction-safe state change contract for persistence adapters.
+type Transition struct {
+	OrganizationID string
+	RequestID      string
+	ExpectedVersion int64
+	ActorUserID    string
+	ActorRule      string
+	FromStatus     string
+	ToStatus       string
+	Comment        string
+	ResolvedAt     time.Time
+}
+
+// Store persists requests, immutable events, and security audits atomically.
+type Store interface {
+	Create(context.Context, Request, Event, identity.AuditEvent) error
+	Get(context.Context, string, string) (Request, error)
+	List(context.Context, string, string, string, string, int) ([]Request, string, error)
+	Transition(context.Context, Transition, Event, identity.AuditEvent) (Request, error)
+	Events(context.Context, string, string) ([]Event, error)
+}
+
+// Service enforces approval transitions independently from HTTP and SQL dialects.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns approval use cases.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Submit creates one pending request after persistence verifies the business subject.
+func (service *Service) Submit(ctx context.Context, input SubmitInput, actor identity.Principal) (Request, error) {
+	if err := validateActor(actor); err != nil {
+		return Request{}, err
+	}
+	input.SubjectID = strings.TrimSpace(input.SubjectID)
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.Details = strings.TrimSpace(input.Details)
+	if input.SubjectID == "" || len(input.SubjectID) > 191 || invalidText(input.SubjectID) ||
+		input.Summary == "" || len(input.Summary) > 255 || invalidText(input.Summary) ||
+		len(input.Details) > 4000 || invalidText(input.Details) {
+		return Request{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	request := Request{
+		ID: rand.Text(), OrganizationID: actor.OrganizationID,
+		SubjectType: "{{.Business.ModuleName}}.{{.Business.EntityName}}", SubjectID: input.SubjectID,
+		RequesterUserID: actor.UserID, Summary: input.Summary, Details: input.Details,
+		Status: StatusPending, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	event := newEvent(request.ID, actor.UserID, StatusPending, "", now)
+	audit := newAudit(actor.UserID, "approvals:submit", request.ID, now)
+	if err := service.store.Create(ctx, request, event, audit); err != nil {
+		return Request{}, fmt.Errorf("submit approval: %w", err)
+	}
+	return request, nil
+}
+
+// Get returns one request in the selected organization scope.
+func (service *Service) Get(ctx context.Context, id string, actor identity.Principal) (Request, error) {
+	if err := validateActor(actor); err != nil {
+		return Request{}, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Request{}, ErrInvalidInput
+	}
+	request, err := service.store.Get(ctx, actor.OrganizationID, id)
+	if err != nil {
+		return Request{}, fmt.Errorf("get approval: %w", err)
+	}
+	return request, nil
+}
+
+// List returns the administrative queue with an optional validated status filter.
+func (service *Service) List(ctx context.Context, status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	return service.list(ctx, "", status, cursor, limit, actor)
+}
+
+// ListMine returns only requests submitted by the current identity.
+func (service *Service) ListMine(ctx context.Context, status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	return service.list(ctx, actor.UserID, status, cursor, limit, actor)
+}
+
+// Approve completes a pending request. The requester cannot approve their own request.
+func (service *Service) Approve(ctx context.Context, id string, input DecisionInput, actor identity.Principal) (Request, error) {
+	return service.decide(ctx, id, input, StatusApproved, actor)
+}
+
+// Reject completes a pending request and requires a reason.
+func (service *Service) Reject(ctx context.Context, id string, input DecisionInput, actor identity.Principal) (Request, error) {
+	input.Comment = strings.TrimSpace(input.Comment)
+	if input.Comment == "" {
+		return Request{}, ErrInvalidInput
+	}
+	return service.decide(ctx, id, input, StatusRejected, actor)
+}
+
+// Cancel lets only the requester withdraw their pending request.
+func (service *Service) Cancel(ctx context.Context, id string, input DecisionInput, actor identity.Principal) (Request, error) {
+	if err := validateDecision(id, &input, actor); err != nil {
+		return Request{}, err
+	}
+	current, err := service.Get(ctx, id, actor)
+	if err != nil {
+		return Request{}, err
+	}
+	if current.RequesterUserID != actor.UserID {
+		return Request{}, identity.ErrForbidden
+	}
+	if current.Status != StatusPending || current.Version != input.Version {
+		return Request{}, ErrConflict
+	}
+	return service.transition(ctx, current, input, StatusCancelled, ActorRuleRequester, actor)
+}
+
+// History returns immutable state changes for one request.
+func (service *Service) History(ctx context.Context, id string, actor identity.Principal) (EventPage, error) {
+	request, err := service.Get(ctx, id, actor)
+	if err != nil {
+		return EventPage{}, err
+	}
+	events, err := service.store.Events(ctx, request.OrganizationID, request.ID)
+	if err != nil {
+		return EventPage{}, fmt.Errorf("list approval events: %w", err)
+	}
+	return EventPage{Items: events}, nil
+}
+
+func (service *Service) list(ctx context.Context, requesterID, status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	if err := validateActor(actor); err != nil {
+		return Page{}, err
+	}
+	status = strings.TrimSpace(status)
+	if (status != "" && !validStatus(status)) || limit < 1 || limit > 100 {
+		return Page{}, ErrInvalidInput
+	}
+	items, nextCursor, err := service.store.List(ctx, actor.OrganizationID, requesterID, status, strings.TrimSpace(cursor), limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("list approvals: %w", err)
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+func (service *Service) decide(ctx context.Context, id string, input DecisionInput, status string, actor identity.Principal) (Request, error) {
+	if err := validateDecision(id, &input, actor); err != nil {
+		return Request{}, err
+	}
+	current, err := service.Get(ctx, id, actor)
+	if err != nil {
+		return Request{}, err
+	}
+	if current.RequesterUserID == actor.UserID {
+		return Request{}, ErrSelfDecision
+	}
+	if current.Status != StatusPending || current.Version != input.Version {
+		return Request{}, ErrConflict
+	}
+	return service.transition(ctx, current, input, status, ActorRuleOther, actor)
+}
+
+func (service *Service) transition(ctx context.Context, current Request, input DecisionInput, status, actorRule string, actor identity.Principal) (Request, error) {
+	now := service.now().UTC()
+	transition := Transition{
+		OrganizationID: actor.OrganizationID, RequestID: current.ID, ExpectedVersion: input.Version,
+		ActorUserID: actor.UserID, ActorRule: actorRule, FromStatus: StatusPending,
+		ToStatus: status, Comment: input.Comment, ResolvedAt: now,
+	}
+	event := newEvent(current.ID, actor.UserID, status, input.Comment, now)
+	audit := newAudit(actor.UserID, "approvals:"+status, current.ID, now)
+	updated, err := service.store.Transition(ctx, transition, event, audit)
+	if err != nil {
+		return Request{}, fmt.Errorf("transition approval: %w", err)
+	}
+	return updated, nil
+}
+
+func validateDecision(id string, input *DecisionInput, actor identity.Principal) error {
+	if err := validateActor(actor); err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	input.Comment = strings.TrimSpace(input.Comment)
+	if id == "" || input.Version < 1 || len(input.Comment) > 2000 || invalidText(input.Comment) {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func validateActor(actor identity.Principal) error {
+	if actor.UserID == ""{{if .Tenancy}} || strings.TrimSpace(actor.OrganizationID) == ""{{end}} {
+		return identity.ErrInvalidCredentials
+	}
+	return nil
+}
+
+func validStatus(status string) bool {
+	return status == StatusPending || status == StatusApproved || status == StatusRejected || status == StatusCancelled
+}
+
+func invalidText(value string) bool {
+	for _, character := range value {
+		if character == 0 || (unicode.IsControl(character) && character != '\n' && character != '\t') {
+			return true
+		}
+	}
+	return false
+}
+
+func newEvent(requestID, actorUserID, status, comment string, now time.Time) Event {
+	return Event{ID: rand.Text(), RequestID: requestID, ActorUserID: actorUserID, Status: status, Comment: comment, CreatedAt: now}
+}
+
+func newAudit(userID, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{ID: rand.Text(), UserID: userID, Action: action, Outcome: "succeeded", Target: target, CreatedAt: now}
+}

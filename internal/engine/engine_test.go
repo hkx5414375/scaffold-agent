@@ -255,6 +255,22 @@ func TestGoCSVImportExportWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", csvTransferSelection, "", 54, false)
 }
 
+func TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyApprovalsSelection, "0.3.0", 74, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantApprovalWorkflowsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyApprovalsSelection, "0.3.0", 75, false)
+}
+
+func TestGoApprovalWorkflowsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", approvalsSelection, "", 54, false)
+}
+
+func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", approvalsSelection, "", 55, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -363,6 +379,18 @@ const csvTransferSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyApprovalsSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: approval-workflows
+      version: 0.1.0
+`
+
+const approvalsSelection = `  capabilities:
+    - name: approval-workflows
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -397,10 +425,18 @@ CAPABILITIES
         - {code: "tasks:task:read"}
         - {code: "tasks:task:update"}
         - {code: "tasks:task:delete"}
+WORKFLOWS
 `
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
+	workflows := ""
+	if strings.Contains(capabilities, "approval-workflows") {
+		workflows = `      workflows:
+        - name: approval
+          states: [pending, approved, rejected, cancelled]`
+	}
+	blueprint = strings.ReplaceAll(blueprint, "WORKFLOWS", workflows)
 	writeBlueprint(t, root, blueprint)
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
@@ -441,6 +477,9 @@ CAPABILITIES
 	}
 	if strings.Contains(capabilities, "csv-import-export") && plannedData.CapabilityLock["csv-import-export"] != "0.1.0" {
 		t.Fatalf("Plan() CSV import/export lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "approval-workflows") && plannedData.CapabilityLock["approval-workflows"] != "0.1.0" {
+		t.Fatalf("Plan() approval workflows lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

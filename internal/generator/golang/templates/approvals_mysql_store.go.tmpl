@@ -1,0 +1,274 @@
+// Package mysql persists approval workflows in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+
+	"{{.ModulePath}}/internal/approvals"
+	"{{.ModulePath}}/internal/identity"
+)
+
+// Store implements the MySQL approval persistence boundary.
+type Store struct {
+	database *sql.DB
+}
+
+// New returns a MySQL approval store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
+}
+
+// Create verifies the generated subject and commits request, event, and audit atomically.
+func (store *Store) Create(ctx context.Context, request approvals.Request, event approvals.Event, audit identity.AuditEvent) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin approval submission: %w", err)
+	}
+	var subjectExists bool
+	err = transaction.QueryRowContext(ctx, `
+		select exists(select 1 from {{goSQL .Business.TableName}} where id = ?{{if .Tenancy}} and organization_id = ?{{end}})`,
+		request.SubjectID{{if .Tenancy}}, request.OrganizationID{{end}},
+	).Scan(&subjectExists)
+	if err != nil {
+		return rollback(transaction, fmt.Errorf("verify approval subject: %w", err))
+	}
+	if !subjectExists {
+		return rollback(transaction, approvals.ErrSubjectNotFound)
+	}
+	_, err = transaction.ExecContext(ctx, `
+		insert into approval_requests (
+			id, organization_id, subject_type, subject_id, requester_user_id, summary, details,
+			status, version, created_at, updated_at
+		) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		request.ID, nullableOrganization(request.OrganizationID), request.SubjectType, request.SubjectID,
+		request.RequesterUserID, request.Summary, request.Details, request.Status, request.Version,
+		request.CreatedAt, request.UpdatedAt,
+	)
+	if err != nil {
+		return rollback(transaction, persistenceError(err))
+	}
+	if err := appendEvent(ctx, transaction, event); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit approval submission: %w", err)
+	}
+	return nil
+}
+
+// Get returns one approval request in scope.
+func (store *Store) Get(ctx context.Context, organizationID, id string) (approvals.Request, error) {
+	return scanRequest(store.database.QueryRowContext(ctx, `
+		select id, organization_id, subject_type, subject_id, requester_user_id, summary, details,
+			status, version, resolution_comment, resolved_by_user_id, resolved_at, created_at, updated_at
+		from approval_requests where id = ?{{if .Tenancy}} and organization_id = ?{{end}}`,
+		id{{if .Tenancy}}, organizationID{{end}},
+	))
+}
+
+// List returns one bounded identifier-ordered page.
+func (store *Store) List(ctx context.Context, organizationID, requesterID, status, cursor string, limit int) ([]approvals.Request, string, error) {
+	rows, err := store.database.QueryContext(ctx, `
+		select id, organization_id, subject_type, subject_id, requester_user_id, summary, details,
+			status, version, resolution_comment, resolved_by_user_id, resolved_at, created_at, updated_at
+		from approval_requests
+		where {{if .Tenancy}}organization_id = ? and {{end}}
+			(? = '' or requester_user_id = ?)
+			and (? = '' or status = ?)
+			and (? = '' or id > ?)
+		order by id
+		limit ?`, {{if .Tenancy}}organizationID, {{end}}requesterID, requesterID, status, status, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query approval page: %w", err)
+	}
+	defer rows.Close()
+	items := make([]approvals.Request, 0, limit)
+	for rows.Next() {
+		request, err := scanRequest(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, request)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate approval page: %w", err)
+	}
+	nextCursor := ""
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+// Transition conditionally resolves a pending request and appends immutable evidence.
+func (store *Store) Transition(ctx context.Context, input approvals.Transition, event approvals.Event, audit identity.AuditEvent) (approvals.Request, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return approvals.Request{}, fmt.Errorf("begin approval transition: %w", err)
+	}
+	result, err := transaction.ExecContext(ctx, `
+		update approval_requests set
+			status = ?, version = version + 1, resolution_comment = nullif(?, ''),
+			resolved_by_user_id = ?, resolved_at = ?, updated_at = ?
+		where id = ?{{if .Tenancy}} and organization_id = ?{{end}}
+			and status = ? and version = ?
+			and ((? = 'requester' and requester_user_id = ?)
+				or (? = 'other' and requester_user_id <> ?))`,
+		input.ToStatus, input.Comment, input.ActorUserID, input.ResolvedAt, input.ResolvedAt,
+		input.RequestID, {{if .Tenancy}}input.OrganizationID, {{end}}input.FromStatus, input.ExpectedVersion,
+		input.ActorRule, input.ActorUserID, input.ActorRule, input.ActorUserID,
+	)
+	if err != nil {
+		return approvals.Request{}, rollback(transaction, persistenceError(err))
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return approvals.Request{}, rollback(transaction, fmt.Errorf("inspect approval transition: %w", err))
+	}
+	if rowsAffected != 1 {
+		return approvals.Request{}, rollback(transaction, approvals.ErrConflict)
+	}
+	updated, err := scanRequest(transaction.QueryRowContext(ctx, `
+		select id, organization_id, subject_type, subject_id, requester_user_id, summary, details,
+			status, version, resolution_comment, resolved_by_user_id, resolved_at, created_at, updated_at
+		from approval_requests where id = ?{{if .Tenancy}} and organization_id = ?{{end}}`,
+		input.RequestID{{if .Tenancy}}, input.OrganizationID{{end}},
+	))
+	if err != nil {
+		return approvals.Request{}, rollback(transaction, err)
+	}
+	if err := appendEvent(ctx, transaction, event); err != nil {
+		return approvals.Request{}, rollback(transaction, err)
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return approvals.Request{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return approvals.Request{}, fmt.Errorf("commit approval transition: %w", err)
+	}
+	return updated, nil
+}
+
+// Events returns the immutable history of one in-scope request.
+func (store *Store) Events(ctx context.Context, organizationID, requestID string) ([]approvals.Event, error) {
+	rows, err := store.database.QueryContext(ctx, `
+		select event.id, event.request_id, event.actor_user_id, event.status, event.comment, event.created_at
+		from approval_events event
+		join approval_requests request on request.id = event.request_id
+		where event.request_id = ?{{if .Tenancy}} and request.organization_id = ?{{end}}
+		order by event.created_at, event.id`, requestID{{if .Tenancy}}, organizationID{{end}})
+	if err != nil {
+		return nil, fmt.Errorf("query approval events: %w", err)
+	}
+	defer rows.Close()
+	events := make([]approvals.Event, 0, 2)
+	for rows.Next() {
+		var event approvals.Event
+		var comment sql.NullString
+		if err := rows.Scan(&event.ID, &event.RequestID, &event.ActorUserID, &event.Status, &comment, &event.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan approval event: %w", err)
+		}
+		if comment.Valid {
+			event.Comment = comment.String
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate approval events: %w", err)
+	}
+	return events, nil
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanRequest(row rowScanner) (approvals.Request, error) {
+	var request approvals.Request
+	var organizationID, resolutionComment, resolvedByUserID sql.NullString
+	var resolvedAt sql.NullTime
+	err := row.Scan(
+		&request.ID, &organizationID, &request.SubjectType, &request.SubjectID,
+		&request.RequesterUserID, &request.Summary, &request.Details, &request.Status,
+		&request.Version, &resolutionComment, &resolvedByUserID, &resolvedAt,
+		&request.CreatedAt, &request.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return approvals.Request{}, approvals.ErrNotFound
+	}
+	if err != nil {
+		return approvals.Request{}, fmt.Errorf("scan approval request: %w", err)
+	}
+	if organizationID.Valid {
+		request.OrganizationID = organizationID.String
+	}
+	if resolutionComment.Valid {
+		request.ResolutionComment = resolutionComment.String
+	}
+	if resolvedByUserID.Valid {
+		request.ResolvedByUserID = resolvedByUserID.String
+	}
+	if resolvedAt.Valid {
+		value := resolvedAt.Time
+		request.ResolvedAt = &value
+	}
+	return request, nil
+}
+
+func appendEvent(ctx context.Context, transaction *sql.Tx, event approvals.Event) error {
+	_, err := transaction.ExecContext(ctx, `
+		insert into approval_events (id, request_id, actor_user_id, status, comment, created_at)
+		values (?, ?, ?, ?, nullif(?, ''), ?)`,
+		event.ID, event.RequestID, event.ActorUserID, event.Status, event.Comment, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append approval event: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, transaction *sql.Tx, event identity.AuditEvent) error {
+	_, err := transaction.ExecContext(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values (?, nullif(?, ''), ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), ?)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target,
+		event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append approval audit: %w", err)
+	}
+	return nil
+}
+
+func persistenceError(err error) error {
+	var databaseError *mysqldriver.MySQLError
+	if errors.As(err, &databaseError) && databaseError.Number == 1062 {
+		return approvals.ErrConflict
+	}
+	return err
+}
+
+func rollback(transaction *sql.Tx, cause error) error {
+	if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return errors.Join(cause, fmt.Errorf("roll back approval transaction: %w", err))
+	}
+	return cause
+}
+
+func nullableOrganization(organizationID string) any {
+	if organizationID == "" {
+		return nil
+	}
+	return organizationID
+}
+
+var _ approvals.Store = (*Store)(nil)

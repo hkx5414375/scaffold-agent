@@ -117,6 +117,18 @@ to prevent spreadsheet formula execution. Agents must use the generated field
 order and RFC3339 datetimes, must not turn import into an unaudited upsert, and
 must not bypass organization scope or the generated limits.
 
+Selecting `approval-workflows` version `0.1.0` requires one generated business
+entity and one explicit module workflow named `approval` whose ordered states are
+`pending`, `approved`, `rejected`, and `cancelled`. The generated service verifies
+the tenant-scoped subject at submission, permits at most one pending request per
+subject, prevents requesters from approving or rejecting their own requests, and
+uses optimistic versions for every terminal transition. Only the requester may
+cancel a pending request. Submitter and reviewer routes have separate permissions;
+each successful submission or transition commits the request, an immutable event,
+and a security audit atomically. Agents must not add implicit subject mutation,
+bypass separation of duties, overwrite event history, or infer extra workflow
+states that are absent from the Blueprint.
+
 ## STDIO protocol
 
 Run the server with:

@@ -659,6 +659,219 @@ paths:
         "500":
           $ref: "#/components/responses/ErrorResponse"
 {{end}}
+{{if .Approvals}}
+  /api/v1/approvals:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: submitApproval
+      x-required-permission: approvals:submit
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalSubmit"
+      responses:
+        "201":
+          description: Pending approval request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: listApprovals
+      x-required-permission: approvals:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalStatus"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Bounded approval queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/approvals/mine:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: listOwnApprovals
+      x-required-permission: approvals:mine
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+        - $ref: "#/components/parameters/ApprovalStatus"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Current identity's bounded approval requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/approvals/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: getApproval
+      x-required-permission: approvals:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: One approval request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/approvals/{id}/events:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: listApprovalEvents
+      x-required-permission: approvals:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Immutable approval transition history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalEventPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+{{range $operation := list "approve" "reject"}}
+  /api/v1/approvals/{id}/{{$operation}}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if $.Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: {{$operation}}Approval
+      x-required-permission: approvals:decide
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecision"
+      responses:
+        "200":
+          description: Resolved approval request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
+  /api/v1/approvals/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: cancelApproval
+      x-required-permission: approvals:mine
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecision"
+      responses:
+        "200":
+          description: Cancelled approval request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalRequest"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -927,6 +1140,27 @@ components:
       required: true
       schema:
         type: string
+{{if .Approvals}}
+    ApprovalStatus:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [pending, approved, rejected, cancelled]
+    PageCursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    PageLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+{{end}}
 {{if .Tenancy}}
     OrganizationId:
       name: X-Organization-ID
@@ -1237,6 +1471,126 @@ components:
             $ref: "#/components/schemas/JobItem"
         next_cursor:
           type: string
+{{end}}
+{{if .Approvals}}
+    ApprovalRequest:
+      type: object
+      required:
+        - id
+{{- if .Tenancy}}
+        - organization_id
+{{- end}}
+        - subject_type
+        - subject_id
+        - requester_user_id
+        - summary
+        - status
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+{{- if .Tenancy}}
+        organization_id:
+          type: string
+{{- end}}
+        subject_type:
+          type: string
+          const: {{.Business.ModuleName}}.{{.Business.EntityName}}
+        subject_id:
+          type: string
+        requester_user_id:
+          type: string
+        summary:
+          type: string
+          maxLength: 255
+        details:
+          type: string
+          maxLength: 4000
+        status:
+          type: string
+          enum: [pending, approved, rejected, cancelled]
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+        resolution_comment:
+          type: string
+          maxLength: 2000
+        resolved_by_user_id:
+          type: string
+        resolved_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ApprovalSubmit:
+      type: object
+      additionalProperties: false
+      required: [subject_id, summary]
+      properties:
+        subject_id:
+          type: string
+          minLength: 1
+          maxLength: 191
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 255
+        details:
+          type: string
+          maxLength: 4000
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+        comment:
+          type: string
+          maxLength: 2000
+    ApprovalPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalRequest"
+        next_cursor:
+          type: string
+    ApprovalEvent:
+      type: object
+      required: [id, request_id, actor_user_id, status, created_at]
+      properties:
+        id:
+          type: string
+        request_id:
+          type: string
+        actor_user_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected, cancelled]
+        comment:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    ApprovalEventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalEvent"
 {{end}}
 {{if .Business}}
     {{.Business.EntityType}}:

@@ -1,0 +1,162 @@
+// Package httpapi exposes approval workflows through permission-protected HTTP routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/approvals"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const defaultPageLimit = 20
+
+// Handler maps approval use cases to HTTP.
+type Handler struct {
+	service *approvals.Service
+}
+
+// New returns an approval HTTP adapter.
+func New(service *approvals.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds submitter and reviewer routes with separate permissions.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/approvals", security.Authorized("approvals:submit", handler.submit))
+	mux.HandleFunc("GET /api/v1/approvals/mine", security.Authorized("approvals:mine", handler.listMine))
+	mux.HandleFunc("POST /api/v1/approvals/{id}/cancel", security.Authorized("approvals:mine", handler.cancel))
+	mux.HandleFunc("GET /api/v1/approvals", security.Authorized("approvals:read", handler.list))
+	mux.HandleFunc("GET /api/v1/approvals/{id}", security.Authorized("approvals:read", handler.get))
+	mux.HandleFunc("GET /api/v1/approvals/{id}/events", security.Authorized("approvals:read", handler.history))
+	mux.HandleFunc("POST /api/v1/approvals/{id}/approve", security.Authorized("approvals:decide", handler.approve))
+	mux.HandleFunc("POST /api/v1/approvals/{id}/reject", security.Authorized("approvals:decide", handler.reject))
+}
+
+func (handler *Handler) submit(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input approvals.SubmitInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := handler.service.Submit(request.Context(), input, actor)
+	if err != nil {
+		handleError(response, "submit approval", err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, value)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	page, err := handler.service.List(request.Context(), request.URL.Query().Get("status"), request.URL.Query().Get("cursor"), limit, actor)
+	if err != nil {
+		handleError(response, "list approvals", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) listMine(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	page, err := handler.service.ListMine(request.Context(), request.URL.Query().Get("status"), request.URL.Query().Get("cursor"), limit, actor)
+	if err != nil {
+		handleError(response, "list own approvals", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.Get(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "get approval", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) history(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	page, err := handler.service.History(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "list approval history", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) approve(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.decision(response, request, actor, handler.service.Approve, "approve request")
+}
+
+func (handler *Handler) reject(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.decision(response, request, actor, handler.service.Reject, "reject request")
+}
+
+func (handler *Handler) cancel(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.decision(response, request, actor, handler.service.Cancel, "cancel request")
+}
+
+func (handler *Handler) decision(
+	response http.ResponseWriter,
+	request *http.Request,
+	actor identity.Principal,
+	transition func(context.Context, string, approvals.DecisionInput, identity.Principal) (approvals.Request, error),
+	operation string,
+) {
+	var input approvals.DecisionInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := transition(request.Context(), request.PathValue("id"), input, actor)
+	if err != nil {
+		handleError(response, operation, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func pageLimit(response http.ResponseWriter, request *http.Request) (int, bool) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer")
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, approvals.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "approvals.invalid", "approval data is invalid")
+	case errors.Is(err, approvals.ErrSubjectNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "approvals.subject_not_found", "approval subject was not found")
+	case errors.Is(err, approvals.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "approvals.not_found", "approval request was not found")
+	case errors.Is(err, approvals.ErrSelfDecision):
+		httpjson.WriteError(response, http.StatusConflict, "approvals.self_decision", "requesters cannot decide their own approval")
+	case errors.Is(err, approvals.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "approvals.conflict", "approval request changed or is no longer pending")
+	case errors.Is(err, identity.ErrForbidden):
+		httpjson.WriteError(response, http.StatusForbidden, "identity.forbidden", "permission is required")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

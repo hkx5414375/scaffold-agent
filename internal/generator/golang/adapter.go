@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"go/format"
+	"slices"
 	"sort"
 	"strings"
 	"text/template"
@@ -44,6 +45,8 @@ const (
 	observabilityVersion    = "0.1.0"
 	csvTransferCapability   = "csv-import-export"
 	csvTransferVersion      = "0.1.0"
+	approvalsCapability     = "approval-workflows"
+	approvalsVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -109,6 +112,9 @@ type databaseTemplateSet struct {
 	CSVTransferStorePath              string
 	CSVTransferStoreTemplate          string
 	CSVTransferMigrationTemplate      string
+	ApprovalsStorePath                string
+	ApprovalsStoreTemplate            string
+	ApprovalsMigrationTemplate        string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -151,6 +157,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CSVTransferStorePath:              "transfer/postgres/store.go",
 		CSVTransferStoreTemplate:          "templates/csv_transfer_postgres_store.go.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_postgres.sql.tmpl",
+		ApprovalsStorePath:                "internal/approvals/postgres/store.go",
+		ApprovalsStoreTemplate:            "templates/approvals_postgres_store.go.tmpl",
+		ApprovalsMigrationTemplate:        "templates/approvals_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -192,6 +201,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CSVTransferStorePath:              "transfer/mysql/store.go",
 		CSVTransferStoreTemplate:          "templates/csv_transfer_mysql_store.go.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_mysql.sql.tmpl",
+		ApprovalsStorePath:                "internal/approvals/mysql/store.go",
+		ApprovalsStoreTemplate:            "templates/approvals_mysql_store.go.tmpl",
+		ApprovalsMigrationTemplate:        "templates/approvals_mysql.sql.tmpl",
 	},
 }
 
@@ -298,6 +310,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: approvalsCapability, Version: approvalsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware single-stage approval state machine with separation of duties and immutable events",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -372,6 +394,13 @@ var csvTransferTemplates = []businessTemplate{
 	{PathSuffix: "transfer/httpapi/handler_test.go", TemplatePath: "templates/csv_transfer_handler_test.go.tmpl"},
 }
 
+var approvalsTemplates = map[string]string{
+	"internal/approvals/service.go":              "templates/approvals.go.tmpl",
+	"internal/approvals/service_test.go":         "templates/approvals_test.go.tmpl",
+	"internal/approvals/httpapi/handler.go":      "templates/approvals_handler.go.tmpl",
+	"internal/approvals/httpapi/handler_test.go": "templates/approvals_handler_test.go.tmpl",
+}
+
 var adminTemplates = map[string]string{
 	"web/admin/.prettierignore":             "templates/admin/.prettierignore",
 	"web/admin/.prettierrc.json":            "templates/admin/.prettierrc.json",
@@ -443,6 +472,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobAdminEnabled := false
 	observabilityEnabled := false
 	csvTransferEnabled := false
+	approvalsEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -475,13 +505,19 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == csvTransferCapability {
 			csvTransferEnabled = true
 		}
+		if pack.Metadata.Name == approvalsCapability {
+			approvalsEnabled = true
+		}
 	}
-	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
+	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine, approvalsEnabled)
 	if err != nil {
 		return generator.Result{}, err
 	}
 	if csvTransferEnabled && business == nil {
 		return generator.Result{}, errors.New("csv-import-export requires one generated business entity")
+	}
+	if approvalsEnabled && business == nil {
+		return generator.Result{}, errors.New("approval-workflows requires one generated business entity")
 	}
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -499,6 +535,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		JobAdmin:         jobAdminEnabled,
 		Observability:    observabilityEnabled,
 		CSVTransfer:      csvTransferEnabled,
+		Approvals:        approvalsEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -526,6 +563,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if csvTransferEnabled {
+		data.MigrationCount++
+	}
+	if approvalsEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
@@ -678,6 +718,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			Owner:        csvTransferCapability,
 		}
 	}
+	if approvalsEnabled {
+		for path, templatePath := range approvalsTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: approvalsCapability}
+		}
+		targets[database.ApprovalsStorePath] = renderTarget{TemplatePath: database.ApprovalsStoreTemplate, Owner: approvalsCapability}
+		targets["internal/platform/migrate/migrations/000250_approval_workflows.sql"] = renderTarget{
+			TemplatePath: database.ApprovalsMigrationTemplate,
+			Owner:        approvalsCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/ApprovalsView.vue"] = renderTarget{
+				TemplatePath: "templates/admin/src/views/ApprovalsView.vue.tmpl",
+				Owner:        approvalsCapability,
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -744,6 +800,7 @@ type templateData struct {
 	JobAdmin         bool
 	Observability    bool
 	CSVTransfer      bool
+	Approvals        bool
 	MigrationCount   int
 }
 
@@ -805,7 +862,7 @@ type supportedFieldType struct {
 	JSONOptions       string
 }
 
-func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessData, error) {
+func buildBusinessData(modules []spec.Module, databaseEngine string, approvalsEnabled bool) (*businessData, error) {
 	if len(modules) == 0 {
 		return nil, nil
 	}
@@ -822,8 +879,16 @@ func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessD
 	if len(module.Entities) != 1 {
 		return nil, fmt.Errorf("the first Go CRUD slice supports exactly one entity")
 	}
-	if len(module.Workflows) > 0 || len(module.Pages) > 0 {
-		return nil, fmt.Errorf("Go workflows and generated pages are not available in the first CRUD slice")
+	if len(module.Pages) > 0 {
+		return nil, fmt.Errorf("Go generated pages are not available in the first CRUD slice")
+	}
+	if approvalsEnabled {
+		if len(module.Workflows) != 1 || module.Workflows[0].Name != "approval" ||
+			!slices.Equal(module.Workflows[0].States, []string{"pending", "approved", "rejected", "cancelled"}) {
+			return nil, fmt.Errorf("approval-workflows requires workflow approval with states pending, approved, rejected, cancelled in that order")
+		}
+	} else if len(module.Workflows) > 0 {
+		return nil, fmt.Errorf("Go workflows require a selected workflow capability")
 	}
 	entity := module.Entities[0]
 	prefix := module.Name + ":" + entity.Name
@@ -928,6 +993,7 @@ func render(templatePath string, data templateData) ([]byte, error) {
 	functions := template.FuncMap{
 		"sql":   func(value string) string { return quoteSQLIdentifier(data.Database.Engine, value) },
 		"goSQL": func(value string) string { return quoteGoSQLIdentifier(data.Database.Engine, value) },
+		"list":  func(values ...string) []string { return values },
 	}
 	parsed, err := template.New(templatePath).Funcs(functions).Option("missingkey=error").Parse(string(content))
 	if err != nil {

@@ -1,0 +1,110 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/approvals"
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestSubmitAndApproveHTTP(t *testing.T) {
+	store := &handlerStore{}
+	handler := New(approvals.NewService(store))
+	requester := handlerPrincipal("requester")
+	reviewer := handlerPrincipal("reviewer")
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/approvals", strings.NewReader(`{"subject_id":"subject-1","summary":"Review record"}`))
+	response := httptest.NewRecorder()
+	handler.submit(response, request, requester)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"status":"pending"`) {
+		t.Fatalf("submit response = %d, %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/approvals/"+store.request.ID+"/approve", strings.NewReader(`{"version":"1","comment":"ok"}`))
+	request.SetPathValue("id", store.request.ID)
+	response = httptest.NewRecorder()
+	handler.approve(response, request, reviewer)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"approved"`) {
+		t.Fatalf("approve response = %d, %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/approvals/mine?limit=20", nil)
+	response = httptest.NewRecorder()
+	handler.listMine(response, request, requester)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), store.request.ID) {
+		t.Fatalf("mine response = %d, %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRejectRequiresComment(t *testing.T) {
+	store := &handlerStore{}
+	service := approvals.NewService(store)
+	handler := New(service)
+	requester := handlerPrincipal("requester")
+	created, err := service.Submit(context.Background(), approvals.SubmitInput{SubjectID: "subject-1", Summary: "Review"}, requester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/approvals/"+created.ID+"/reject", strings.NewReader(`{"version":"1"}`))
+	request.SetPathValue("id", created.ID)
+	response := httptest.NewRecorder()
+	handler.reject(response, request, handlerPrincipal("reviewer"))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "approvals.invalid") {
+		t.Fatalf("reject response = %d, %s", response.Code, response.Body.String())
+	}
+}
+
+func handlerPrincipal(userID string) identity.Principal {
+	return identity.Principal{UserID: userID{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+}
+
+type handlerStore struct {
+	request approvals.Request
+	events  []approvals.Event
+}
+
+func (store *handlerStore) Create(_ context.Context, request approvals.Request, event approvals.Event, _ identity.AuditEvent) error {
+	store.request, store.events = request, []approvals.Event{event}
+	return nil
+}
+
+func (store *handlerStore) Get(_ context.Context, organizationID, id string) (approvals.Request, error) {
+	if store.request.ID != id{{if .Tenancy}} || store.request.OrganizationID != organizationID{{end}} {
+		return approvals.Request{}, approvals.ErrNotFound
+	}
+	return store.request, nil
+}
+
+func (store *handlerStore) List(_ context.Context, organizationID, requesterID, status, _ string, _ int) ([]approvals.Request, string, error) {
+	if store.request.ID == ""{{if .Tenancy}} || store.request.OrganizationID != organizationID{{end}} || (requesterID != "" && store.request.RequesterUserID != requesterID) || (status != "" && store.request.Status != status) {
+		return nil, "", nil
+	}
+	return []approvals.Request{store.request}, "", nil
+}
+
+func (store *handlerStore) Transition(_ context.Context, transition approvals.Transition, event approvals.Event, _ identity.AuditEvent) (approvals.Request, error) {
+	if store.request.ID != transition.RequestID || store.request.Status != approvals.StatusPending || store.request.Version != transition.ExpectedVersion {
+		return approvals.Request{}, approvals.ErrConflict
+	}
+	if transition.ActorRule == approvals.ActorRuleOther && store.request.RequesterUserID == transition.ActorUserID {
+		return approvals.Request{}, approvals.ErrConflict
+	}
+	store.request.Status = transition.ToStatus
+	store.request.Version++
+	store.request.ResolvedByUserID = transition.ActorUserID
+	store.request.ResolutionComment = transition.Comment
+	store.request.ResolvedAt = &transition.ResolvedAt
+	store.request.UpdatedAt = transition.ResolvedAt
+	store.events = append(store.events, event)
+	return store.request, nil
+}
+
+func (store *handlerStore) Events(context.Context, string, string) ([]approvals.Event, error) {
+	return append([]approvals.Event(nil), store.events...), nil
+}
+
+var _ approvals.Store = (*handlerStore)(nil)
