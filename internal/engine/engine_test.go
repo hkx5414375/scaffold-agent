@@ -239,6 +239,22 @@ func TestGoObservabilityWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T)
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", observabilitySelection, "", 50, false)
 }
 
+func TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCSVTransferSelection, "0.3.0", 73, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantCSVImportExportMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCSVTransferSelection, "0.3.0", 74, false)
+}
+
+func TestGoCSVImportExportWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", csvTransferSelection, "", 53, false)
+}
+
+func TestGoCSVImportExportWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", csvTransferSelection, "", 54, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -335,6 +351,18 @@ const observabilitySelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyCSVTransferSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: csv-import-export
+      version: 0.1.0
+`
+
+const csvTransferSelection = `  capabilities:
+    - name: csv-import-export
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -410,6 +438,9 @@ CAPABILITIES
 	}
 	if strings.Contains(capabilities, "observability") && plannedData.CapabilityLock["observability"] != "0.1.0" {
 		t.Fatalf("Plan() observability lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "csv-import-export") && plannedData.CapabilityLock["csv-import-export"] != "0.1.0" {
+		t.Fatalf("Plan() CSV import/export lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

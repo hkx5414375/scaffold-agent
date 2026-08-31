@@ -1,0 +1,315 @@
+// Package transfer owns bounded, atomic CSV import and audited CSV export.
+package transfer
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/identity"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+)
+
+const (
+	// MaximumRows bounds one import or export operation.
+	MaximumRows = 1000
+	// MaximumBytes bounds both uploaded and generated CSV documents.
+	MaximumBytes int64 = 5 << 20
+)
+
+var (
+	ErrInvalidCSV  = errors.New("CSV document is invalid")
+	ErrTooLarge    = errors.New("CSV document exceeds the byte limit")
+	ErrTooManyRows = errors.New("CSV document exceeds the row limit")
+)
+
+var csvHeader = []string{
+{{- range .Business.Fields}}
+	"{{.Name}}",
+{{- end}}
+}
+
+// Store persists an import in one transaction and couples export reads to an audit event.
+type Store interface {
+	Import(context.Context, []business.{{.Business.EntityType}}, identity.AuditEvent) error
+	Export(context.Context, string, int, identity.AuditEvent) ([]business.{{.Business.EntityType}}, error)
+}
+
+// Service validates the stable CSV contract before reaching persistence.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns CSV import and export use cases.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// ImportCSV validates the complete bounded document before atomically inserting any row.
+func (service *Service) ImportCSV(ctx context.Context, source io.Reader, actor identity.Principal) (int, error) {
+	if err := validateActor(actor); err != nil {
+		return 0, err
+	}
+	payload, err := readBounded(source)
+	if err != nil {
+		return 0, err
+	}
+	reader := csv.NewReader(bytes.NewReader(payload))
+	reader.FieldsPerRecord = len(csvHeader)
+	records, err := reader.ReadAll()
+	if err != nil {
+		return 0, fmt.Errorf("%w: parse document", ErrInvalidCSV)
+	}
+	if len(records) < 2 {
+		return 0, fmt.Errorf("%w: at least one data row is required", ErrInvalidCSV)
+	}
+	records[0][0] = strings.TrimPrefix(records[0][0], "\ufeff")
+	if !equalHeader(records[0]) {
+		return 0, fmt.Errorf("%w: header must be %s", ErrInvalidCSV, strings.Join(csvHeader, ","))
+	}
+	if len(records)-1 > MaximumRows {
+		return 0, ErrTooManyRows
+	}
+	now := service.now().UTC()
+	values := make([]business.{{.Business.EntityType}}, 0, len(records)-1)
+	for index, record := range records[1:] {
+		value, err := decodeRecord(record, actor.OrganizationID, now)
+		if err != nil {
+			return 0, fmt.Errorf("row %d: %w", index+2, err)
+		}
+		values = append(values, value)
+	}
+	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:import", strconv.Itoa(len(values)), now)
+	if err := service.store.Import(ctx, values, audit); err != nil {
+		return 0, fmt.Errorf("import CSV records: %w", err)
+	}
+	return len(values), nil
+}
+
+// ExportCSV creates a bounded safe-for-spreadsheet CSV document with a stable field order.
+func (service *Service) ExportCSV(ctx context.Context, actor identity.Principal) ([]byte, int, error) {
+	if err := validateActor(actor); err != nil {
+		return nil, 0, err
+	}
+	now := service.now().UTC()
+	audit := newAudit(actor, "{{.Business.PermissionPrefix}}:export", "csv", now)
+	values, err := service.store.Export(ctx, actor.OrganizationID, MaximumRows, audit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("export CSV records: %w", err)
+	}
+	document, err := encodeRecords(values)
+	if err != nil {
+		return nil, 0, err
+	}
+	return document, len(values), nil
+}
+
+// TemplateCSV returns the header-only import template.
+func (service *Service) TemplateCSV() []byte {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	_ = writer.Write(csvHeader)
+	writer.Flush()
+	return buffer.Bytes()
+}
+
+func readBounded(source io.Reader) ([]byte, error) {
+	if source == nil {
+		return nil, fmt.Errorf("%w: body is required", ErrInvalidCSV)
+	}
+	payload, err := io.ReadAll(io.LimitReader(source, MaximumBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read document", ErrInvalidCSV)
+	}
+	if int64(len(payload)) > MaximumBytes {
+		return nil, ErrTooLarge
+	}
+	return payload, nil
+}
+
+func equalHeader(actual []string) bool {
+	if len(actual) != len(csvHeader) {
+		return false
+	}
+	for index := range csvHeader {
+		if actual[index] != csvHeader[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeRecord(record []string, organizationID string, now time.Time) (business.{{.Business.EntityType}}, error) {
+	value := business.{{.Business.EntityType}}{
+		ID: rand.Text(), OrganizationID: organizationID, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+{{- range $index, $field := .Business.Fields}}
+	raw{{$field.GoName}} := decodeSpreadsheetCell(record[{{$index}}])
+	if !validText(raw{{$field.GoName}}) {
+		return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} contains invalid text", ErrInvalidCSV)
+	}
+{{- if $field.Required}}
+	if raw{{$field.GoName}} == "" {
+		return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} is required", ErrInvalidCSV)
+	}
+{{- end}}
+{{- if $field.StringLike}}
+	if raw{{$field.GoName}} != "" && strings.TrimSpace(raw{{$field.GoName}}) == "" {
+		return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} cannot be blank", ErrInvalidCSV)
+	}
+{{- end}}
+{{- if eq $field.GoType "string"}}
+	if {{if not $field.Required}}raw{{$field.GoName}} != "" && {{end}}utf8.RuneCountInString(raw{{$field.GoName}}) > {{if eq $field.SQLType "varchar(255)"}}255{{else}}int(MaximumBytes){{end}} {
+		return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} is too long", ErrInvalidCSV)
+	}
+	{{if $field.Required}}value.{{$field.GoName}} = raw{{$field.GoName}}{{else}}if raw{{$field.GoName}} != "" {
+		parsed := raw{{$field.GoName}}
+		value.{{$field.GoName}} = &parsed
+	}{{end}}
+{{- else if eq $field.GoType "bool"}}
+	if raw{{$field.GoName}} != "" {
+		if raw{{$field.GoName}} != "true" && raw{{$field.GoName}} != "false" {
+			return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} must be true or false", ErrInvalidCSV)
+		}
+		parsed, _ := strconv.ParseBool(raw{{$field.GoName}})
+		{{if $field.Required}}value.{{$field.GoName}} = parsed{{else}}value.{{$field.GoName}} = &parsed{{end}}
+	}
+{{- else if eq $field.GoType "int64"}}
+	if raw{{$field.GoName}} != "" {
+		parsed, err := strconv.ParseInt(raw{{$field.GoName}}, 10, 64)
+		if err != nil {
+			return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} must be a base-10 int64", ErrInvalidCSV)
+		}
+		{{if $field.Required}}value.{{$field.GoName}} = parsed{{else}}value.{{$field.GoName}} = &parsed{{end}}
+	}
+{{- else if eq $field.GoType "time.Time"}}
+	if raw{{$field.GoName}} != "" {
+		parsed, err := time.Parse(time.RFC3339, raw{{$field.GoName}})
+		if err != nil {
+			return business.{{$.Business.EntityType}}{}, fmt.Errorf("%w: {{$field.Name}} must use RFC3339", ErrInvalidCSV)
+		}
+		parsed = parsed.UTC()
+		{{if $field.Required}}value.{{$field.GoName}} = parsed{{else}}value.{{$field.GoName}} = &parsed{{end}}
+	}
+{{- end}}
+{{- end}}
+	return value, nil
+}
+
+func encodeRecords(values []business.{{.Business.EntityType}}) ([]byte, error) {
+	var destination cappedBuffer
+	writer := csv.NewWriter(&destination)
+	if err := writer.Write(csvHeader); err != nil {
+		return nil, fmt.Errorf("encode CSV header: %w", err)
+	}
+	for _, value := range values {
+		if err := writer.Write(csvRecord(value)); err != nil {
+			return nil, fmt.Errorf("encode CSV record: %w", err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		if errors.Is(err, ErrTooLarge) {
+			return nil, ErrTooLarge
+		}
+		return nil, fmt.Errorf("encode CSV document: %w", err)
+	}
+	return destination.buffer.Bytes(), nil
+}
+
+// CSVHeaderSize returns the exact encoded byte size of the stable header row.
+func CSVHeaderSize() int64 {
+	size, _ := encodedRowSize(csvHeader)
+	return size
+}
+
+// CSVRecordSize returns the exact encoded byte size of one safe export row.
+func CSVRecordSize(value business.{{.Business.EntityType}}) (int64, error) {
+	return encodedRowSize(csvRecord(value))
+}
+
+func csvRecord(value business.{{.Business.EntityType}}) []string {
+	record := make([]string, 0, len(csvHeader))
+{{- range .Business.Fields}}
+{{- if .Required}}
+	record = append(record, {{if eq .GoType "string"}}encodeSpreadsheetCell(value.{{.GoName}}){{else if eq .GoType "bool"}}strconv.FormatBool(value.{{.GoName}}){{else if eq .GoType "int64"}}strconv.FormatInt(value.{{.GoName}}, 10){{else}}value.{{.GoName}}.UTC().Format(time.RFC3339Nano){{end}})
+{{- else}}
+	if value.{{.GoName}} == nil {
+		record = append(record, "")
+	} else {
+		record = append(record, {{if eq .GoType "string"}}encodeSpreadsheetCell(*value.{{.GoName}}){{else if eq .GoType "bool"}}strconv.FormatBool(*value.{{.GoName}}){{else if eq .GoType "int64"}}strconv.FormatInt(*value.{{.GoName}}, 10){{else}}value.{{.GoName}}.UTC().Format(time.RFC3339Nano){{end}})
+	}
+{{- end}}
+{{- end}}
+	return record
+}
+
+func encodedRowSize(record []string) (int64, error) {
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write(record); err != nil {
+		return 0, err
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		return 0, err
+	}
+	return int64(buffer.Len()), nil
+}
+
+func encodeSpreadsheetCell(value string) string {
+	if value == "" {
+		return value
+	}
+	if value[0] == '\'' || strings.ContainsRune("=+-@", rune(value[0])) {
+		return "'" + value
+	}
+	return value
+}
+
+func decodeSpreadsheetCell(value string) string {
+	if strings.HasPrefix(value, "''") {
+		return value[1:]
+	}
+	if len(value) > 1 && value[0] == '\'' && strings.ContainsRune("=+-@", rune(value[1])) {
+		return value[1:]
+	}
+	return value
+}
+
+func validText(value string) bool {
+	return utf8.ValidString(value) && !strings.ContainsRune(value, '\x00')
+}
+
+func validateActor(actor identity.Principal) error {
+	if actor.UserID == ""{{if .Tenancy}} || strings.TrimSpace(actor.OrganizationID) == ""{{end}} {
+		return identity.ErrInvalidCredentials
+	}
+	return nil
+}
+
+func newAudit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: action, Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}
+
+type cappedBuffer struct {
+	buffer bytes.Buffer
+}
+
+func (destination *cappedBuffer) Write(content []byte) (int, error) {
+	if int64(destination.buffer.Len()+len(content)) > MaximumBytes {
+		return 0, ErrTooLarge
+	}
+	return destination.buffer.Write(content)
+}

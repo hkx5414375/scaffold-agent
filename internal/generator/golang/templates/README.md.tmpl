@@ -35,6 +35,10 @@ audited dead-job retry. Only administrators receive its permissions.
 It also contains `observability` with request correlation, safe structured access
 logs, low-cardinality Prometheus metrics, and bounded database readiness.
 {{end}}
+{{if .CSVTransfer}}
+It also contains `csv-import-export` with a Blueprint-derived field contract,
+atomic create-only imports, audited exports, and separate permissions.
+{{end}}
 
 ## Requirements
 
@@ -139,6 +143,11 @@ runtime secret store; queued message bodies are sensitive database content.
 - `GET /api/v1/jobs`
 - `POST /api/v1/jobs/{id}/retry`
 {{end}}
+{{if .CSVTransfer}}
+- `POST {{.Business.RoutePath}}/import`
+- `GET {{.Business.RoutePath}}/import-template`
+- `GET {{.Business.RoutePath}}/export`
+{{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
 - `GET {{.Business.RoutePath}}`
@@ -168,6 +177,17 @@ and remove members. Invitation secrets are stored only as SHA-256 digests and ar
 returned once for delivery. Role changes and removals are serialized per
 organization so the final administrator cannot be removed or demoted.
 {{end}}
+{{end}}
+{{if .CSVTransfer}}
+
+CSV import and export use exactly the mutable field order declared by the
+Blueprint. Download the generated template before preparing an import. Documents
+are limited to 5 MiB and 1000 rows; datetimes use RFC3339 and blank optional cells
+become null. Import creates new identifiers and commits all rows in one database
+transaction. One invalid or conflicting row rolls back the complete batch. Export
+is audited and returns no partial document when its row or byte bound is exceeded.
+Generated spreadsheet-cell escaping prevents formula execution and round-trips
+through the matching importer.
 {{end}}
 {{if .Admin}}
 ## Administration UI

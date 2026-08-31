@@ -1,0 +1,120 @@
+package transfer
+
+import (
+	"bytes"
+	"context"
+	"encoding/csv"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+)
+
+func TestImportAndExportCSV(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+
+	document := csvDocument(t, 1)
+	count, err := service.ImportCSV(context.Background(), bytes.NewReader(document), actor)
+	if err != nil || count != 1 || len(store.values) != 1 {
+		t.Fatalf("ImportCSV() = %d, %v, values = %#v", count, err, store.values)
+	}
+	if store.audit.Action != "{{.Business.PermissionPrefix}}:import" || store.values[0].Version != 1{{if .Tenancy}} || store.values[0].OrganizationID != actor.OrganizationID{{end}} {
+		t.Fatalf("import audit = %#v, value = %#v", store.audit, store.values[0])
+	}
+
+	exported, count, err := service.ExportCSV(context.Background(), actor)
+	if err != nil || count != 1 || !bytes.HasPrefix(exported, []byte(strings.Join(csvHeader, ","))) {
+		t.Fatalf("ExportCSV() = %q, %d, %v", exported, count, err)
+	}
+	if store.audit.Action != "{{.Business.PermissionPrefix}}:export" {
+		t.Fatalf("export audit = %#v", store.audit)
+	}
+	if template := service.TemplateCSV(); !bytes.Equal(template, append([]byte(strings.Join(csvHeader, ",")), '\n')) {
+		t.Fatalf("TemplateCSV() = %q", template)
+	}
+}
+
+func TestImportRejectsInvalidDocumentsBeforeStore(t *testing.T) {
+	store := &memoryStore{}
+	service := NewService(store)
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+
+	if _, err := service.ImportCSV(context.Background(), strings.NewReader("wrong\nvalue\n"), actor); !errors.Is(err, ErrInvalidCSV) {
+		t.Fatalf("ImportCSV(invalid header) error = %v", err)
+	}
+	if len(store.values) != 0 {
+		t.Fatalf("invalid import reached store: %#v", store.values)
+	}
+	if _, err := service.ImportCSV(context.Background(), bytes.NewReader(csvDocument(t, MaximumRows+1)), actor); !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("ImportCSV(too many rows) error = %v", err)
+	}
+	if len(store.values) != 0 {
+		t.Fatalf("oversized import reached store: %#v", store.values)
+	}
+}
+
+func TestExportRejectsTooManyRowsAndEscapesSpreadsheetFormulas(t *testing.T) {
+	store := &memoryStore{values: make([]business.{{.Business.EntityType}}, MaximumRows+1)}
+	service := NewService(store)
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	if _, _, err := service.ExportCSV(context.Background(), actor); !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("ExportCSV(too many rows) error = %v", err)
+	}
+	for _, value := range []string{"=SUM(A1:A2)", "+command", "-formula", "@formula", "'literal"} {
+		encoded := encodeSpreadsheetCell(value)
+		if !strings.HasPrefix(encoded, "'") || decodeSpreadsheetCell(encoded) != value {
+			t.Fatalf("spreadsheet cell %q encoded as %q and decoded as %q", value, encoded, decodeSpreadsheetCell(encoded))
+		}
+	}
+}
+
+func csvDocument(t *testing.T, rows int) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := csv.NewWriter(&buffer)
+	if err := writer.Write(csvHeader); err != nil {
+		t.Fatal(err)
+	}
+	record := []string{
+{{- range .Business.Fields}}
+		{{if eq .GoType "string"}}"sample"{{else if eq .GoType "bool"}}"true"{{else if eq .GoType "int64"}}"1"{{else}}"2026-09-01T00:00:00Z"{{end}},
+{{- end}}
+	}
+	for range rows {
+		if err := writer.Write(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+type memoryStore struct {
+	values []business.{{.Business.EntityType}}
+	audit  identity.AuditEvent
+}
+
+func (store *memoryStore) Import(_ context.Context, values []business.{{.Business.EntityType}}, audit identity.AuditEvent) error {
+	store.values = append([]business.{{.Business.EntityType}}(nil), values...)
+	store.audit = audit
+	return nil
+}
+
+func (store *memoryStore) Export(_ context.Context, _ string, maximumRows int, audit identity.AuditEvent) ([]business.{{.Business.EntityType}}, error) {
+	if len(store.values) > maximumRows {
+		return nil, ErrTooManyRows
+	}
+	store.audit = audit
+	return append([]business.{{.Business.EntityType}}(nil), store.values...), nil
+}
+
+var _ Store = (*memoryStore)(nil)

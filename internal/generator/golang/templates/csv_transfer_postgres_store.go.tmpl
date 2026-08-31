@@ -1,0 +1,171 @@
+// Package postgres persists atomic CSV transfers in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/identity"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	"{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer"
+)
+
+const cleanupTimeout = 5 * time.Second
+
+// Store implements atomic import and audited export.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL CSV transfer store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Import inserts every validated row and one audit event in the same transaction.
+func (store *Store) Import(ctx context.Context, values []business.{{.Business.EntityType}}, audit identity.AuditEvent) error {
+	if len(values) == 0 || len(values) > transfer.MaximumRows {
+		return transfer.ErrInvalidCSV
+	}
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin CSV import: %w", err)
+	}
+	for _, value := range values {
+		_, err := transaction.Exec(ctx, `
+			insert into {{goSQL .Business.TableName}} (id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at)
+			values (@id{{if .Tenancy}}, @organization_id{{end}}{{range .Business.Fields}}, @{{.Name}}{{end}}, @version, @created_at, @updated_at)`, pgx.NamedArgs{
+			"id": value.ID,
+{{- if .Tenancy}}
+			"organization_id": value.OrganizationID,
+{{- end}}
+{{- range .Business.Fields}}
+			"{{.Name}}": value.{{.GoName}},
+{{- end}}
+			"version": value.Version, "created_at": value.CreatedAt, "updated_at": value.UpdatedAt,
+		})
+		if err != nil {
+			return rollback(transaction, persistenceError(err))
+		}
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit CSV import: %w", err)
+	}
+	return nil
+}
+
+// Export reads one bounded statement snapshot and appends its audit event transactionally.
+func (store *Store) Export(ctx context.Context, organizationID string, maximumRows int, audit identity.AuditEvent) ([]business.{{.Business.EntityType}}, error) {
+	if maximumRows < 1 || maximumRows > transfer.MaximumRows {
+		return nil, transfer.ErrInvalidCSV
+	}
+	transaction, err := store.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return nil, fmt.Errorf("begin CSV export: %w", err)
+	}
+	var rowCount, rawBytes int64
+	err = transaction.QueryRow(ctx, `
+		select count(*), coalesce(sum(0{{range .Business.Fields}} + octet_length(coalesce({{goSQL .Name}}::text, '')){{end}}), 0)
+		from {{goSQL .Business.TableName}}{{if .Tenancy}} where organization_id = $1{{end}}`{{if .Tenancy}}, organizationID{{end}}).Scan(&rowCount, &rawBytes)
+	if err != nil {
+		return nil, rollback(transaction, fmt.Errorf("measure CSV export: %w", err))
+	}
+	if rowCount > int64(maximumRows) {
+		return nil, rollback(transaction, transfer.ErrTooManyRows)
+	}
+	if rawBytes+transfer.CSVHeaderSize() > transfer.MaximumBytes {
+		return nil, rollback(transaction, transfer.ErrTooLarge)
+	}
+	rows, err := transaction.Query(ctx, `
+		select id{{if .Tenancy}}, organization_id{{end}}{{range .Business.Fields}}, {{goSQL .Name}}{{end}}, version, created_at, updated_at
+		from {{goSQL .Business.TableName}}{{if .Tenancy}} where organization_id = $1{{end}}
+		order by id
+		limit {{if .Tenancy}}$2{{else}}$1{{end}}`, {{if .Tenancy}}organizationID, {{end}}maximumRows)
+	if err != nil {
+		return nil, rollback(transaction, fmt.Errorf("query CSV export: %w", err))
+	}
+	values := make([]business.{{.Business.EntityType}}, 0, maximumRows)
+	documentBytes := transfer.CSVHeaderSize()
+	for rows.Next() {
+		value, err := scan{{.Business.EntityType}}(rows)
+		if err != nil {
+			rows.Close()
+			return nil, rollback(transaction, err)
+		}
+		recordBytes, err := transfer.CSVRecordSize(value)
+		if err != nil {
+			rows.Close()
+			return nil, rollback(transaction, fmt.Errorf("measure CSV export row: %w", err))
+		}
+		if recordBytes > transfer.MaximumBytes-documentBytes {
+			rows.Close()
+			return nil, rollback(transaction, transfer.ErrTooLarge)
+		}
+		documentBytes += recordBytes
+		values = append(values, value)
+	}
+	iterationErr := rows.Err()
+	rows.Close()
+	if iterationErr != nil {
+		return nil, rollback(transaction, fmt.Errorf("iterate CSV export: %w", iterationErr))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return nil, rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit CSV export audit: %w", err)
+	}
+	return values, nil
+}
+
+func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {
+	_, err := transaction.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append CSV audit event: %w", err)
+	}
+	return nil
+}
+
+func rollback(transaction pgx.Tx, cause error) error {
+	cleanupContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := transaction.Rollback(cleanupContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return errors.Join(cause, fmt.Errorf("roll back CSV transfer: %w", err))
+	}
+	return cause
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scan{{.Business.EntityType}}(row rowScanner) (business.{{.Business.EntityType}}, error) {
+	var value business.{{.Business.EntityType}}
+	if err := row.Scan(&value.ID{{if .Tenancy}}, &value.OrganizationID{{end}}{{range .Business.Fields}}, &value.{{.GoName}}{{end}}, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+		return business.{{.Business.EntityType}}{}, fmt.Errorf("scan CSV export row: %w", err)
+	}
+	return value, nil
+}
+
+func persistenceError(err error) error {
+	var databaseError *pgconn.PgError
+	if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+		return business.ErrConflict
+	}
+	return err
+}
+
+var _ transfer.Store = (*Store)(nil)

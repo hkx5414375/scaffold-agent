@@ -107,6 +107,16 @@ never exposes a database error. Agents should propagate `X-Request-ID` when it i
 available, keep user-derived values out of metric labels, and must not add request
 bodies, credentials, query strings, or panic values to logs.
 
+Selecting `csv-import-export` version `0.1.0` requires one generated business
+entity and adds a Blueprint-derived CSV header, typed parser, header-only template,
+atomic create-only import, and audited export. Import and export have separate
+administrator permissions. A document is limited to 5 MiB and 1000 rows; one
+invalid or conflicting row rolls back the complete import, and an oversized
+export returns no partial document. Exported string cells are reversibly escaped
+to prevent spreadsheet formula execution. Agents must use the generated field
+order and RFC3339 datetimes, must not turn import into an unaudited upsert, and
+must not bypass organization scope or the generated limits.
+
 ## STDIO protocol
 
 Run the server with:

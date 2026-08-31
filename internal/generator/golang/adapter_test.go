@@ -642,6 +642,54 @@ func TestGenerateObservabilityCapability(t *testing.T) {
 	}
 }
 
+func TestGenerateCSVImportExportCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: csvTransferCapability, Version: csvTransferVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[csvTransferCapability] != csvTransferVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	for _, path := range []string{
+		"internal/tasks/transfer/service.go",
+		"internal/tasks/transfer/service_test.go",
+		"internal/tasks/transfer/httpapi/handler.go",
+		"internal/tasks/transfer/httpapi/handler_test.go",
+		"internal/tasks/transfer/postgres/store.go",
+		"internal/platform/migrate/migrations/000240_csv_import_export.sql",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	mainSource := string(outputContent(generated, "cmd/server/main.go"))
+	openAPI := string(outputContent(generated, "api/openapi.yaml"))
+	if !strings.Contains(mainSource, "tasksTransferAPI.Register") ||
+		!strings.Contains(openAPI, "/api/v1/tasks/import:") ||
+		!strings.Contains(openAPI, "/api/v1/tasks/export:") {
+		t.Fatal("Generate() did not wire CSV transfer routes")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated CSV transfer OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestGenerateCSVImportExportRequiresBusinessEntity(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Modules = nil
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: csvTransferCapability, Version: csvTransferVersion}}
+	if _, err := New().Generate(context.Background(), project); err == nil || !strings.Contains(err.Error(), "requires one generated business entity") {
+		t.Fatalf("Generate() error = %v", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

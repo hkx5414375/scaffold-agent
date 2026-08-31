@@ -42,6 +42,11 @@ import (
 	"{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	{{.Business.PackageName}}http "{{.ModulePath}}/internal/{{.Business.ModuleName}}/httpapi"
 	{{.Business.PackageName}}database "{{.ModulePath}}/internal/{{.Business.ModuleName}}/{{.Database.PackageName}}"
+{{- if .CSVTransfer}}
+	{{.Business.PackageName}}transfer "{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer"
+	{{.Business.PackageName}}transferhttp "{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer/httpapi"
+	{{.Business.PackageName}}transferdatabase "{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer/{{.Database.PackageName}}"
+{{- end}}
 {{- end}}
 )
 
@@ -123,6 +128,10 @@ func run() error {
 {{- if .Business}}
 	{{.Business.PackageName}}Service := {{.Business.PackageName}}.NewService({{.Business.PackageName}}database.New(pool))
 	{{.Business.PackageName}}API := {{.Business.PackageName}}http.New({{.Business.PackageName}}Service)
+	{{- if .CSVTransfer}}
+	{{.Business.PackageName}}TransferService := {{.Business.PackageName}}transfer.NewService({{.Business.PackageName}}transferdatabase.New(pool))
+	{{.Business.PackageName}}TransferAPI := {{.Business.PackageName}}transferhttp.New({{.Business.PackageName}}TransferService)
+	{{- end}}
 	{{- end}}
 	registerRoutes := func(mux *http.ServeMux) {
 		identityAPI.Register(mux)
@@ -147,6 +156,9 @@ func run() error {
 {{- end}}
 {{- if .Business}}
 		{{.Business.PackageName}}API.Register(mux, identityAPI)
+	{{- if .CSVTransfer}}
+		{{.Business.PackageName}}TransferAPI.Register(mux, identityAPI)
+	{{- end}}
 {{- end}}
 	}
 	address := strings.TrimSpace(os.Getenv("HTTP_ADDRESS"))

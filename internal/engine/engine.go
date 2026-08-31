@@ -85,6 +85,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"cross-instance-application-cache",
 				"background-job-administration",
 				"http-observability-and-readiness",
+				"atomic-bounded-csv-import-export",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

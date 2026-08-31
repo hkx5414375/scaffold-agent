@@ -1,0 +1,76 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/identity"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	"{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer"
+)
+
+func TestImportAndExportHTTP(t *testing.T) {
+	store := &httpStore{}
+	handler := New(transfer.NewService(store))
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	document := strings.Join([]string{
+		strings.Join([]string{
+{{- range .Business.Fields}}
+			"{{.Name}}",
+{{- end}}
+		}, ","),
+		strings.Join([]string{
+{{- range .Business.Fields}}
+			{{if eq .GoType "string"}}"sample"{{else if eq .GoType "bool"}}"true"{{else if eq .GoType "int64"}}"1"{{else}}"2026-09-01T00:00:00Z"{{end}},
+{{- end}}
+		}, ","),
+	}, "\n") + "\n"
+
+	request := httptest.NewRequest(http.MethodPost, "{{.Business.RoutePath}}/import", strings.NewReader(document))
+	request.Header.Set("Content-Type", "text/csv; charset=utf-8")
+	response := httptest.NewRecorder()
+	handler.importCSV(response, request, actor)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"imported":1`) {
+		t.Fatalf("import response = %d, %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "{{.Business.RoutePath}}/export", nil)
+	response = httptest.NewRecorder()
+	handler.exportCSV(response, request, actor)
+	if response.Code != http.StatusOK || response.Header().Get("X-Exported-Count") != "1" || !strings.Contains(response.Body.String(), strings.Join([]string{
+{{- range .Business.Fields}}
+		"{{.Name}}",
+{{- end}}
+	}, ",")) {
+		t.Fatalf("export response = %d, headers = %#v, body = %s", response.Code, response.Header(), response.Body.String())
+	}
+}
+
+func TestImportRejectsNonCSVMediaType(t *testing.T) {
+	handler := New(transfer.NewService(&httpStore{}))
+	request := httptest.NewRequest(http.MethodPost, "{{.Business.RoutePath}}/import", strings.NewReader("{}"))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.importCSV(response, request, identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}})
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("response code = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+type httpStore struct {
+	values []business.{{.Business.EntityType}}
+}
+
+func (store *httpStore) Import(_ context.Context, values []business.{{.Business.EntityType}}, _ identity.AuditEvent) error {
+	store.values = append([]business.{{.Business.EntityType}}(nil), values...)
+	return nil
+}
+
+func (store *httpStore) Export(context.Context, string, int, identity.AuditEvent) ([]business.{{.Business.EntityType}}, error) {
+	return append([]business.{{.Business.EntityType}}(nil), store.values...), nil
+}
+
+var _ transfer.Store = (*httpStore)(nil)

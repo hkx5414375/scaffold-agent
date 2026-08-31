@@ -727,6 +727,105 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "500":
           $ref: "#/components/responses/ErrorResponse"
+{{if .CSVTransfer}}
+  {{.Business.RoutePath}}/import:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: import{{.Business.EntityType}}CSV
+      x-required-permission: {{.Business.PermissionPrefix}}:import
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: All validated rows were imported in one transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [imported]
+                properties:
+                  imported:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "415":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  {{.Business.RoutePath}}/import-template:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: get{{.Business.EntityType}}CSVTemplate
+      x-required-permission: {{.Business.PermissionPrefix}}:import
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Header-only CSV import template
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  {{.Business.RoutePath}}/export:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: export{{.Business.EntityType}}CSV
+      x-required-permission: {{.Business.PermissionPrefix}}:export
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Audited CSV export with at most 1000 rows
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
   {{.Business.RoutePath}}/{id}:
     parameters:
       - $ref: "#/components/parameters/EntityId"

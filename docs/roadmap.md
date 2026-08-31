@@ -41,7 +41,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Cross-instance database TTL cache with tenant scopes, bounded JSON values, and bounded cleanup.
 - [x] Payload-free job administration with tenant-scoped listing and audited dead-job retry.
 - [x] HTTP request correlation, safe access logs, low-cardinality metrics, and bounded database readiness.
-- [ ] Import/export.
+- [x] Atomic bounded CSV import/export with explicit permissions, tenant scope, audit, and administration UI actions.
 - [ ] Portable approval workflows.
 
 ## M6 — Language parity

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"go/format"
 	"sort"
@@ -41,6 +42,8 @@ const (
 	jobAdminVersion         = "0.1.0"
 	observabilityCapability = "observability"
 	observabilityVersion    = "0.1.0"
+	csvTransferCapability   = "csv-import-export"
+	csvTransferVersion      = "0.1.0"
 )
 
 //go:embed all:templates
@@ -63,10 +66,12 @@ var outputTemplates = map[string]string{
 	"internal/platform/httpjson/httpjson.go":      "templates/httpjson.go.tmpl",
 }
 
-var businessTemplates = []struct {
+type businessTemplate struct {
 	PathSuffix   string
 	TemplatePath string
-}{
+}
+
+var businessTemplates = []businessTemplate{
 	{PathSuffix: "entity.go", TemplatePath: "templates/business_entity.go.tmpl"},
 	{PathSuffix: "entity_test.go", TemplatePath: "templates/business_entity_test.go.tmpl"},
 	{PathSuffix: "httpapi/handler.go", TemplatePath: "templates/business_handler.go.tmpl"},
@@ -101,6 +106,9 @@ type databaseTemplateSet struct {
 	JobAdminStorePath                 string
 	JobAdminStoreTemplate             string
 	JobAdminMigrationTemplate         string
+	CSVTransferStorePath              string
+	CSVTransferStoreTemplate          string
+	CSVTransferMigrationTemplate      string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -140,6 +148,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		JobAdminStorePath:                 "internal/jobs/postgres/admin.go",
 		JobAdminStoreTemplate:             "templates/jobadmin_postgres_store.go.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_postgres.sql.tmpl",
+		CSVTransferStorePath:              "transfer/postgres/store.go",
+		CSVTransferStoreTemplate:          "templates/csv_transfer_postgres_store.go.tmpl",
+		CSVTransferMigrationTemplate:      "templates/csv_transfer_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -178,6 +189,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		JobAdminStorePath:                 "internal/jobs/mysql/admin.go",
 		JobAdminStoreTemplate:             "templates/jobadmin_mysql_store.go.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
+		CSVTransferStorePath:              "transfer/mysql/store.go",
+		CSVTransferStoreTemplate:          "templates/csv_transfer_mysql_store.go.tmpl",
+		CSVTransferMigrationTemplate:      "templates/csv_transfer_mysql.sql.tmpl",
 	},
 }
 
@@ -274,6 +288,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: csvTransferCapability, Version: csvTransferVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Atomic bounded CSV import and audited safe CSV export for the generated business entity",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -339,6 +363,13 @@ var jobAdminTemplates = map[string]string{
 var observabilityTemplates = map[string]string{
 	"internal/platform/observability/observability.go":      "templates/observability.go.tmpl",
 	"internal/platform/observability/observability_test.go": "templates/observability_test.go.tmpl",
+}
+
+var csvTransferTemplates = []businessTemplate{
+	{PathSuffix: "transfer/service.go", TemplatePath: "templates/csv_transfer.go.tmpl"},
+	{PathSuffix: "transfer/service_test.go", TemplatePath: "templates/csv_transfer_test.go.tmpl"},
+	{PathSuffix: "transfer/httpapi/handler.go", TemplatePath: "templates/csv_transfer_handler.go.tmpl"},
+	{PathSuffix: "transfer/httpapi/handler_test.go", TemplatePath: "templates/csv_transfer_handler_test.go.tmpl"},
 }
 
 var adminTemplates = map[string]string{
@@ -411,6 +442,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	cacheEnabled := false
 	jobAdminEnabled := false
 	observabilityEnabled := false
+	csvTransferEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -440,10 +472,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == observabilityCapability {
 			observabilityEnabled = true
 		}
+		if pack.Metadata.Name == csvTransferCapability {
+			csvTransferEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
 		return generator.Result{}, err
+	}
+	if csvTransferEnabled && business == nil {
+		return generator.Result{}, errors.New("csv-import-export requires one generated business entity")
 	}
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -460,6 +498,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Cache:            cacheEnabled,
 		JobAdmin:         jobAdminEnabled,
 		Observability:    observabilityEnabled,
+		CSVTransfer:      csvTransferEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -484,6 +523,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if jobAdminEnabled {
+		data.MigrationCount++
+	}
+	if csvTransferEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
@@ -624,6 +666,18 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[path] = renderTarget{TemplatePath: templatePath, Owner: observabilityCapability}
 		}
 	}
+	if csvTransferEnabled {
+		for _, target := range csvTransferTemplates {
+			path := "internal/" + business.ModuleName + "/" + target.PathSuffix
+			targets[path] = renderTarget{TemplatePath: target.TemplatePath, Owner: csvTransferCapability}
+		}
+		storePath := "internal/" + business.ModuleName + "/" + database.CSVTransferStorePath
+		targets[storePath] = renderTarget{TemplatePath: database.CSVTransferStoreTemplate, Owner: csvTransferCapability}
+		targets["internal/platform/migrate/migrations/000240_csv_import_export.sql"] = renderTarget{
+			TemplatePath: database.CSVTransferMigrationTemplate,
+			Owner:        csvTransferCapability,
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -689,6 +743,7 @@ type templateData struct {
 	Cache            bool
 	JobAdmin         bool
 	Observability    bool
+	CSVTransfer      bool
 	MigrationCount   int
 }
 

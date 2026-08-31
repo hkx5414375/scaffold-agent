@@ -1,0 +1,9 @@
+insert into identity_permissions (code, description) values
+    ('{{.Business.PermissionPrefix}}:import', 'Import {{.Business.EntityName}} records from bounded CSV'),
+    ('{{.Business.PermissionPrefix}}:export', 'Export {{.Business.EntityName}} records to bounded CSV')
+on conflict (code) do nothing;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', '{{.Business.PermissionPrefix}}:import'),
+    ('admin', '{{.Business.PermissionPrefix}}:export')
+on conflict (role_code, permission_code) do nothing;

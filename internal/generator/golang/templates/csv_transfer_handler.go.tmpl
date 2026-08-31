@@ -1,0 +1,90 @@
+// Package httpapi exposes bounded CSV transfer through permission-protected HTTP routes.
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"mime"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	"{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+// Handler maps the stable CSV contract to the transfer service.
+type Handler struct {
+	service *transfer.Service
+}
+
+// New returns a CSV transfer HTTP adapter.
+func New(service *transfer.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds import, import-template, and export routes with separate permissions.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST {{.Business.RoutePath}}/import", security.Authorized("{{.Business.PermissionPrefix}}:import", handler.importCSV))
+	mux.HandleFunc("GET {{.Business.RoutePath}}/import-template", security.Authorized("{{.Business.PermissionPrefix}}:import", handler.templateCSV))
+	mux.HandleFunc("GET {{.Business.RoutePath}}/export", security.Authorized("{{.Business.PermissionPrefix}}:export", handler.exportCSV))
+}
+
+func (handler *Handler) importCSV(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "text/csv") {
+		httpjson.WriteError(response, http.StatusUnsupportedMediaType, "csv.unsupported_media_type", "Content-Type must be text/csv")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, transfer.MaximumBytes+1)
+	count, err := handler.service.ImportCSV(request.Context(), request.Body, actor)
+	if err != nil {
+		handleError(response, "import CSV", err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, struct {
+		Imported int `json:"imported"`
+	}{Imported: count})
+}
+
+func (handler *Handler) templateCSV(response http.ResponseWriter, _ *http.Request, _ identity.Principal) {
+	writeCSV(response, "{{.Business.ModuleName}}-{{.Business.EntityName}}-template.csv", handler.service.TemplateCSV())
+}
+
+func (handler *Handler) exportCSV(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	document, count, err := handler.service.ExportCSV(request.Context(), actor)
+	if err != nil {
+		handleError(response, "export CSV", err)
+		return
+	}
+	response.Header().Set("X-Exported-Count", strconv.Itoa(count))
+	writeCSV(response, "{{.Business.ModuleName}}-{{.Business.EntityName}}.csv", document)
+}
+
+func writeCSV(response http.ResponseWriter, filename string, document []byte) {
+	response.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	response.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	response.Header().Set("Cache-Control", "no-store")
+	response.Header().Set("X-Content-Type-Options", "nosniff")
+	response.WriteHeader(http.StatusOK)
+	_, _ = response.Write(document)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, transfer.ErrInvalidCSV):
+		httpjson.WriteError(response, http.StatusBadRequest, "csv.invalid", "CSV data does not match the generated contract")
+	case errors.Is(err, transfer.ErrTooLarge):
+		httpjson.WriteError(response, http.StatusRequestEntityTooLarge, "csv.too_large", "CSV data exceeds the byte limit")
+	case errors.Is(err, transfer.ErrTooManyRows):
+		httpjson.WriteError(response, http.StatusUnprocessableEntity, "csv.too_many_rows", "CSV data exceeds the row limit")
+	case errors.Is(err, business.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "csv.conflict", "one or more rows conflict with existing data")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

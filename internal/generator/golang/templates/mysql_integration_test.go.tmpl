@@ -47,6 +47,10 @@ import (
 	platformmysql "{{.ModulePath}}/internal/platform/mysql"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	businessmysql "{{.ModulePath}}/internal/{{.Business.ModuleName}}/mysql"
+{{- if .CSVTransfer}}
+	businesstransfer "{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer"
+	transfermysql "{{.ModulePath}}/internal/{{.Business.ModuleName}}/transfer/mysql"
+{{- end}}
 {{- if .Tenancy}}
 	"{{.ModulePath}}/internal/tenancy"
 	tenancymysql "{{.ModulePath}}/internal/tenancy/mysql"
@@ -125,6 +129,18 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err != nil || allowed {
 		t.Fatalf("HasPermission(user) = %t, %v, want denied", allowed, err)
 	}
+{{- if .CSVTransfer}}
+	for _, code := range []string{"{{.Business.PermissionPrefix}}:import", "{{.Business.PermissionPrefix}}:export"} {
+		allowed, err = identityStore.HasPermission(ctx, "admin", code)
+		if err != nil || !allowed {
+			t.Fatalf("HasPermission(admin, %s) = %t, %v", code, allowed, err)
+		}
+	}
+	allowed, err = identityStore.HasPermission(ctx, "user", "{{.Business.PermissionPrefix}}:import")
+	if err != nil || allowed {
+		t.Fatalf("HasPermission(user, import) = %t, %v, want denied", allowed, err)
+	}
+{{- end}}
 
 	duplicateAudit := identity.AuditEvent{
 		ID: "duplicate-audit", UserID: user.ID, Action: "integration:seed",
@@ -416,6 +432,37 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if mutationAuditCount != 3 {
 		t.Fatalf("mutation audit count = %d, want 3", mutationAuditCount)
 	}
+{{- if .CSVTransfer}}
+
+	transferStore := transfermysql.New(database)
+	firstImported := business.{{.Business.EntityType}}{
+		ID: "csv-import-one", OrganizationID: organizationID, Version: 1, CreatedAt: now, UpdatedAt: now,
+{{- range .Business.Fields}}
+		{{.GoName}}: {{if .Required}}first{{.GoName}}{{else}}&first{{.GoName}}{{end}},
+{{- end}}
+	}
+	secondImported := firstImported
+	secondImported.ID = firstImported.ID
+	if err := transferStore.Import(ctx, []business.{{.Business.EntityType}}{firstImported, secondImported}, audit(user.ID, "{{.Business.PermissionPrefix}}:import", "2", now)); !errors.Is(err, business.ErrConflict) {
+		t.Fatalf("transfer.Import(conflict) error = %v, want ErrConflict", err)
+	}
+	if _, err := businessStore.Get(ctx, organizationID, firstImported.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(rolled-back CSV row) error = %v, want ErrNotFound", err)
+	}
+	if err := transferStore.Import(ctx, []business.{{.Business.EntityType}}{firstImported}, audit(user.ID, "{{.Business.PermissionPrefix}}:import", "1", now)); err != nil {
+		t.Fatalf("transfer.Import() error = %v", err)
+	}
+	exported, err := transferStore.Export(ctx, organizationID, businesstransfer.MaximumRows, audit(user.ID, "{{.Business.PermissionPrefix}}:export", "csv", now))
+	if err != nil || len(exported) != 1 || exported[0].ID != firstImported.ID {
+		t.Fatalf("transfer.Export() = %#v, %v", exported, err)
+	}
+{{- if .Tenancy}}
+	crossTenant, err := transferStore.Export(ctx, "different-organization", businesstransfer.MaximumRows, audit(user.ID, "{{.Business.PermissionPrefix}}:export", "csv", now))
+	if err != nil || len(crossTenant) != 0 {
+		t.Fatalf("transfer.Export(cross-tenant) = %#v, %v", crossTenant, err)
+	}
+{{- end}}
+{{- end}}
 }
 
 func isolatedMySQL(t *testing.T) *sql.DB {
