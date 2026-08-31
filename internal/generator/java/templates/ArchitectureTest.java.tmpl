@@ -1,0 +1,29 @@
+package {{.PackageName}}.architecture;
+
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
+import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noFields;
+
+import com.tngtech.archunit.core.importer.ImportOption;
+import com.tngtech.archunit.junit.AnalyzeClasses;
+import com.tngtech.archunit.junit.ArchTest;
+import com.tngtech.archunit.lang.ArchRule;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.RestController;
+
+@AnalyzeClasses(
+        packages = "{{.PackageName}}",
+        importOptions = ImportOption.DoNotIncludeTests.class)
+class ArchitectureTest {
+
+    @ArchTest
+    static final ArchRule NO_FIELD_INJECTION =
+            noFields().should().beAnnotatedWith(Autowired.class);
+
+    @ArchTest
+    static final ArchRule CONTROLLER_NAMES =
+            classes()
+                    .that()
+                    .areAnnotatedWith(RestController.class)
+                    .should()
+                    .haveSimpleNameEndingWith("Controller");
+}

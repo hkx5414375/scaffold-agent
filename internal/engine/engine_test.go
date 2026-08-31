@@ -271,6 +271,14 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", approvalsSelection, "", 55, false)
 }
 
+func TestJavaPostgreSQLFoundationPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaFoundation(t, "postgresql")
+}
+
+func TestJavaMySQLFoundationPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaFoundation(t, "mysql")
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -519,6 +527,61 @@ WORKFLOWS
 			if err != nil {
 				t.Fatalf("generated admin %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
 			}
+		}
+	}
+	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+	if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+		t.Fatalf("Verify() = %#v, want no findings", verified)
+	}
+}
+
+func runGeneratedJavaFoundation(t *testing.T, database string) {
+	t.Helper()
+	root := t.TempDir()
+	ctx := context.Background()
+	blueprint := `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-java
+spec:
+  stack:
+    backend: java
+    admin_ui: none
+    storefront: none
+  database:
+    engine: DATABASE_ENGINE
+  auth:
+    modes: [session, token]
+`
+	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	writeBlueprint(t, root, blueprint)
+	application := New("test")
+	planned := application.Plan(ctx, PlanInput{ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate})
+	if planned.Status != result.StatusOK {
+		t.Fatalf("Plan() = %#v, want ok", planned)
+	}
+	plannedData := planned.Data.(planData)
+	if plannedData.ChangeCount != 12 || plannedData.CapabilityLock["java-service"] != "0.1.0" {
+		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
+	if previewed.Status != result.StatusOK {
+		t.Fatalf("Preview() = %#v, want ok", previewed)
+	}
+	previewedData := previewed.Data.(previewData)
+	applied := application.Apply(ctx, ApplyInput{
+		ProjectRoot: root, PlanID: plannedData.PlanID, ApplyToken: previewedData.ApplyToken,
+	})
+	if applied.Status != result.StatusOK {
+		t.Fatalf("Apply() = %#v, want ok", applied)
+	}
+	if os.Getenv("SCAFFOLD_AGENT_RUN_JAVA_BUILD") == "1" {
+		command := exec.CommandContext(ctx, "mvn", "-B", "-ntp", "verify")
+		command.Dir = root
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("generated mvn verify failed: %v\n%s", err, output)
 		}
 	}
 	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})

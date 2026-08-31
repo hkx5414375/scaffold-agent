@@ -1,0 +1,14 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: minimal-java
+  display_name: Minimal Java Service
+spec:
+  stack:
+    backend: java
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]

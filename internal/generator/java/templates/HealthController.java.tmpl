@@ -1,0 +1,45 @@
+package {{.PackageName}}.http;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import javax.sql.DataSource;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class HealthController {
+
+    private static final int READINESS_TIMEOUT_SECONDS = 2;
+
+    private final DataSource dataSource;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "The DataSource is a process-scoped Spring infrastructure dependency")
+    public HealthController(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
+
+    @GetMapping("/healthz")
+    public StatusResponse health() {
+        return new StatusResponse("ok");
+    }
+
+    @GetMapping("/readyz")
+    public ResponseEntity<StatusResponse> readiness() {
+        try (Connection connection = dataSource.getConnection()) {
+            if (connection.isValid(READINESS_TIMEOUT_SECONDS)) {
+                return ResponseEntity.ok(new StatusResponse("ok"));
+            }
+        } catch (SQLException ignored) {
+            // The public readiness response intentionally omits database details.
+        }
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new StatusResponse("unavailable"));
+    }
+
+    public record StatusResponse(String status) {}
+}

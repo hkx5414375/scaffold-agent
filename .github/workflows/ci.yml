@@ -61,6 +61,25 @@ jobs:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
         run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd)$' -count=1
 
+  generated-java:
+    name: Generated Java foundation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Generate and verify PostgreSQL and MySQL Maven projects
+        env:
+          SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
+        run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)FoundationPlanApplyVerifyEndToEnd$' -count=1
+
   generated-postgresql:
     name: Generated PostgreSQL integration
     runs-on: ubuntu-latest

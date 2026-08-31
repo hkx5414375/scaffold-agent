@@ -1,0 +1,17 @@
+spring:
+  application:
+    name: {{.ProjectName}}
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USER:}
+    password: ${DATABASE_PASSWORD:}
+    hikari:
+      connection-timeout: 5000
+      maximum-pool-size: 10
+      minimum-idle: 0
+      validation-timeout: 2000
+  flyway:
+    enabled: true
+server:
+  port: ${HTTP_PORT:8080}
+  shutdown: graceful

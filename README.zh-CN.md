@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器。生成项目已包含安全认证、权限码 RBAC、事务审计、Blueprint 驱动的 CRUD、OpenAPI 3.1，以及经过真实构建验证的 Vue/Element Plus 管理端。版本化能力包现已提供租户隔离、安全组织生命周期、可靠后台 Worker、带审计的死信任务管理、幂等且强制 TLS 的邮件通知、带原子本地存储的租户文件资产、跨实例一致的数据库 TTL 缓存、包含数据库就绪检查的安全 HTTP 可观测性、有界且原子提交的 CSV 导入导出，以及强制发起人与审批人分离的可移植审批流程。Nuxt 商城与 Java/Python 适配器仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 底座现已能针对 PostgreSQL、MySQL 生成 Maven 项目，包含存活/数据库就绪契约，并强制执行 JUnit、ArchUnit、Checkstyle、Spotless、SpotBugs 与 Maven Enforcer。Java 的认证和业务对等、Python 适配器与 Nuxt 商城仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 
@@ -54,6 +54,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/job-admin-task-se
 go run ./cmd/scaffold-agent validate --project-root ./examples/observability-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/csv-transfer-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-service --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-java --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

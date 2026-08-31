@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Versioned capabilities now provide tenant isolation, secure organization lifecycle, durable background workers, audited dead-job administration, idempotent TLS-only email notifications, tenant-aware file assets, a cross-instance database TTL cache, safe HTTP observability with database readiness, atomic bounded CSV import/export, and portable approval workflows with separation of duties. Nuxt storefronts and the Java/Python adapters remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot foundation now generates Maven projects for PostgreSQL and MySQL with health/readiness contracts and enforced JUnit, ArchUnit, Checkstyle, Spotless, SpotBugs, and Maven quality gates. Java identity and business parity, the Python adapter, and Nuxt storefronts remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -54,6 +54,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/job-admin-task-se
 go run ./cmd/scaffold-agent validate --project-root ./examples/observability-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/csv-transfer-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-service --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-java --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

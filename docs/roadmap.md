@@ -46,7 +46,11 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M6 — Language parity
 
-Java and Python adapters with the same Blueprint, transport, security, database, and quality contracts.
+- [x] Java 21/Spring Boot 4.1 Maven foundation for PostgreSQL and MySQL with deterministic output, health/readiness, and automated quality gates.
+- [ ] Java session/token identity, permission RBAC, transactional audit, and Blueprint CRUD parity.
+- [ ] Java OpenAPI and Vue administration parity.
+- [ ] Java platform capability parity.
+- [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 
 ## M7 — General business suite and storefront
 
