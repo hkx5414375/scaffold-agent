@@ -90,7 +90,7 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 		t.Fatalf("Generate() administration capability lock = %#v", generated.CapabilityLock)
 	}
 	openAPIFound := false
-	var entitySource, adminTypes, businessView, openAPISource string
+	var entitySource, adminTypes, businessView, integrationTest, openAPISource string
 	for _, output := range generated.Outputs {
 		switch output.Path {
 		case "internal/tasks/entity.go":
@@ -99,6 +99,8 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 			adminTypes = string(output.Content)
 		case "web/admin/src/views/BusinessView.vue":
 			businessView = string(output.Content)
+		case "internal/integration/postgres_test.go":
+			integrationTest = string(output.Content)
 		}
 		if output.Path == "api/openapi.yaml" {
 			openAPIFound = true
@@ -129,10 +131,11 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 		t.Fatal("Generate() did not produce api/openapi.yaml")
 	}
 	for name, source := range map[string]string{
-		"Go entity version":    entitySource,
-		"administration types": adminTypes,
-		"administration view":  businessView,
-		"OpenAPI contract":     openAPISource,
+		"Go entity version":           entitySource,
+		"administration types":        adminTypes,
+		"administration view":         businessView,
+		"PostgreSQL integration test": integrationTest,
+		"OpenAPI contract":            openAPISource,
 	} {
 		if source == "" {
 			t.Fatalf("Generate() did not produce %s", name)

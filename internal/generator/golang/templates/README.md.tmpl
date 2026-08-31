@@ -68,3 +68,10 @@ before committing changes.
 go test ./...
 go vet ./...
 ```
+
+To include the isolated live PostgreSQL integration test, provide a dedicated
+test database. The test creates and removes only its own random schema:
+
+```bash
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/{{.ProjectName}}?sslmode=disable' go test ./...
+```

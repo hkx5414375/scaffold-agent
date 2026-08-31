@@ -1,0 +1,236 @@
+package integration_test
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/identity"
+	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
+	"{{.ModulePath}}/internal/platform/migrate"
+	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
+	businesspostgres "{{.ModulePath}}/internal/{{.Business.ModuleName}}/postgres"
+)
+
+func TestPostgreSQLMigrationsAndStores(t *testing.T) {
+	pool := isolatedPostgreSQL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := migrate.Run(ctx, pool); err != nil {
+		t.Fatalf("Run(first) error = %v", err)
+	}
+	if err := migrate.Run(ctx, pool); err != nil {
+		t.Fatalf("Run(second) error = %v", err)
+	}
+	var migrationCount int
+	if err := pool.QueryRow(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	if migrationCount != 2 {
+		t.Fatalf("migration count = %d, want 2", migrationCount)
+	}
+
+	identityStore := identitypostgres.New(pool)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	user := identity.User{
+		ID: "integration-user", Email: "integration@example.com",
+		PasswordHash: "integration-only-hash", Role: "admin",
+	}
+	if err := identityStore.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+	loadedUser, err := identityStore.UserByEmail(ctx, user.Email)
+	if err != nil || loadedUser.ID != user.ID || loadedUser.Role != "admin" {
+		t.Fatalf("UserByEmail() = %#v, %v", loadedUser, err)
+	}
+
+	sessionHash := []byte("integration-session-digest")
+	if err := identityStore.CreateSession(ctx, identity.Session{TokenHash: sessionHash, UserID: user.ID, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+	if loadedUser, err = identityStore.UserBySession(ctx, sessionHash, now); err != nil || loadedUser.ID != user.ID {
+		t.Fatalf("UserBySession() = %#v, %v", loadedUser, err)
+	}
+	if err := identityStore.DeleteSession(ctx, sessionHash); err != nil {
+		t.Fatalf("DeleteSession() error = %v", err)
+	}
+	if _, err := identityStore.UserBySession(ctx, sessionHash, now); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("UserBySession(deleted) error = %v, want ErrNotFound", err)
+	}
+
+	apiTokenHash := []byte("integration-api-token-digest")
+	if err := identityStore.CreateAPIToken(ctx, identity.APIToken{
+		ID: "integration-token", TokenHash: apiTokenHash, UserID: user.ID,
+		Name: "integration", ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("CreateAPIToken() error = %v", err)
+	}
+	if loadedUser, err = identityStore.UserByAPIToken(ctx, apiTokenHash, now); err != nil || loadedUser.ID != user.ID {
+		t.Fatalf("UserByAPIToken() = %#v, %v", loadedUser, err)
+	}
+	if err := identityStore.DeleteAPIToken(ctx, "integration-token"); err != nil {
+		t.Fatalf("DeleteAPIToken() error = %v", err)
+	}
+	if _, err := identityStore.UserByAPIToken(ctx, apiTokenHash, now); !errors.Is(err, identity.ErrNotFound) {
+		t.Fatalf("UserByAPIToken(deleted) error = %v, want ErrNotFound", err)
+	}
+
+	allowed, err := identityStore.HasPermission(ctx, "admin", "{{.Business.PermissionPrefix}}:create")
+	if err != nil || !allowed {
+		t.Fatalf("HasPermission() = %t, %v", allowed, err)
+	}
+	allowed, err = identityStore.HasPermission(ctx, "user", "{{.Business.PermissionPrefix}}:create")
+	if err != nil || allowed {
+		t.Fatalf("HasPermission(user) = %t, %v, want denied", allowed, err)
+	}
+
+	duplicateAudit := identity.AuditEvent{
+		ID: "duplicate-audit", UserID: user.ID, Action: "integration:seed",
+		Outcome: "succeeded", Target: "seed", CreatedAt: now,
+	}
+	if err := identityStore.AppendAudit(ctx, duplicateAudit); err != nil {
+		t.Fatalf("AppendAudit() error = %v", err)
+	}
+
+{{- range .Business.Fields}}
+	first{{.GoName}} := {{.SampleOne}}
+	second{{.GoName}} := {{.SampleTwo}}
+{{- end}}
+	rolledBack := business.{{.Business.EntityType}}{
+		ID: "rolled-back", Version: 1, CreatedAt: now, UpdatedAt: now,
+{{- range .Business.Fields}}
+		{{.GoName}}: {{if .Required}}first{{.GoName}}{{else}}&first{{.GoName}}{{end}},
+{{- end}}
+	}
+	businessStore := businesspostgres.New(pool)
+	if err := businessStore.Create(ctx, rolledBack, duplicateAudit); err == nil {
+		t.Fatal("Create(with duplicate audit) error = nil, want transaction failure")
+	}
+	if _, err := businessStore.Get(ctx, rolledBack.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(rolled-back) error = %v, want ErrNotFound", err)
+	}
+
+	created := rolledBack
+	created.ID = "integration-record"
+	if err := businessStore.Create(ctx, created, audit(user.ID, "{{.Business.PermissionPrefix}}:create", created.ID, now)); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	loaded, err := businessStore.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if loaded.ID != created.ID || loaded.Version != 1 || !loaded.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("Get() = %#v, want created record", loaded)
+	}
+{{- range .Business.Fields}}
+	if !reflect.DeepEqual(loaded.{{.GoName}}, created.{{.GoName}}) {
+		t.Fatalf("Get().{{.GoName}} = %#v, want %#v", loaded.{{.GoName}}, created.{{.GoName}})
+	}
+{{- end}}
+	page, cursor, err := businessStore.List(ctx, "", 20)
+	if err != nil || len(page) != 1 || cursor != "" || page[0].ID != created.ID {
+		t.Fatalf("List() = %#v, %q, %v", page, cursor, err)
+	}
+
+	replacement := loaded
+{{- range .Business.Fields}}
+	replacement.{{.GoName}} = {{if .Required}}second{{.GoName}}{{else}}&second{{.GoName}}{{end}}
+{{- end}}
+	replacement.UpdatedAt = now.Add(time.Minute)
+	updated, err := businessStore.Update(ctx, replacement, audit(user.ID, "{{.Business.PermissionPrefix}}:update", created.ID, replacement.UpdatedAt))
+	if err != nil || updated.Version != 2 {
+		t.Fatalf("Update() = %#v, %v", updated, err)
+	}
+	if _, err := businessStore.Update(ctx, replacement, audit(user.ID, "{{.Business.PermissionPrefix}}:update", created.ID, now)); !errors.Is(err, business.ErrConflict) {
+		t.Fatalf("Update(stale) error = %v, want ErrConflict", err)
+	}
+	if err := businessStore.Delete(ctx, created.ID, updated.Version, audit(user.ID, "{{.Business.PermissionPrefix}}:delete", created.ID, now)); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := businessStore.Get(ctx, created.ID); !errors.Is(err, business.ErrNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
+	}
+	var mutationAuditCount int
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where target = $1 and action like $2`, created.ID, "{{.Business.PermissionPrefix}}:%").Scan(&mutationAuditCount); err != nil {
+		t.Fatalf("count mutation audit events: %v", err)
+	}
+	if mutationAuditCount != 3 {
+		t.Fatalf("mutation audit count = %d, want 3", mutationAuditCount)
+	}
+}
+
+func isolatedPostgreSQL(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	adminConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	adminConfig.MaxConns = 2
+	adminConfig.MinConns = 0
+	adminPool, err := pgxpool.NewWithConfig(ctx, adminConfig)
+	if err != nil {
+		t.Fatalf("create administration pool: %v", err)
+	}
+	if err := adminPool.Ping(ctx); err != nil {
+		adminPool.Close()
+		t.Fatalf("ping PostgreSQL: %v", err)
+	}
+	t.Cleanup(adminPool.Close)
+
+	schema := "scaffold_test_" + strings.ToLower(rand.Text())
+	quotedSchema := pgx.Identifier{schema}.Sanitize()
+	if _, err := adminPool.Exec(ctx, "create schema "+quotedSchema); err != nil {
+		t.Fatalf("create isolated schema: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		if _, err := adminPool.Exec(cleanupContext, "drop schema "+quotedSchema+" cascade"); err != nil {
+			t.Errorf("drop isolated schema: %v", err)
+		}
+	})
+
+	testConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("parse isolated pool configuration: %v", err)
+	}
+	if testConfig.ConnConfig.RuntimeParams == nil {
+		testConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	testConfig.ConnConfig.RuntimeParams["search_path"] = schema
+	testConfig.MaxConns = 4
+	testConfig.MinConns = 0
+	pool, err := pgxpool.NewWithConfig(ctx, testConfig)
+	if err != nil {
+		t.Fatalf("create isolated pool: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping isolated schema: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func audit(userID, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: userID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

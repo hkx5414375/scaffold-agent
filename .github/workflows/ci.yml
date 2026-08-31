@@ -60,3 +60,31 @@ jobs:
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
         run: go test ./internal/engine -run TestGoPlanApplyVerifyEndToEnd -count=1
+
+  generated-postgresql:
+    name: Generated PostgreSQL integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_DB: scaffold_agent
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Generate and test against PostgreSQL
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/scaffold_agent?sslmode=disable
+        run: go test ./internal/engine -run TestGoPlanApplyVerifyEndToEnd -count=1

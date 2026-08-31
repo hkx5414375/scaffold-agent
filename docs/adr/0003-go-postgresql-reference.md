@@ -20,10 +20,11 @@ claiming support for Blueprint selections that are not implemented yet.
 7. The adapter rejects MySQL, frontends, incomplete authentication selections, capabilities, and business modules until their complete vertical slices exist.
 8. The generated dependency graph is pinned with both `go.mod` and `go.sum`.
 9. Roles, permissions, and role-permission assignments are relational data. Protected HTTP handlers require a stable permission code and deny access unless the store confirms that assignment.
+10. Generated integration tests use a random, explicitly created schema and run migrations, identity persistence, RBAC, CRUD, optimistic locking, and transactional audit checks against PostgreSQL 18 in CI.
 
 ## Consequences
 
 - The minimal Blueprint now generates a compilable, testable identity service rather than a health endpoint alone.
-- PostgreSQL must be available to run the generated service, but unit tests remain database-independent.
-- Stateful CRUD, OpenAPI, Vue administration, and live PostgreSQL integration tests remain explicit M4 work.
+- PostgreSQL must be available to run the generated service and opt-in integration test, but unit tests remain database-independent.
+- The reference slice now has a real database gate without requiring local Docker for ordinary generator development.
 - MySQL, Java, and Python cannot accidentally appear successful through partial output.

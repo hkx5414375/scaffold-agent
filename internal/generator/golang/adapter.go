@@ -141,6 +141,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			path := "internal/" + business.ModuleName + "/" + target.PathSuffix
 			targets[path] = renderTarget{TemplatePath: target.TemplatePath, Owner: businessCapability}
 		}
+		targets["internal/integration/postgres_test.go"] = renderTarget{
+			TemplatePath: "templates/postgres_integration_test.go.tmpl",
+			Owner:        businessCapability,
+		}
 		migrationPath := "internal/platform/migrate/migrations/000100_" + business.ModuleName + "_" + business.EntityName + ".sql"
 		targets[migrationPath] = renderTarget{TemplatePath: "templates/business.sql.tmpl", Owner: businessCapability}
 		capabilityLock[businessCapability] = businessVersion
