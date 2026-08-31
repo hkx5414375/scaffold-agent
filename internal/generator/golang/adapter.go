@@ -113,8 +113,8 @@ var databaseTemplates = map[string]databaseTemplateSet{
 	},
 }
 
-var goCapabilityCatalog = map[string]spec.CapabilityPack{
-	tenancyCapability: {
+var goCapabilityCatalog = capability.NewCatalog(
+	spec.CapabilityPack{
 		APIVersion: spec.APIVersionV1Alpha1,
 		Kind:       spec.KindCapabilityPack,
 		Metadata:   spec.Metadata{Name: tenancyCapability, Version: tenancyVersion},
@@ -124,7 +124,7 @@ var goCapabilityCatalog = map[string]spec.CapabilityPack{
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
-}
+)
 
 var tenancyTemplates = map[string]string{
 	"internal/tenancy/service.go":              "templates/tenancy_service.go.tmpl",

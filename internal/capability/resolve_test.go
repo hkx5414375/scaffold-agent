@@ -9,10 +9,10 @@ import (
 func TestResolveReturnsDependenciesFirst(t *testing.T) {
 	t.Parallel()
 
-	catalog := map[string]spec.CapabilityPack{
-		"auth": pack("auth", "1.0.0"),
-		"rbac": withDependencies(pack("rbac", "1.2.0"), spec.PackDependency{Name: "auth", Constraint: "^1.0.0"}),
-	}
+	catalog := NewCatalog(
+		pack("auth", "1.0.0"),
+		withDependencies(pack("rbac", "1.2.0"), spec.PackDependency{Name: "auth", Constraint: "^1.0.0"}),
+	)
 	resolved, diagnostics := Resolve(catalog, []spec.CapabilitySelection{{Name: "rbac", Version: "1.2.0"}})
 
 	if len(diagnostics) != 0 {
@@ -26,10 +26,10 @@ func TestResolveReturnsDependenciesFirst(t *testing.T) {
 func TestResolveDetectsCycle(t *testing.T) {
 	t.Parallel()
 
-	catalog := map[string]spec.CapabilityPack{
-		"first":  withDependencies(pack("first", "1.0.0"), spec.PackDependency{Name: "second", Constraint: "*"}),
-		"second": withDependencies(pack("second", "1.0.0"), spec.PackDependency{Name: "first", Constraint: "*"}),
-	}
+	catalog := NewCatalog(
+		withDependencies(pack("first", "1.0.0"), spec.PackDependency{Name: "second", Constraint: "*"}),
+		withDependencies(pack("second", "1.0.0"), spec.PackDependency{Name: "first", Constraint: "*"}),
+	)
 	_, diagnostics := Resolve(catalog, []spec.CapabilitySelection{{Name: "first", Version: "1.0.0"}})
 	assertCode(t, diagnostics, "capability.dependency.cycle")
 }
@@ -39,12 +39,59 @@ func TestResolveDetectsConflict(t *testing.T) {
 
 	first := pack("first", "1.0.0")
 	first.Spec.Conflicts = []string{"second"}
-	catalog := map[string]spec.CapabilityPack{"first": first, "second": pack("second", "1.0.0")}
+	catalog := NewCatalog(first, pack("second", "1.0.0"))
 	_, diagnostics := Resolve(catalog, []spec.CapabilitySelection{
 		{Name: "first", Version: "1.0.0"},
 		{Name: "second", Version: "1.0.0"},
 	})
 	assertCode(t, diagnostics, "capability.conflict")
+}
+
+func TestResolvePinsRootVersionAndSelectsHighestCompatibleDependency(t *testing.T) {
+	t.Parallel()
+
+	catalog := NewCatalog(
+		pack("auth", "1.0.0"),
+		pack("auth", "1.4.0"),
+		pack("auth", "2.0.0"),
+		withDependencies(pack("rbac", "1.0.0"), spec.PackDependency{Name: "auth", Constraint: "^1.0.0"}),
+		withDependencies(pack("rbac", "2.0.0"), spec.PackDependency{Name: "auth", Constraint: "^2.0.0"}),
+	)
+	resolved, diagnostics := Resolve(catalog, []spec.CapabilitySelection{{Name: "rbac", Version: "1.0.0"}})
+	if len(diagnostics) != 0 {
+		t.Fatalf("Resolve() diagnostics = %#v, want none", diagnostics)
+	}
+	if len(resolved) != 2 || resolved[0].Metadata.Version != "1.4.0" || resolved[1].Metadata.Version != "1.0.0" {
+		t.Fatalf("Resolve() = %#v, want auth@1.4.0 then rbac@1.0.0", resolved)
+	}
+}
+
+func TestResolveBacktracksAcrossDependencyConstraintIntersection(t *testing.T) {
+	t.Parallel()
+
+	catalog := NewCatalog(
+		pack("auth", "1.8.0"),
+		pack("auth", "2.0.0"),
+		withDependencies(pack("first", "1.0.0"), spec.PackDependency{Name: "auth", Constraint: ">=1.0.0"}),
+		withDependencies(pack("second", "1.0.0"), spec.PackDependency{Name: "auth", Constraint: "^1.0.0"}),
+	)
+	resolved, diagnostics := Resolve(catalog, []spec.CapabilitySelection{
+		{Name: "first", Version: "1.0.0"},
+		{Name: "second", Version: "1.0.0"},
+	})
+	if len(diagnostics) != 0 {
+		t.Fatalf("Resolve() diagnostics = %#v, want none", diagnostics)
+	}
+	if len(resolved) != 3 || resolved[0].Metadata.Name != "auth" || resolved[0].Metadata.Version != "1.8.0" {
+		t.Fatalf("Resolve() = %#v, want shared auth@1.8.0 dependency", resolved)
+	}
+}
+
+func TestResolveReportsAvailableVersionsForUnsatisfiedSelection(t *testing.T) {
+	t.Parallel()
+
+	_, diagnostics := Resolve(NewCatalog(pack("auth", "1.0.0")), []spec.CapabilitySelection{{Name: "auth", Version: "2.0.0"}})
+	assertCode(t, diagnostics, "capability.version.unsatisfied")
 }
 
 func TestSatisfiesSemVerConstraints(t *testing.T) {

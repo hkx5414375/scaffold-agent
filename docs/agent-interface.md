@@ -42,6 +42,11 @@ business mutation and query. Agents should select an organization once and send
 its identifier through `X-Organization-ID`; they do not need to rediscover the
 tenant propagation rules from handlers or SQL stores.
 
+Project capability selections pin exact versions. Transitive dependencies may use
+semantic-version ranges; the Engine deterministically selects the highest release
+that satisfies the complete graph and records every exact result in the capability
+lock. Agents should reuse that lock instead of re-resolving dependency versions.
+
 ## STDIO protocol
 
 Run the server with:

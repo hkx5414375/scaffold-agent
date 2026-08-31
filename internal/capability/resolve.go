@@ -10,31 +10,73 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
-// Resolve returns selected packs and transitive dependencies in dependency-first order.
-func Resolve(catalog map[string]spec.CapabilityPack, selected []spec.CapabilitySelection) ([]spec.CapabilityPack, []spec.Diagnostic) {
+// Catalog stores every supported version of a capability by name and semantic version.
+type Catalog map[string]map[string]spec.CapabilityPack
+
+// NewCatalog builds an immutable-by-convention versioned catalog from capability documents.
+func NewCatalog(packs ...spec.CapabilityPack) Catalog {
+	catalog := make(Catalog)
+	for _, pack := range packs {
+		versions := catalog[pack.Metadata.Name]
+		if versions == nil {
+			versions = make(map[string]spec.CapabilityPack)
+			catalog[pack.Metadata.Name] = versions
+		}
+		versions[pack.Metadata.Version] = pack
+	}
+	return catalog
+}
+
+type requirement struct {
+	constraint string
+	source     string
+}
+
+type resolutionIssue struct {
+	code    string
+	path    string
+	message string
+}
+
+// Resolve returns exact selected packs and deterministic transitive dependencies in dependency-first order.
+// Dependency ranges choose the highest catalog version that satisfies the complete constraint intersection.
+func Resolve(catalog Catalog, selected []spec.CapabilitySelection) ([]spec.CapabilityPack, []spec.Diagnostic) {
 	var diagnostics []spec.Diagnostic
-	requested := make(map[string]string, len(selected))
+	requirements := make(map[string][]requirement, len(selected))
+	requested := make(map[string]struct{}, len(selected))
 	for _, selection := range selected {
 		if _, exists := requested[selection.Name]; exists {
 			diagnostics = append(diagnostics, diagnostic("capability.selection.duplicate", selection.Name, fmt.Sprintf("capability %q is selected more than once", selection.Name)))
 			continue
 		}
-		requested[selection.Name] = selection.Version
+		requested[selection.Name] = struct{}{}
+		if selection.Version == "" {
+			diagnostics = append(diagnostics, diagnostic("capability.version.required", selection.Name, fmt.Sprintf("capability %q must pin an exact version", selection.Name)))
+			continue
+		}
+		requirements[selection.Name] = append(requirements[selection.Name], requirement{
+			constraint: selection.Version,
+			source:     "project selection",
+		})
+	}
+	if len(diagnostics) > 0 {
+		return nil, diagnostics
 	}
 
-	state := make(map[string]uint8, len(catalog))
+	roots := make([]string, 0, len(requested))
+	for name := range requested {
+		roots = append(roots, name)
+	}
+	sort.Strings(roots)
+	resolved, issue := search(catalog, requirements, make(map[string]spec.CapabilityPack))
+	if issue != nil {
+		return nil, []spec.Diagnostic{diagnostic(issue.code, issue.path, issue.message)}
+	}
+
+	state := make(map[string]uint8, len(resolved))
 	var order []spec.CapabilityPack
-	var visit func(string, string)
-	visit = func(name, constraint string) {
-		pack, exists := catalog[name]
-		if !exists {
-			diagnostics = append(diagnostics, diagnostic("capability.missing", name, fmt.Sprintf("capability %q is not present in the catalog", name)))
-			return
-		}
-		if constraint != "" && !satisfies(pack.Metadata.Version, constraint) {
-			diagnostics = append(diagnostics, diagnostic("capability.version.unsatisfied", name, fmt.Sprintf("capability %q version %s does not satisfy %s", name, pack.Metadata.Version, constraint)))
-			return
-		}
+	var visit func(string)
+	visit = func(name string) {
 		switch state[name] {
 		case 1:
 			diagnostics = append(diagnostics, diagnostic("capability.dependency.cycle", name, fmt.Sprintf("capability dependency cycle includes %q", name)))
@@ -43,22 +85,17 @@ func Resolve(catalog map[string]spec.CapabilityPack, selected []spec.CapabilityS
 			return
 		}
 		state[name] = 1
+		pack := resolved[name]
 		dependencies := append([]spec.PackDependency(nil), pack.Spec.Requires...)
 		sort.Slice(dependencies, func(i, j int) bool { return dependencies[i].Name < dependencies[j].Name })
 		for _, dependency := range dependencies {
-			visit(dependency.Name, dependency.Constraint)
+			visit(dependency.Name)
 		}
 		state[name] = 2
 		order = append(order, pack)
 	}
-
-	roots := make([]string, 0, len(requested))
-	for name := range requested {
-		roots = append(roots, name)
-	}
-	sort.Strings(roots)
 	for _, name := range roots {
-		visit(name, requested[name])
+		visit(name)
 	}
 
 	closure := make(map[string]struct{}, len(order))
@@ -75,6 +112,117 @@ func Resolve(catalog map[string]spec.CapabilityPack, selected []spec.CapabilityS
 		}
 	}
 	return order, diagnostics
+}
+
+func search(catalog Catalog, requirements map[string][]requirement, assigned map[string]spec.CapabilityPack) (map[string]spec.CapabilityPack, *resolutionIssue) {
+	for name, pack := range assigned {
+		if !satisfiesAll(pack.Metadata.Version, requirements[name]) {
+			return nil, unsatisfiedIssue(name, requirements[name], catalog[name])
+		}
+	}
+
+	var unresolved []string
+	for name := range requirements {
+		if _, exists := assigned[name]; !exists {
+			unresolved = append(unresolved, name)
+		}
+	}
+	if len(unresolved) == 0 {
+		return assigned, nil
+	}
+	sort.Strings(unresolved)
+	name := unresolved[0]
+	versions, exists := catalog[name]
+	if !exists {
+		return nil, &resolutionIssue{
+			code: "capability.missing", path: name,
+			message: fmt.Sprintf("capability %q is not present in the catalog", name),
+		}
+	}
+	candidates := compatibleCandidates(versions, requirements[name])
+	if len(candidates) == 0 {
+		return nil, unsatisfiedIssue(name, requirements[name], versions)
+	}
+
+	var firstIssue *resolutionIssue
+	for _, candidate := range candidates {
+		nextAssigned := cloneAssignments(assigned)
+		nextAssigned[name] = candidate
+		nextRequirements := cloneRequirements(requirements)
+		for _, dependency := range candidate.Spec.Requires {
+			nextRequirements[dependency.Name] = append(nextRequirements[dependency.Name], requirement{
+				constraint: dependency.Constraint,
+				source:     candidate.Metadata.Name + "@" + candidate.Metadata.Version,
+			})
+		}
+		resolved, issue := search(catalog, nextRequirements, nextAssigned)
+		if issue == nil {
+			return resolved, nil
+		}
+		if firstIssue == nil {
+			firstIssue = issue
+		}
+	}
+	return nil, firstIssue
+}
+
+func compatibleCandidates(versions map[string]spec.CapabilityPack, requirements []requirement) []spec.CapabilityPack {
+	candidates := make([]spec.CapabilityPack, 0, len(versions))
+	for version, pack := range versions {
+		if satisfiesAll(version, requirements) {
+			candidates = append(candidates, pack)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		comparison := compareVersions(candidates[i].Metadata.Version, candidates[j].Metadata.Version)
+		if comparison == 0 {
+			return candidates[i].Metadata.Version > candidates[j].Metadata.Version
+		}
+		return comparison > 0
+	})
+	return candidates
+}
+
+func satisfiesAll(version string, requirements []requirement) bool {
+	for _, required := range requirements {
+		if !satisfies(version, required.constraint) {
+			return false
+		}
+	}
+	return true
+}
+
+func unsatisfiedIssue(name string, requirements []requirement, versions map[string]spec.CapabilityPack) *resolutionIssue {
+	constraints := make([]string, 0, len(requirements))
+	for _, required := range requirements {
+		constraints = append(constraints, fmt.Sprintf("%s (from %s)", required.constraint, required.source))
+	}
+	sort.Strings(constraints)
+	available := make([]string, 0, len(versions))
+	for version := range versions {
+		available = append(available, version)
+	}
+	sort.Slice(available, func(i, j int) bool { return compareVersions(available[i], available[j]) > 0 })
+	return &resolutionIssue{
+		code: "capability.version.unsatisfied", path: name,
+		message: fmt.Sprintf("capability %q has no version satisfying [%s]; available versions: [%s]", name, strings.Join(constraints, ", "), strings.Join(available, ", ")),
+	}
+}
+
+func cloneAssignments(source map[string]spec.CapabilityPack) map[string]spec.CapabilityPack {
+	cloned := make(map[string]spec.CapabilityPack, len(source)+1)
+	for name, pack := range source {
+		cloned[name] = pack
+	}
+	return cloned
+}
+
+func cloneRequirements(source map[string][]requirement) map[string][]requirement {
+	cloned := make(map[string][]requirement, len(source)+1)
+	for name, requirements := range source {
+		cloned[name] = append([]requirement(nil), requirements...)
+	}
+	return cloned
 }
 
 func satisfies(version, constraint string) bool {
