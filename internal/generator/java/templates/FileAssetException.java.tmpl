@@ -1,0 +1,27 @@
+package {{.PackageName}}.files;
+
+public final class FileAssetException extends RuntimeException {
+
+    private final Kind kind;
+
+    public FileAssetException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public FileAssetException(Kind kind, String message, Throwable cause) {
+        super(message, cause);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        TOO_LARGE,
+        STORAGE
+    }
+}

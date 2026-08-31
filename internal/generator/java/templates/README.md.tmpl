@@ -79,6 +79,22 @@ timeouts are mandatory. Queued email bodies remain sensitive database payloads u
 your retention policy removes them; never log payloads or place SMTP credentials in
 source, Blueprints, or AI context.
 {{end}}
+{{if .Files}}
+
+## File assets
+
+Set `FILE_STORAGE_ROOT` to a shared durable volume before starting the service.
+Authenticated callers can upload, list, inspect, download, and delete assets through
+`/api/v1/files`. Uploads are spooled by the servlet container and streamed into a
+same-directory temporary object with a hard 10 MiB limit and SHA-256 digest. The
+local adapter publishes with a create-only hard link, rejects unsafe storage keys and
+symbolic-link directories, and compensates metadata/blob mutation failures.
+
+Only public metadata crosses the HTTP boundary; the generated storage key is never
+serialized. A production multi-instance deployment must mount the same durable volume
+or replace `BlobStore` with an adapter that preserves the same create-only, bounded,
+streaming, and compensation contract.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

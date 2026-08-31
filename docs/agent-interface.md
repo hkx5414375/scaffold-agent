@@ -79,8 +79,9 @@ SMTP credentials in a Blueprint, source file, job payload, or model context.
 
 Selecting `file-assets` version `0.1.0` generates tenant-aware metadata,
 streaming multipart upload, bounded keyset listing, attachment download, reversible
-metadata deletion, and atomic local object storage. Feature code must use
-`files.Service`; it must not derive object paths from user filenames or expose
+metadata deletion, and atomic local object storage. Feature code must use the
+generated file service (`files.Service` in Go or `FileAssetService` in Java); it
+must not derive object paths from user filenames or expose
 `Asset.StorageKey`. `FILE_STORAGE_ROOT` belongs to runtime configuration. Agents
 may replace the `BlobStore` adapter but must preserve the 10 MiB request bound,
 create-only publication, SHA-256 metadata, compensation, and not-found behavior

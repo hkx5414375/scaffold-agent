@@ -1,0 +1,246 @@
+package {{.PackageName}}.files;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.io.OutputStream;
+import java.nio.channels.FileChannel;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Component;
+
+@Component
+public final class LocalBlobStore implements BlobStore {
+
+    private static final int BUFFER_BYTES = 64 << 10;
+
+    private final Path root;
+
+    public LocalBlobStore(@Value("${scaffold.files.root}") String configuredRoot) {
+        if (configuredRoot == null || configuredRoot.isBlank()) {
+            throw invalid("FILE_STORAGE_ROOT is required");
+        }
+        try {
+            Path absolute = Path.of(configuredRoot.trim()).toAbsolutePath().normalize();
+            java.nio.file.Files.createDirectories(absolute);
+            this.root = absolute.toRealPath();
+        } catch (IOException exception) {
+            throw storage("file storage root could not be initialized", exception);
+        }
+    }
+
+    @Override
+    public WriteResult write(String key, InputStream source, long maximumBytes) {
+        if (source == null || maximumBytes < 1 || maximumBytes > FileAssetService.MAXIMUM_BYTES) {
+            throw invalid("file object input is invalid");
+        }
+        Path target = safePath(key);
+        Path directory = requiredParent(target);
+        Path temporary = null;
+        boolean committed = false;
+        try {
+            createSafeDirectory(directory);
+            temporary = java.nio.file.Files.createTempFile(directory, ".upload-", ".tmp");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            long size = copyBounded(source, temporary, digest, maximumBytes);
+            try (FileChannel channel =
+                    FileChannel.open(temporary, StandardOpenOption.WRITE)) {
+                channel.force(true);
+            }
+            java.nio.file.Files.createLink(target, temporary);
+            try {
+                java.nio.file.Files.delete(temporary);
+            } catch (IOException exception) {
+                java.nio.file.Files.deleteIfExists(target);
+                throw exception;
+            }
+            committed = true;
+            return new WriteResult(size, HexFormat.of().formatHex(digest.digest()));
+        } catch (FileAssetException exception) {
+            throw exception;
+        } catch (IOException | NoSuchAlgorithmException exception) {
+            throw storage("file object could not be written", exception);
+        } finally {
+            if (!committed && temporary != null) {
+                try {
+                    java.nio.file.Files.deleteIfExists(temporary);
+                } catch (IOException ignored) {
+                    // The primary write failure remains authoritative.
+                }
+            }
+        }
+    }
+
+    @Override
+    public InputStream open(String key) {
+        Path target = safePath(key);
+        verifyDirectoryChain(requiredParent(target));
+        try {
+            BasicFileAttributes attributes =
+                    java.nio.file.Files.readAttributes(
+                            target,
+                            BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile() || java.nio.file.Files.isSymbolicLink(target)) {
+                throw notFound();
+            }
+            return java.nio.file.Files.newInputStream(target, StandardOpenOption.READ);
+        } catch (NoSuchFileException exception) {
+            throw notFound();
+        } catch (IOException exception) {
+            throw storage("file object could not be opened", exception);
+        }
+    }
+
+    @Override
+    public void delete(String key) {
+        Path target = safePath(key);
+        try {
+            verifyDirectoryChain(requiredParent(target));
+        } catch (FileAssetException exception) {
+            if (exception.kind() == FileAssetException.Kind.NOT_FOUND) {
+                return;
+            }
+            throw exception;
+        }
+        try {
+            java.nio.file.Files.deleteIfExists(target);
+        } catch (IOException exception) {
+            throw storage("file object could not be deleted", exception);
+        }
+    }
+
+    private long copyBounded(
+            InputStream source,
+            Path temporary,
+            MessageDigest digest,
+            long maximumBytes)
+            throws IOException {
+        byte[] buffer = new byte[BUFFER_BYTES];
+        long size = 0;
+        try (OutputStream output =
+                java.nio.file.Files.newOutputStream(
+                        temporary,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.TRUNCATE_EXISTING)) {
+            while (true) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new InterruptedIOException("file upload was interrupted");
+                }
+                int read = source.read(buffer);
+                if (read < 0) {
+                    break;
+                }
+                if (read == 0) {
+                    continue;
+                }
+                size += read;
+                if (size > maximumBytes) {
+                    throw new FileAssetException(
+                            FileAssetException.Kind.TOO_LARGE,
+                            "file exceeds the maximum size");
+                }
+                output.write(buffer, 0, read);
+                digest.update(buffer, 0, read);
+            }
+            output.flush();
+        }
+        return size;
+    }
+
+    private Path safePath(String key) {
+        if (!validKey(key)) {
+            throw invalid("file storage key is invalid");
+        }
+        Path target = root.resolve(key).normalize();
+        if (!target.startsWith(root) || target.equals(root)) {
+            throw invalid("file storage key is invalid");
+        }
+        return target;
+    }
+
+    private static Path requiredParent(Path target) {
+        Path parent = target.getParent();
+        if (parent == null) {
+            throw invalid("file storage key is invalid");
+        }
+        return parent;
+    }
+
+    private void createSafeDirectory(Path directory) throws IOException {
+        java.nio.file.Files.createDirectories(directory);
+        verifyDirectoryChain(directory);
+    }
+
+    private void verifyDirectoryChain(Path directory) {
+        Path relative;
+        try {
+            relative = root.relativize(directory);
+        } catch (IllegalArgumentException exception) {
+            throw invalid("file storage path is invalid");
+        }
+        Path current = root;
+        for (Path component : relative) {
+            current = current.resolve(component);
+            try {
+                BasicFileAttributes attributes =
+                        java.nio.file.Files.readAttributes(
+                                current,
+                                BasicFileAttributes.class,
+                                LinkOption.NOFOLLOW_LINKS);
+                if (!attributes.isDirectory() || java.nio.file.Files.isSymbolicLink(current)) {
+                    throw invalid("file object directory must not contain symbolic links");
+                }
+            } catch (NoSuchFileException exception) {
+                throw notFound();
+            } catch (IOException exception) {
+                throw storage("file object directory could not be inspected", exception);
+            }
+        }
+    }
+
+    private static boolean validKey(String key) {
+        if (key == null
+                || key.isEmpty()
+                || key.startsWith("/")
+                || key.endsWith("/")
+                || key.indexOf('\\') >= 0) {
+            return false;
+        }
+        for (String segment : key.split("/", -1)) {
+            if (segment.isEmpty() || segment.equals(".") || segment.equals("..")) {
+                return false;
+            }
+            if (!segment.chars()
+                    .allMatch(
+                            character ->
+                                    Character.isLetterOrDigit(character)
+                                            || character == '-'
+                                            || character == '_')) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static FileAssetException invalid(String message) {
+        return new FileAssetException(FileAssetException.Kind.INVALID, message);
+    }
+
+    private static FileAssetException notFound() {
+        return new FileAssetException(
+                FileAssetException.Kind.NOT_FOUND,
+                "file asset was not found");
+    }
+
+    private static FileAssetException storage(String message, Throwable cause) {
+        return new FileAssetException(FileAssetException.Kind.STORAGE, message, cause);
+    }
+}

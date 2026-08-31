@@ -387,6 +387,171 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 {{- end}}
+{{- if .Files}}
+  /api/v1/files:
+    post:
+      operationId: uploadFileAsset
+      x-required-permission: files:create
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+{{- if .Tenancy}}
+      parameters:
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: File asset created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAsset"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      operationId: listFileAssets
+      x-required-permission: files:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+{{- if .Tenancy}}
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 191
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Bounded file metadata page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAssetPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/files/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getFileAsset
+      x-required-permission: files:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Active file metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAsset"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: deleteFileAsset
+      x-required-permission: files:delete
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "204":
+          description: File metadata and object deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/files/{id}/content:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: downloadFileAsset
+      x-required-permission: files:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Streamed file content
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            X-Content-Type-Options:
+              schema:
+                type: string
+                const: nosniff
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+{{- end}}
 {{- if .Business}}
   {{.Business.RoutePath}}:
     post:
@@ -587,6 +752,46 @@ components:
           schema:
             $ref: "#/components/schemas/ApiError"
   schemas:
+{{- if .Files}}
+    FileAsset:
+      type: object
+      additionalProperties: false
+      required: [id, name, media_type, size, sha256, created_at]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        name:
+          type: string
+          maxLength: 255
+        media_type:
+          type: string
+          maxLength: 255
+        size:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10485760
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        created_at:
+          type: string
+          format: date-time
+    FileAssetPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/FileAsset"
+        next_cursor:
+          type: string
+{{- end}}
     StatusResponse:
       type: object
       additionalProperties: false

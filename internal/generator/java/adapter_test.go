@@ -494,6 +494,90 @@ func TestGenerateTenantScopedEmailNotifications(t *testing.T) {
 	}
 }
 
+func TestGenerateFileAssetsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: filesOwner, Version: filesVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 43 || result.CapabilityLock[filesOwner] != filesVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/files/FileAssetService.java",
+				"src/main/java/com/scaffold/generated/demoservice/files/LocalBlobStore.java",
+				"src/main/java/com/scaffold/generated/demoservice/files/FileAssetController.java",
+				"src/test/java/com/scaffold/generated/demoservice/files/FileAssetDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000210__file_assets.sql",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != filesOwner {
+					t.Errorf("Generate() file output %s is missing or has the wrong owner", path)
+				}
+			}
+			migration := string(outputContent(
+				result, "src/main/resources/db/migration/V000210__file_assets.sql",
+			))
+			if !strings.Contains(migration, "files:create") ||
+				!strings.Contains(migration, "storage_key") ||
+				!strings.Contains(migration, "10485760") {
+				t.Fatalf("generated file migration is incomplete:\n%s", migration)
+			}
+			openAPI := string(outputContent(result, "api/openapi.yaml"))
+			var contract map[string]any
+			if err := yaml.Unmarshal([]byte(openAPI), &contract); err != nil {
+				t.Fatalf("generated file OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(openAPI, "/api/v1/files/{id}/content:") ||
+				strings.Contains(openAPI, "storage_key") {
+				t.Fatalf("generated file OpenAPI is incomplete or leaks storage keys:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestGenerateTenantFileAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: filesOwner, Version: filesVersion},
+	}
+	result, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(result.Outputs) != 90 {
+		t.Fatalf("Generate() output count = %d, want 90", len(result.Outputs))
+	}
+	view := "web/admin/src/views/FilesView.vue"
+	if outputContent(result, view) == nil || outputOwner(result, view) != filesOwner {
+		t.Fatalf("Generate() file administration view is missing or has the wrong owner")
+	}
+	application := string(outputContent(result, "web/admin/src/App.vue"))
+	if !strings.Contains(application, "FilesView") {
+		t.Fatalf("generated administration application lacks file workflows:\n%s", application)
+	}
+	migration := string(outputContent(
+		result, "src/main/resources/db/migration/V000210__file_assets.sql",
+	))
+	if !strings.Contains(migration, "organization_id text not null") ||
+		!strings.Contains(migration, "references organizations") {
+		t.Fatalf("generated file assets are not tenant scoped:\n%s", migration)
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

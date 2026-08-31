@@ -1,0 +1,201 @@
+package {{.PackageName}}.files;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.io.InputStream;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
+import java.util.UUID;
+import org.springframework.http.MediaType;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class FileAssetService {
+
+    public static final long MAXIMUM_BYTES = 10L << 20;
+
+    private final FileAssetRepository repository;
+    private final BlobStore blobs;
+    private final Clock clock;
+
+    public FileAssetService(FileAssetRepository repository, BlobStore blobs) {
+        this(repository, blobs, Clock.systemUTC());
+    }
+
+    FileAssetService(FileAssetRepository repository, BlobStore blobs, Clock clock) {
+        this.repository = repository;
+        this.blobs = blobs;
+        this.clock = clock;
+    }
+
+    public FileAsset upload(
+            String name,
+            String mediaType,
+            InputStream content,
+            Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedName = normalizeName(name);
+        String normalizedMediaType = normalizeMediaType(mediaType);
+        if (content == null) {
+            throw invalid();
+        }
+        String id = UUID.randomUUID().toString();
+        String storageKey = "objects/" + id.substring(0, 2) + "/" + id;
+        BlobStore.WriteResult written = blobs.write(storageKey, content, MAXIMUM_BYTES);
+        Instant now = clock.instant();
+        FileAsset asset =
+                new FileAsset(
+                        id,
+                        emptyToNull(organizationId),
+                        normalizedName,
+                        normalizedMediaType,
+                        written.size(),
+                        written.sha256(),
+                        storageKey,
+                        now);
+        try {
+            repository.create(asset, audit(actor, "files:create", id, now));
+            return asset;
+        } catch (RuntimeException exception) {
+            try {
+                blobs.delete(storageKey);
+            } catch (RuntimeException cleanup) {
+                exception.addSuppressed(cleanup);
+            }
+            throw exception;
+        }
+    }
+
+    public FileAsset get(String id, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireId(id);
+        return repository.get(organizationId, normalizedId).orElseThrow(FileAssetService::notFound);
+    }
+
+    public Download open(String id, Principal actor) {
+        FileAsset asset = get(id, actor);
+        return new Download(asset, blobs.open(asset.storageKey()));
+    }
+
+    public Page list(String cursor, int limit, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedCursor = cursor == null ? "" : cursor.trim();
+        if (normalizedCursor.length() > 191 || limit < 1 || limit > 100) {
+            throw invalid();
+        }
+        FileAssetRepository.PageResult result =
+                repository.list(organizationId, normalizedCursor, limit);
+        return new Page(result.items(), result.nextCursor());
+    }
+
+    public void delete(String id, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireId(id);
+        Instant now = clock.instant();
+        FileAsset asset =
+                repository.markDeleted(
+                        organizationId,
+                        normalizedId,
+                        now,
+                        audit(actor, "files:delete", normalizedId, now));
+        try {
+            blobs.delete(asset.storageKey());
+        } catch (RuntimeException exception) {
+            try {
+                repository.restore(organizationId, normalizedId);
+            } catch (RuntimeException restore) {
+                exception.addSuppressed(restore);
+            }
+            throw exception;
+        }
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank(){{if .Tenancy}}
+                || actor.organizationId() == null || actor.organizationId().isBlank(){{end}}) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        return actor.organizationId().trim();
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static String normalizeName(String name) {
+        String normalized = name == null ? "" : name.trim();
+        if (normalized.isEmpty()
+                || normalized.length() > 255
+                || normalized.indexOf('/') >= 0
+                || normalized.indexOf('\\') >= 0
+                || normalized.chars().anyMatch(Character::isISOControl)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String normalizeMediaType(String value) {
+        if (value == null || value.isBlank()) {
+            return MediaType.APPLICATION_OCTET_STREAM_VALUE;
+        }
+        try {
+            MediaType parsed = MediaType.parseMediaType(value.trim());
+            if (parsed.isWildcardType() || parsed.isWildcardSubtype()) {
+                throw invalid();
+            }
+            return (parsed.getType() + "/" + parsed.getSubtype()).toLowerCase(Locale.ROOT);
+        } catch (IllegalArgumentException exception) {
+            throw invalid();
+        }
+    }
+
+    private static String requireId(String id) {
+        String normalized = id == null ? "" : id.trim();
+        if (normalized.isEmpty() || normalized.length() > 191) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static AuditEvent audit(
+            Principal actor,
+            String action,
+            String target,
+            Instant now) {
+        return new AuditEvent(
+                UUID.randomUUID().toString(),
+                actor.userId(),
+                action,
+                "succeeded",
+                target,
+                "",
+                "",
+                now);
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static FileAssetException invalid() {
+        return new FileAssetException(
+                FileAssetException.Kind.INVALID,
+                "file asset input is invalid");
+    }
+
+    private static FileAssetException notFound() {
+        return new FileAssetException(
+                FileAssetException.Kind.NOT_FOUND,
+                "file asset was not found");
+    }
+
+    public record Download(FileAsset asset, InputStream content) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record Page(List<FileAsset> items, String nextCursor) {}
+}

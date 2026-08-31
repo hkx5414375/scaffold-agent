@@ -1,0 +1,14 @@
+package {{.PackageName}}.files;
+
+import java.io.InputStream;
+
+public interface BlobStore {
+
+    WriteResult write(String key, InputStream source, long maximumBytes);
+
+    InputStream open(String key);
+
+    void delete(String key);
+
+    record WriteResult(long size, String sha256) {}
+}

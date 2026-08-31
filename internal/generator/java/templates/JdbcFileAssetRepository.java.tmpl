@@ -1,0 +1,196 @@
+package {{.PackageName}}.files;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcFileAssetRepository implements FileAssetRepository {
+
+    private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
+    private final RowMapper<FileAsset> mapper = this::map;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped dependencies")
+    public JdbcFileAssetRepository(JdbcTemplate jdbc, TransactionTemplate transactions) {
+        this.jdbc = jdbc;
+        this.transactions = transactions;
+    }
+
+    @Override
+    public void create(FileAsset asset, AuditEvent auditEvent) {
+        transactions.executeWithoutResult(
+                status -> {
+                    jdbc.update(
+                            """
+                            insert into file_assets
+                                (id, organization_id, name, media_type, size_bytes,
+                                 sha256, storage_key, created_at)
+                            values (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            asset.id(),
+                            nullableOrganization(asset.organizationId()),
+                            asset.name(),
+                            asset.mediaType(),
+                            asset.size(),
+                            asset.sha256(),
+                            asset.storageKey(),
+                            Timestamp.from(asset.createdAt()));
+                    appendAudit(auditEvent);
+                });
+    }
+
+    @Override
+    public Optional<FileAsset> get(String organizationId, String id) {
+        return one(
+                """
+                select id, organization_id, name, media_type, size_bytes,
+                       sha256, storage_key, created_at
+                from file_assets
+                where id = ?{{if .Tenancy}} and organization_id = ?{{end}} and deleted_at is null
+                """,
+                {{if .Tenancy}}new Object[] {id, organizationId}{{else}}new Object[] {id}{{end}});
+    }
+
+    @Override
+    public PageResult list(String organizationId, String cursor, int limit) {
+        List<FileAsset> items =
+                new ArrayList<>(
+                        jdbc.query(
+                                """
+                                select id, organization_id, name, media_type, size_bytes,
+                                       sha256, storage_key, created_at
+                                from file_assets
+                                where deleted_at is null{{if .Tenancy}} and organization_id = ?{{end}}
+                                  and (? = '' or id > ?)
+                                order by id
+                                limit ?
+                                """,
+                                mapper,
+                                {{if .Tenancy}}organizationId, {{end}}cursor,
+                                cursor,
+                                limit + 1));
+        String nextCursor = "";
+        if (items.size() > limit) {
+            nextCursor = items.get(limit - 1).id();
+            items = new ArrayList<>(items.subList(0, limit));
+        }
+        return new PageResult(List.copyOf(items), nextCursor);
+    }
+
+    @Override
+    public FileAsset markDeleted(
+            String organizationId,
+            String id,
+            Instant deletedAt,
+            AuditEvent auditEvent) {
+        FileAsset asset =
+                transactions.execute(
+                        status -> {
+                            int updated =
+                                    jdbc.update(
+                                            """
+                                            update file_assets set deleted_at = ?
+                                            where id = ?{{if .Tenancy}} and organization_id = ?{{end}}
+                                              and deleted_at is null
+                                            """,
+                                            Timestamp.from(deletedAt),
+                                            id{{if .Tenancy}}, organizationId{{end}});
+                            if (updated != 1) {
+                                throw notFound();
+                            }
+                            FileAsset deleted = getAny(organizationId, id);
+                            appendAudit(auditEvent);
+                            return deleted;
+                        });
+        if (asset == null) {
+            throw new IllegalStateException("file deletion transaction returned no value");
+        }
+        return asset;
+    }
+
+    @Override
+    public void restore(String organizationId, String id) {
+        int updated =
+                jdbc.update(
+                        """
+                        update file_assets set deleted_at = null
+                        where id = ?{{if .Tenancy}} and organization_id = ?{{end}}
+                          and deleted_at is not null
+                        """,
+                        id{{if .Tenancy}}, organizationId{{end}});
+        if (updated != 1) {
+            throw notFound();
+        }
+    }
+
+    private FileAsset getAny(String organizationId, String id) {
+        return one(
+                        """
+                        select id, organization_id, name, media_type, size_bytes,
+                               sha256, storage_key, created_at
+                        from file_assets
+                        where id = ?{{if .Tenancy}} and organization_id = ?{{end}}
+                        """,
+                        {{if .Tenancy}}new Object[] {id, organizationId}{{else}}new Object[] {id}{{end}})
+                .orElseThrow(JdbcFileAssetRepository::notFound);
+    }
+
+    private Optional<FileAsset> one(String sql, Object[] arguments) {
+        List<FileAsset> items = jdbc.query(sql, mapper, arguments);
+        return items.stream().findFirst();
+    }
+
+    private FileAsset map(ResultSet result, int rowNumber) throws SQLException {
+        Timestamp createdAt = result.getTimestamp("created_at");
+        return new FileAsset(
+                result.getString("id"),
+                result.getString("organization_id"),
+                result.getString("name"),
+                result.getString("media_type"),
+                result.getLong("size_bytes"),
+                result.getString("sha256"),
+                result.getString("storage_key"),
+                createdAt.toInstant());
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbc.update(
+                """
+                insert into audit_events
+                    (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                event.id() == null ? UUID.randomUUID().toString() : event.id(),
+                event.userId(),
+                event.action(),
+                event.outcome(),
+                event.target(),
+                event.ipAddress(),
+                event.userAgent(),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static String nullableOrganization(String organizationId) {
+        return organizationId == null || organizationId.isEmpty() ? null : organizationId;
+    }
+
+    private static FileAssetException notFound() {
+        return new FileAssetException(
+                FileAssetException.Kind.NOT_FOUND,
+                "file asset was not found");
+    }
+}

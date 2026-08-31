@@ -19,6 +19,8 @@ spec:
       version: 0.3.0
     - name: notifications
       version: 0.1.0
+    - name: file-assets
+      version: 0.1.0
   modules:
     - name: tasks
       entities:

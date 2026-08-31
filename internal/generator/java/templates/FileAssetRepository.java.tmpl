@@ -1,0 +1,29 @@
+package {{.PackageName}}.files;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface FileAssetRepository {
+
+    void create(FileAsset asset, AuditEvent auditEvent);
+
+    Optional<FileAsset> get(String organizationId, String id);
+
+    PageResult list(String organizationId, String cursor, int limit);
+
+    FileAsset markDeleted(
+            String organizationId,
+            String id,
+            Instant deletedAt,
+            AuditEvent auditEvent);
+
+    void restore(String organizationId, String id);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult(List<FileAsset> items, String nextCursor) {}
+}

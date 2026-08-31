@@ -1,0 +1,29 @@
+insert into identity_permissions (code, description) values
+    ('files:create', 'Upload file assets'),
+    ('files:read', 'Read and download file assets'),
+    ('files:delete', 'Delete file assets');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'files:create'),
+    ('admin', 'files:read'),
+    ('admin', 'files:delete'),
+    ('user', 'files:create'),
+    ('user', 'files:read'),
+    ('user', 'files:delete');
+
+create table file_assets (
+    id text primary key,
+    organization_id text{{if .Tenancy}} not null references organizations (id) on delete cascade{{end}},
+    name text not null,
+    media_type text not null,
+    size_bytes bigint not null check (size_bytes >= 0 and size_bytes <= 10485760),
+    sha256 text not null check (length(sha256) = 64),
+    storage_key text not null unique,
+    created_at timestamptz not null,
+    deleted_at timestamptz
+);
+
+create index file_assets_scope_idx on file_assets ({{if .Tenancy}}organization_id, {{end}}id)
+where deleted_at is null;
+create index file_assets_deleted_idx on file_assets (deleted_at)
+where deleted_at is not null;

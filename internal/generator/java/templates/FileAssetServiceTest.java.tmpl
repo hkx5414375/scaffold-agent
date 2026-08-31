@@ -1,0 +1,221 @@
+package {{.PackageName}}.files;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class FileAssetServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void uploadsListsOpensAndDeletesWithCompensationBoundaries() throws Exception {
+        FakeRepository repository = new FakeRepository();
+        FakeBlobStore blobs = new FakeBlobStore();
+        FileAssetService service = service(repository, blobs);
+        Principal actor = actor();
+
+        FileAsset uploaded =
+                service.upload(
+                        " report.txt ",
+                        "text/plain; charset=utf-8",
+                        new ByteArrayInputStream("durable".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        actor);
+
+        assertThat(uploaded.name()).isEqualTo("report.txt");
+        assertThat(uploaded.mediaType()).isEqualTo("text/plain");
+        assertThat(uploaded.size()).isEqualTo(7);
+        assertThat(uploaded.organizationId()).isEqualTo({{if .Tenancy}}"organization-1"{{else}}null{{end}});
+        assertThat(service.list("", 20, actor).items()).containsExactly(uploaded);
+        try (InputStream content = service.open(uploaded.id(), actor).content()) {
+            assertThat(content.readAllBytes()).isEqualTo("durable".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+
+        service.delete(uploaded.id(), actor);
+
+        assertThatThrownBy(() -> service.get(uploaded.id(), actor))
+                .isInstanceOf(FileAssetException.class)
+                .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.NOT_FOUND);
+        assertThat(blobs.content).isEmpty();
+    }
+
+    @Test
+    void removesBlobAfterMetadataFailureAndRestoresMetadataAfterDeleteFailure() {
+        FakeRepository repository = new FakeRepository();
+        FakeBlobStore blobs = new FakeBlobStore();
+        FileAssetService service = service(repository, blobs);
+        repository.createFailure = true;
+
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "report.txt",
+                                        "text/plain",
+                                        new ByteArrayInputStream(new byte[] {1}),
+                                        actor()))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(blobs.content).isEmpty();
+
+        repository.createFailure = false;
+        FileAsset uploaded =
+                service.upload(
+                        "report.txt",
+                        "text/plain",
+                        new ByteArrayInputStream(new byte[] {1}),
+                        actor());
+        blobs.deleteFailure = true;
+        assertThatThrownBy(() -> service.delete(uploaded.id(), actor()))
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(repository.deleted).isFalse();
+        assertThat(repository.restoreCalled).isTrue();
+    }
+
+    @Test
+    void rejectsUnsafeNamesMediaTypesAndPageBounds() {
+        FileAssetService service = service(new FakeRepository(), new FakeBlobStore());
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "../secret",
+                                        "text/plain",
+                                        new ByteArrayInputStream(new byte[] {1}),
+                                        actor()))
+                .isInstanceOf(FileAssetException.class);
+        assertThatThrownBy(
+                        () ->
+                                service.upload(
+                                        "report.txt",
+                                        "broken media type",
+                                        new ByteArrayInputStream(new byte[] {1}),
+                                        actor()))
+                .isInstanceOf(FileAssetException.class);
+        assertThatThrownBy(() -> service.list("", 101, actor()))
+                .isInstanceOf(FileAssetException.class);
+    }
+
+    private static FileAssetService service(
+            FileAssetRepository repository,
+            BlobStore blobs) {
+        return new FileAssetService(
+                repository,
+                blobs,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static Principal actor() {
+        return new Principal(
+                "user-1",
+                "user@example.com",
+                "user",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+    private static final class FakeRepository implements FileAssetRepository {
+
+        private FileAsset asset;
+        private boolean deleted;
+        private boolean createFailure;
+        private boolean restoreCalled;
+
+        @Override
+        public void create(FileAsset value, AuditEvent auditEvent) {
+            if (createFailure) {
+                throw new IllegalStateException("database unavailable");
+            }
+            asset = value;
+            deleted = false;
+        }
+
+        @Override
+        public Optional<FileAsset> get(String organizationId, String id) {
+            if (deleted
+                    || asset == null
+                    || !asset.id().equals(id)
+                    || !scope(asset).equals(organizationId)) {
+                return Optional.empty();
+            }
+            return Optional.of(asset);
+        }
+
+        @Override
+        public PageResult list(String organizationId, String cursor, int limit) {
+            List<FileAsset> items = new ArrayList<>();
+            get(organizationId, asset == null ? "" : asset.id()).ifPresent(items::add);
+            return new PageResult(List.copyOf(items), "");
+        }
+
+        @Override
+        public FileAsset markDeleted(
+                String organizationId,
+                String id,
+                Instant deletedAt,
+                AuditEvent auditEvent) {
+            FileAsset found = get(organizationId, id).orElseThrow();
+            deleted = true;
+            return found;
+        }
+
+        @Override
+        public void restore(String organizationId, String id) {
+            if (asset == null || !asset.id().equals(id) || !scope(asset).equals(organizationId)) {
+                throw new IllegalStateException("missing metadata");
+            }
+            deleted = false;
+            restoreCalled = true;
+        }
+
+        private static String scope(FileAsset value) {
+            return value.organizationId() == null ? "" : value.organizationId();
+        }
+    }
+
+    private static final class FakeBlobStore implements BlobStore {
+
+        private final Map<String, byte[]> content = new HashMap<>();
+        private boolean deleteFailure;
+
+        @Override
+        public WriteResult write(String key, InputStream source, long maximumBytes) {
+            try {
+                byte[] bytes = source.readAllBytes();
+                content.put(key, bytes);
+                return new WriteResult(bytes.length, "a".repeat(64));
+            } catch (java.io.IOException exception) {
+                throw new IllegalStateException(exception);
+            }
+        }
+
+        @Override
+        public InputStream open(String key) {
+            byte[] bytes = content.get(key);
+            if (bytes == null) {
+                throw new FileAssetException(
+                        FileAssetException.Kind.NOT_FOUND,
+                        "file asset was not found");
+            }
+            return new ByteArrayInputStream(bytes);
+        }
+
+        @Override
+        public void delete(String key) {
+            if (deleteFailure) {
+                throw new IllegalStateException("storage unavailable");
+            }
+            content.remove(key);
+        }
+    }
+}

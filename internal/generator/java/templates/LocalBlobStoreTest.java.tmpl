@@ -1,0 +1,84 @@
+package {{.PackageName}}.files;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+class LocalBlobStoreTest {
+
+    @Test
+    void writesOpensAndDeletesCreateOnlyObject(@TempDir Path root) throws Exception {
+        LocalBlobStore store = new LocalBlobStore(root.toString());
+        byte[] content = "atomic-content".getBytes(StandardCharsets.UTF_8);
+
+        BlobStore.WriteResult written =
+                store.write(
+                        "objects/ab/asset",
+                        new ByteArrayInputStream(content),
+                        1024);
+
+        assertThat(written.size()).isEqualTo(content.length);
+        assertThat(written.sha256())
+                .isEqualTo(
+                        HexFormat.of()
+                                .formatHex(
+                                        MessageDigest.getInstance("SHA-256")
+                                                .digest(content)));
+        try (InputStream loaded = store.open("objects/ab/asset")) {
+            assertThat(loaded.readAllBytes()).isEqualTo(content);
+        }
+        assertThatThrownBy(
+                        () ->
+                                store.write(
+                                        "objects/ab/asset",
+                                        new ByteArrayInputStream(content),
+                                        1024))
+                .isInstanceOf(FileAssetException.class)
+                .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.STORAGE);
+        store.delete("objects/ab/asset");
+        store.delete("objects/missing/asset");
+        assertThatThrownBy(() -> store.open("objects/ab/asset"))
+                .isInstanceOf(FileAssetException.class)
+                .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.NOT_FOUND);
+    }
+
+    @Test
+    void rejectsOversizeAndUnsafeStorageKeys(@TempDir Path root) {
+        LocalBlobStore store = new LocalBlobStore(root.toString());
+
+        assertThatThrownBy(
+                        () ->
+                                store.write(
+                                        "objects/ab/large",
+                                        new ByteArrayInputStream("12345".getBytes(StandardCharsets.UTF_8)),
+                                        4))
+                .isInstanceOf(FileAssetException.class)
+                .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.TOO_LARGE);
+        for (String key :
+                new String[] {
+                    "../escape",
+                    "/absolute",
+                    "objects\\escape",
+                    "objects/./escape",
+                    "objects//escape"
+                }) {
+            assertThatThrownBy(
+                            () ->
+                                    store.write(
+                                            key,
+                                            new ByteArrayInputStream(new byte[] {1}),
+                                            4))
+                    .isInstanceOf(FileAssetException.class)
+                    .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.INVALID);
+        }
+        assertThat(root.resolve("escape")).doesNotExist();
+    }
+}

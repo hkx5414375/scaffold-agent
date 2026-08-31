@@ -1,0 +1,158 @@
+package {{.PackageName}}.files;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class FileAssetDatabaseIntegrationTest {
+
+    @Test
+    @Timeout(45)
+    void persistsScopedMetadataAuditAndSoftDeletion(@TempDir Path storageRoot)
+            throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_files_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal identityActor =
+                    identity.login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+            Principal actor;
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Acme", identityActor);
+            actor =
+                    new Principal(
+                            identityActor.userId(),
+                            identityActor.email(),
+                            "admin",
+                            "session",
+                            organization.id());
+{{- else}}
+            actor = identityActor;
+{{- end}}
+            FileAssetService service =
+                    new FileAssetService(
+                            new JdbcFileAssetRepository(jdbc, transactions),
+                            new LocalBlobStore(storageRoot.toString()));
+            FileAsset uploaded =
+                    service.upload(
+                            "report.txt",
+                            "text/plain; charset=utf-8",
+                            new ByteArrayInputStream("durable".getBytes(StandardCharsets.UTF_8)),
+                            actor);
+
+            assertThat(service.get(uploaded.id(), actor)).isEqualTo(uploaded);
+            assertThat(service.list("", 20, actor).items()).containsExactly(uploaded);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from audit_events where action = 'files:create'",
+                                    Integer.class))
+                    .isEqualTo(1);
+
+            service.delete(uploaded.id(), actor);
+
+            assertThatThrownBy(() -> service.get(uploaded.id(), actor))
+                    .isInstanceOf(FileAssetException.class)
+                    .hasFieldOrPropertyWithValue("kind", FileAssetException.Kind.NOT_FOUND);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from file_assets where deleted_at is not null",
+                                    Integer.class))
+                    .isEqualTo(1);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from audit_events where action = 'files:delete'",
+                                    Integer.class))
+                    .isEqualTo(1);
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

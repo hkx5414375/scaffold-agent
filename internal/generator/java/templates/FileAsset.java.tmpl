@@ -1,0 +1,16 @@
+package {{.PackageName}}.files;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record FileAsset(
+        String id,
+        String organizationId,
+        String name,
+        String mediaType,
+        long size,
+        String sha256,
+        @JsonIgnore String storageKey,
+        Instant createdAt) {}

@@ -34,6 +34,8 @@ const (
 	jobsVersion             = "0.1.0"
 	notificationsOwner      = "notifications"
 	notificationsVersion    = "0.1.0"
+	filesOwner              = "file-assets"
+	filesVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -62,6 +64,7 @@ type databaseData struct {
 	TenancyMembersMigrationTemplate   string
 	TenancyLifecycleMigrationTemplate string
 	JobsMigrationTemplate             string
+	FilesMigrationTemplate            string
 }
 
 var databases = map[string]databaseData{
@@ -78,6 +81,7 @@ var databases = map[string]databaseData{
 		TenancyMembersMigrationTemplate:   "templates/tenancy_members_postgresql.sql.tmpl",
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_postgresql.sql.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_postgresql.sql.tmpl",
+		FilesMigrationTemplate:            "templates/files_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -92,6 +96,7 @@ var databases = map[string]databaseData{
 		TenancyMembersMigrationTemplate:   "templates/tenancy_members_mysql.sql.tmpl",
 		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_mysql.sql.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
+		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
 	},
 }
 
@@ -102,6 +107,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: filesOwner, Version: filesVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware file metadata and atomic local object storage.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -261,6 +276,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
 	notificationsEnabled := false
+	filesEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -275,6 +291,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == notificationsOwner {
 			notificationsEnabled = true
+		}
+		if pack.Metadata.Name == filesOwner {
+			filesEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -298,6 +317,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if jobsEnabled {
 		migrationCount++
 	}
+	if filesEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -312,6 +334,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyLifecycle: tenancyLifecycleEnabled,
 		Jobs:             jobsEnabled,
 		Notifications:    notificationsEnabled,
+		Files:            filesEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -323,6 +346,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyPaths := make(map[string]struct{}, 27)
 	jobsPaths := make(map[string]struct{}, 12)
 	notificationPaths := make(map[string]struct{}, 11)
+	filesPaths := make(map[string]struct{}, 15)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -347,6 +371,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addNotificationTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		notificationPaths[path] = struct{}{}
+	}
+	addFilesTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		filesPaths[path] = struct{}{}
+	}
+	addFilesAdminTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		filesPaths[path] = struct{}{}
+		adminPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -459,6 +492,30 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		addNotificationTarget(testRoot+"/notifications/NotificationDatabaseIntegrationTest.java", "templates/NotificationDatabaseIntegrationTest.java.tmpl")
 		capabilityLock[notificationsOwner] = notificationsVersion
 	}
+	if filesEnabled {
+		addFilesTarget(mainRoot+"/files/FileAsset.java", "templates/FileAsset.java.tmpl")
+		addFilesTarget(mainRoot+"/files/FileAssetException.java", "templates/FileAssetException.java.tmpl")
+		addFilesTarget(mainRoot+"/files/FileAssetRepository.java", "templates/FileAssetRepository.java.tmpl")
+		addFilesTarget(mainRoot+"/files/JdbcFileAssetRepository.java", "templates/JdbcFileAssetRepository.java.tmpl")
+		addFilesTarget(mainRoot+"/files/BlobStore.java", "templates/BlobStore.java.tmpl")
+		addFilesTarget(mainRoot+"/files/LocalBlobStore.java", "templates/LocalBlobStore.java.tmpl")
+		addFilesTarget(mainRoot+"/files/FileAssetService.java", "templates/FileAssetService.java.tmpl")
+		addFilesTarget(mainRoot+"/files/FileAssetController.java", "templates/FileAssetController.java.tmpl")
+		addFilesTarget(testRoot+"/files/FileAssetServiceTest.java", "templates/FileAssetServiceTest.java.tmpl")
+		addFilesTarget(testRoot+"/files/LocalBlobStoreTest.java", "templates/LocalBlobStoreTest.java.tmpl")
+		addFilesTarget(testRoot+"/files/FileAssetDatabaseIntegrationTest.java", "templates/FileAssetDatabaseIntegrationTest.java.tmpl")
+		addFilesTarget(
+			"src/main/resources/db/migration/V000210__file_assets.sql",
+			database.FilesMigrationTemplate,
+		)
+		if adminEnabled {
+			addFilesAdminTarget(
+				"web/admin/src/views/FilesView.vue",
+				"templates/src/views/FilesView.vue",
+			)
+		}
+		capabilityLock[filesOwner] = filesVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -518,6 +575,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isNotificationPath := notificationPaths[path]; isNotificationPath {
 			owner = notificationsOwner
+		}
+		if _, isFilesPath := filesPaths[path]; isFilesPath {
+			owner = filesOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

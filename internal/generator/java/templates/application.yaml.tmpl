@@ -14,11 +14,22 @@ spring:
     enabled: true
   jackson:
     property-naming-strategy: SNAKE_CASE
+{{- if .Files}}
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
+      file-size-threshold: 0
+{{- end}}
 server:
   port: ${HTTP_PORT:8080}
   shutdown: graceful
 scaffold:
   cookie-secure: ${COOKIE_SECURE:true}
+{{- if .Files}}
+  files:
+    root: ${FILE_STORAGE_ROOT}
+{{- end}}
 {{- if .Jobs}}
   worker:
     enabled: ${WORKER_ENABLED:false}
