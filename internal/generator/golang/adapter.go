@@ -33,6 +33,8 @@ const (
 	jobsVersion             = "0.1.0"
 	notificationsCapability = "notifications"
 	notificationsVersion    = "0.1.0"
+	filesCapability         = "file-assets"
+	filesVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -84,6 +86,9 @@ type databaseTemplateSet struct {
 	JobsStorePath                     string
 	JobsStoreTemplate                 string
 	JobsMigrationTemplate             string
+	FilesStorePath                    string
+	FilesStoreTemplate                string
+	FilesMigrationTemplate            string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -114,6 +119,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		JobsStorePath:                     "internal/jobs/postgres/store.go",
 		JobsStoreTemplate:                 "templates/jobs_postgres_store.go.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_postgres.sql.tmpl",
+		FilesStorePath:                    "internal/files/postgres/store.go",
+		FilesStoreTemplate:                "templates/files_postgres_store.go.tmpl",
+		FilesMigrationTemplate:            "templates/files_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -143,6 +151,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		JobsStorePath:                     "internal/jobs/mysql/store.go",
 		JobsStoreTemplate:                 "templates/jobs_mysql_store.go.tmpl",
 		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
+		FilesStorePath:                    "internal/files/mysql/store.go",
+		FilesStoreTemplate:                "templates/files_mysql_store.go.tmpl",
+		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
 	},
 }
 
@@ -198,6 +209,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: filesCapability, Version: filesVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware file metadata and atomic local object storage",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -237,6 +258,15 @@ var notificationsTemplates = map[string]string{
 	"internal/notifications/notifications_test.go": "templates/notifications_test.go.tmpl",
 	"internal/notifications/smtp/sender.go":        "templates/notifications_smtp.go.tmpl",
 	"internal/notifications/smtp/sender_test.go":   "templates/notifications_smtp_test.go.tmpl",
+}
+
+var filesTemplates = map[string]string{
+	"internal/files/files.go":                "templates/files.go.tmpl",
+	"internal/files/files_test.go":           "templates/files_test.go.tmpl",
+	"internal/files/httpapi/handler.go":      "templates/files_handler.go.tmpl",
+	"internal/files/httpapi/handler_test.go": "templates/files_handler_test.go.tmpl",
+	"internal/files/local/store.go":          "templates/files_local_store.go.tmpl",
+	"internal/files/local/store_test.go":     "templates/files_local_store_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -305,6 +335,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
 	notificationsEnabled := false
+	filesEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -322,6 +353,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == notificationsCapability {
 			notificationsEnabled = true
 		}
+		if pack.Metadata.Name == filesCapability {
+			filesEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
 	if err != nil {
@@ -338,6 +372,26 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyLifecycle: tenancyLifecycleEnabled,
 		Jobs:             jobsEnabled,
 		Notifications:    notificationsEnabled,
+		Files:            filesEnabled,
+	}
+	data.MigrationCount = 1
+	if business != nil {
+		data.MigrationCount++
+	}
+	if tenancyEnabled {
+		data.MigrationCount++
+	}
+	if tenancyMembersEnabled {
+		data.MigrationCount++
+	}
+	if tenancyLifecycleEnabled {
+		data.MigrationCount++
+	}
+	if jobsEnabled {
+		data.MigrationCount++
+	}
+	if filesEnabled {
+		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -430,6 +484,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[path] = renderTarget{TemplatePath: templatePath, Owner: notificationsCapability}
 		}
 	}
+	if filesEnabled {
+		for path, templatePath := range filesTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: filesCapability}
+		}
+		targets[database.FilesStorePath] = renderTarget{TemplatePath: database.FilesStoreTemplate, Owner: filesCapability}
+		targets["internal/platform/migrate/migrations/000210_file_assets.sql"] = renderTarget{
+			TemplatePath: database.FilesMigrationTemplate,
+			Owner:        filesCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/FilesView.vue"] = renderTarget{
+				TemplatePath: "templates/admin/src/views/FilesView.vue",
+				Owner:        filesCapability,
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -491,6 +561,8 @@ type templateData struct {
 	TenancyLifecycle bool
 	Jobs             bool
 	Notifications    bool
+	Files            bool
+	MigrationCount   int
 }
 
 type databaseData struct {

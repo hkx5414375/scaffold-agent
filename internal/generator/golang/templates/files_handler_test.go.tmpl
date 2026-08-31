@@ -1,0 +1,109 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/files"
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestHandlerUploadAndDownload(t *testing.T) {
+	store := &handlerStore{}
+	blobs := &handlerBlobs{content: map[string][]byte{}}
+	handler := New(files.NewService(store, blobs))
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "report.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	_, _ = part.Write([]byte("report-content"))
+	_ = writer.Close()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/files", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	handler.upload(response, request, actor)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var asset files.Asset
+	if err := json.Unmarshal(response.Body.Bytes(), &asset); err != nil || asset.ID == "" || asset.StorageKey != "" {
+		t.Fatalf("upload response = %#v, error = %v", asset, err)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/files/"+asset.ID+"/content", nil)
+	request.SetPathValue("id", asset.ID)
+	response = httptest.NewRecorder()
+	handler.download(response, request, actor)
+	if response.Code != http.StatusOK || response.Body.String() != "report-content" {
+		t.Fatalf("download status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if disposition := response.Header().Get("Content-Disposition"); !strings.Contains(disposition, "report.txt") {
+		t.Fatalf("Content-Disposition = %q", disposition)
+	}
+	if response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("download response does not disable content sniffing")
+	}
+}
+
+type handlerStore struct {
+	asset files.Asset
+}
+
+func (store *handlerStore) Create(_ context.Context, asset files.Asset, _ identity.AuditEvent) error {
+	store.asset = asset
+	return nil
+}
+
+func (store *handlerStore) Get(_ context.Context, organizationID, id string) (files.Asset, error) {
+	if store.asset.ID != id || store.asset.OrganizationID != organizationID {
+		return files.Asset{}, files.ErrNotFound
+	}
+	return store.asset, nil
+}
+
+func (store *handlerStore) List(_ context.Context, organizationID, _ string, _ int) ([]files.Asset, string, error) {
+	if store.asset.ID == "" || store.asset.OrganizationID != organizationID {
+		return []files.Asset{}, "", nil
+	}
+	return []files.Asset{store.asset}, "", nil
+}
+
+func (store *handlerStore) MarkDeleted(_ context.Context, organizationID, id string, _ time.Time, _ identity.AuditEvent) (files.Asset, error) {
+	return store.Get(context.Background(), organizationID, id)
+}
+
+func (store *handlerStore) Restore(context.Context, string, string) error { return nil }
+
+type handlerBlobs struct {
+	content map[string][]byte
+}
+
+func (blobs *handlerBlobs) Write(_ context.Context, key string, reader io.Reader, maximumBytes int64) (int64, string, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, maximumBytes+1))
+	if err != nil {
+		return 0, "", err
+	}
+	blobs.content[key] = content
+	return int64(len(content)), "digest", nil
+}
+
+func (blobs *handlerBlobs) Open(_ context.Context, key string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(blobs.content[key])), nil
+}
+
+func (blobs *handlerBlobs) Delete(_ context.Context, key string) error {
+	delete(blobs.content, key)
+	return nil
+}

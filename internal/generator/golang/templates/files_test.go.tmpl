@@ -1,0 +1,176 @@
+package files
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestServiceUploadOpenListAndDelete(t *testing.T) {
+	metadata := &memoryStore{}
+	blobs := &memoryBlobs{}
+	service := NewService(metadata, blobs)
+	service.now = func() time.Time { return time.Date(2026, time.August, 31, 1, 2, 3, 0, time.UTC) }
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+
+	asset, err := service.Upload(context.Background(), UploadInput{
+		Name: "report.txt", MediaType: "text/plain; charset=utf-8", Content: strings.NewReader("durable"),
+	}, actor)
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	if asset.Name != "report.txt" || asset.MediaType != "text/plain" || asset.Size != 7 || asset.SHA256 == "" || asset.StorageKey == "" {
+		t.Fatalf("Upload() = %#v", asset)
+	}
+	if asset.OrganizationID != {{if .Tenancy}}"organization-1"{{else}}""{{end}} {
+		t.Fatalf("Upload() organization = %q", asset.OrganizationID)
+	}
+
+	page, err := service.List(context.Background(), "", 20, actor)
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != asset.ID {
+		t.Fatalf("List() = %#v, %v", page, err)
+	}
+	loaded, reader, err := service.Open(context.Background(), asset.ID, actor)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	content, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil || loaded.ID != asset.ID || string(content) != "durable" {
+		t.Fatalf("Open() = %#v, %q, %v", loaded, content, readErr)
+	}
+
+	if err := service.Delete(context.Background(), asset.ID, actor); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := service.Get(context.Background(), asset.ID, actor); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestServiceCompensatesFailedMutations(t *testing.T) {
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	metadata := &memoryStore{createErr: errors.New("database unavailable")}
+	blobs := &memoryBlobs{}
+	service := NewService(metadata, blobs)
+	_, err := service.Upload(context.Background(), UploadInput{Name: "a.txt", Content: strings.NewReader("a")}, actor)
+	if err == nil || len(blobs.content) != 0 {
+		t.Fatalf("Upload(failed metadata) error = %v, blobs = %#v", err, blobs.content)
+	}
+
+	metadata.createErr = nil
+	asset, err := service.Upload(context.Background(), UploadInput{Name: "b.txt", Content: strings.NewReader("b")}, actor)
+	if err != nil {
+		t.Fatalf("Upload() error = %v", err)
+	}
+	blobs.deleteErr = errors.New("storage unavailable")
+	if err := service.Delete(context.Background(), asset.ID, actor); err == nil {
+		t.Fatal("Delete(failed object) error = nil")
+	}
+	if metadata.deleted || !metadata.restoreCalled {
+		t.Fatalf("Delete(failed object) deleted = %v, restored = %v", metadata.deleted, metadata.restoreCalled)
+	}
+}
+
+func TestServiceRejectsUnsafeUpload(t *testing.T) {
+	service := NewService(&memoryStore{}, &memoryBlobs{})
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	for _, input := range []UploadInput{
+		{Name: "../secret", Content: strings.NewReader("x")},
+		{Name: "unsafe\nname", Content: strings.NewReader("x")},
+		{Name: "safe.txt", MediaType: "broken media type", Content: strings.NewReader("x")},
+		{Name: "safe.txt"},
+	} {
+		if _, err := service.Upload(context.Background(), input, actor); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("Upload(%#v) error = %v, want ErrInvalidInput", input, err)
+		}
+	}
+}
+
+type memoryStore struct {
+	asset         Asset
+	deleted       bool
+	createErr     error
+	restoreCalled bool
+}
+
+func (store *memoryStore) Create(_ context.Context, asset Asset, _ identity.AuditEvent) error {
+	if store.createErr != nil {
+		return store.createErr
+	}
+	store.asset, store.deleted = asset, false
+	return nil
+}
+
+func (store *memoryStore) Get(_ context.Context, organizationID, id string) (Asset, error) {
+	if store.deleted || store.asset.ID != id || store.asset.OrganizationID != organizationID {
+		return Asset{}, ErrNotFound
+	}
+	return store.asset, nil
+}
+
+func (store *memoryStore) List(_ context.Context, organizationID, _ string, _ int) ([]Asset, string, error) {
+	if store.deleted || store.asset.ID == "" || store.asset.OrganizationID != organizationID {
+		return []Asset{}, "", nil
+	}
+	return []Asset{store.asset}, "", nil
+}
+
+func (store *memoryStore) MarkDeleted(_ context.Context, organizationID, id string, _ time.Time, _ identity.AuditEvent) (Asset, error) {
+	asset, err := store.Get(context.Background(), organizationID, id)
+	if err != nil {
+		return Asset{}, err
+	}
+	store.deleted = true
+	return asset, nil
+}
+
+func (store *memoryStore) Restore(_ context.Context, organizationID, id string) error {
+	if store.asset.ID != id || store.asset.OrganizationID != organizationID {
+		return ErrNotFound
+	}
+	store.deleted, store.restoreCalled = false, true
+	return nil
+}
+
+type memoryBlobs struct {
+	content   map[string][]byte
+	deleteErr error
+}
+
+func (blobs *memoryBlobs) Write(_ context.Context, key string, source io.Reader, maximumBytes int64) (int64, string, error) {
+	content, err := io.ReadAll(io.LimitReader(source, maximumBytes+1))
+	if err != nil {
+		return 0, "", err
+	}
+	if int64(len(content)) > maximumBytes {
+		return 0, "", ErrTooLarge
+	}
+	if blobs.content == nil {
+		blobs.content = map[string][]byte{}
+	}
+	blobs.content[key] = bytes.Clone(content)
+	return int64(len(content)), "digest", nil
+}
+
+func (blobs *memoryBlobs) Open(_ context.Context, key string) (io.ReadCloser, error) {
+	content, found := blobs.content[key]
+	if !found {
+		return nil, ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(content)), nil
+}
+
+func (blobs *memoryBlobs) Delete(_ context.Context, key string) error {
+	if blobs.deleteErr != nil {
+		return blobs.deleteErr
+	}
+	delete(blobs.content, key)
+	return nil
+}

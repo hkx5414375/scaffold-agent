@@ -56,6 +56,23 @@ export interface OrganizationInvitation {
 }
 {{- end}}
 {{- end}}
+{{- if .Files}}
+
+export interface FileAsset {
+  id: string;
+  organization_id?: string;
+  name: string;
+  media_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export interface FileAssetPage {
+  items: FileAsset[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

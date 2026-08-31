@@ -19,6 +19,10 @@ authorize tenant business requests.
 It also contains the `background-jobs` capability with idempotent enqueue,
 database leases, heartbeat renewal, bounded retry, and dead-letter state.
 {{end}}
+{{if .Files}}
+It also contains the `file-assets` capability with tenant-scoped metadata,
+streaming uploads, SHA-256 integrity metadata, and atomic local object writes.
+{{end}}
 
 ## Requirements
 
@@ -40,6 +44,8 @@ Set these environment variables before starting the service:
 export BOOTSTRAP_ADMIN_EMAIL='admin@example.com'
 export BOOTSTRAP_ADMIN_PASSWORD='replace-with-at-least-12-characters'
 export COOKIE_SECURE='false'
+{{if .Files}}export FILE_STORAGE_ROOT='var/files'
+{{end}}
 go run ./cmd/server
 ```
 
@@ -60,7 +66,6 @@ export SMTP_TLS_MODE='starttls'
 export SMTP_USERNAME='replace-me'
 export SMTP_PASSWORD='replace-me'
 {{end}}go run ./cmd/worker
-go run ./cmd/worker
 ```
 
 Feature code enqueues work through `internal/jobs.Service`. Use a stable
@@ -99,6 +104,13 @@ runtime secret store; queued message bodies are sensitive database content.
 - `POST /api/v1/organizations/{organizationID}/reactivation`
 {{end}}
 {{end}}
+{{end}}
+{{if .Files}}
+- `POST /api/v1/files`
+- `GET /api/v1/files`
+- `GET /api/v1/files/{id}`
+- `GET /api/v1/files/{id}/content`
+- `DELETE /api/v1/files/{id}`
 {{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`

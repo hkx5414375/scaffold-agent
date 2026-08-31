@@ -34,6 +34,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 选择 `notifications` `0.1.0` 会自动解析并锁定 `background-jobs` `0.1.x`。业务代码通过 `notifications.Service.EnqueueEmail` 传入稳定幂等键，不得额外暴露一个无需业务授权的“任意发邮件”接口。Worker 只接受启用 TLS 的 SMTP 运行时配置。排队中的邮件正文属于数据库内的敏感持久化数据；AI 不得把 SMTP 凭据写入 Blueprint、源码、任务载荷或模型上下文。
 
+选择 `file-assets` `0.1.0` 后，生成项目会加入租户范围内的文件元数据、流式上传、有界游标列表、附件下载、可恢复的元数据删除，以及原子本地对象存储。业务代码必须调用 `files.Service`，不得用用户文件名拼接对象路径，也不得暴露 `Asset.StorageKey`。`FILE_STORAGE_ROOT` 只能放在运行时配置中。AI 可以替换 `BlobStore` 适配器，但必须保留 10 MiB 请求上限、不覆盖发布、SHA-256 元数据、失败补偿，以及跨租户标识统一返回未找到的行为。
+
 ## STDIO 协议
 
 启动服务：

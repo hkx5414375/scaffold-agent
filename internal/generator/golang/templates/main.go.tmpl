@@ -19,6 +19,12 @@ import (
 	"{{.ModulePath}}/internal/platform/httpserver"
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformdatabase "{{.ModulePath}}/internal/platform/{{.Database.PackageName}}"
+{{- if .Files}}
+	"{{.ModulePath}}/internal/files"
+	fileshttp "{{.ModulePath}}/internal/files/httpapi"
+	"{{.ModulePath}}/internal/files/local"
+	filesdatabase "{{.ModulePath}}/internal/files/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Tenancy}}
 	"{{.ModulePath}}/internal/tenancy"
 	tenancyhttp "{{.ModulePath}}/internal/tenancy/httpapi"
@@ -66,6 +72,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
+{{- if .Files}}
+	fileStorageRoot := strings.TrimSpace(os.Getenv("FILE_STORAGE_ROOT"))
+	if fileStorageRoot == "" {
+		fileStorageRoot = "var/files"
+	}
+	fileBlobs, err := local.New(fileStorageRoot)
+	if err != nil {
+		return fmt.Errorf("open file storage: %w", err)
+	}
+	fileService := files.NewService(filesdatabase.New(pool), fileBlobs)
+	fileAPI := fileshttp.New(fileService)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -86,6 +104,9 @@ func run() error {
 	{{- end}}
 	registerRoutes := func(mux *http.ServeMux) {
 		identityAPI.Register(mux)
+{{- if .Files}}
+		fileAPI.Register(mux, identityAPI)
+{{- end}}
 {{- if .Tenancy}}
 		tenancyAPI.Register(mux, identityAPI)
 	{{- if .TenancyMembers}}

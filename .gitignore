@@ -4,6 +4,9 @@
 *.test
 *.out
 
+# JavaScript dependencies
+node_modules/
+
 # Scaffold Agent local state
 .scaffold-agent/cache/
 .scaffold-agent/plans/

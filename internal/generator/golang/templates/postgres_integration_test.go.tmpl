@@ -1,12 +1,18 @@
 package integration_test
 
 import (
+	{{- if .Files}}
+	"bytes"
+	{{- end}}
 	"context"
 	"crypto/rand"
 {{- if and .Jobs (not .Notifications)}}
 	"encoding/json"
 {{- end}}
 	"errors"
+	{{- if .Files}}
+	"io"
+	{{- end}}
 	"os"
 	"reflect"
 	"strings"
@@ -18,6 +24,11 @@ import (
 
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
+	{{- if .Files}}
+	"{{.ModulePath}}/internal/files"
+	"{{.ModulePath}}/internal/files/local"
+	filespostgres "{{.ModulePath}}/internal/files/postgres"
+	{{- end}}
 	{{- if .Jobs}}
 	"{{.ModulePath}}/internal/jobs"
 	jobspostgres "{{.ModulePath}}/internal/jobs/postgres"
@@ -49,8 +60,8 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != {{if .Jobs}}{{if .TenancyLifecycle}}6{{else if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyLifecycle}}5{{else if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}} {
-		t.Fatalf("migration count = %d, want {{if .Jobs}}{{if .TenancyLifecycle}}6{{else if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyLifecycle}}5{{else if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}}", migrationCount)
+	if migrationCount != {{.MigrationCount}} {
+		t.Fatalf("migration count = %d, want {{.MigrationCount}}", migrationCount)
 	}
 
 	identityStore := identitypostgres.New(pool)
@@ -188,6 +199,41 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("denied member audit count = %d, %v, want 1", deniedMemberAudit, err)
 	}
 {{- end}}
+{{- end}}
+
+{{- if .Files}}
+	fileBlobs, err := local.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("local.New() error = %v", err)
+	}
+	fileService := files.NewService(filespostgres.New(pool), fileBlobs)
+	fileActor := identity.Principal{UserID: user.ID, OrganizationID: organizationID}
+	fileAsset, err := fileService.Upload(ctx, files.UploadInput{
+		Name: "integration.txt", MediaType: "text/plain", Content: bytes.NewBufferString("file integration"),
+	}, fileActor)
+	if err != nil {
+		t.Fatalf("files.Upload() error = %v", err)
+	}
+	loadedAsset, fileReader, err := fileService.Open(ctx, fileAsset.ID, fileActor)
+	if err != nil {
+		t.Fatalf("files.Open() error = %v", err)
+	}
+	fileContent, readErr := io.ReadAll(fileReader)
+	_ = fileReader.Close()
+	if readErr != nil || loadedAsset.SHA256 != fileAsset.SHA256 || string(fileContent) != "file integration" {
+		t.Fatalf("files.Open() = %#v, %q, %v", loadedAsset, fileContent, readErr)
+	}
+{{- if .Tenancy}}
+	if _, err := fileService.Get(ctx, fileAsset.ID, identity.Principal{UserID: user.ID, OrganizationID: "different-organization"}); !errors.Is(err, files.ErrNotFound) {
+		t.Fatalf("files.Get(cross-tenant) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+	if err := fileService.Delete(ctx, fileAsset.ID, fileActor); err != nil {
+		t.Fatalf("files.Delete() error = %v", err)
+	}
+	if _, err := fileService.Get(ctx, fileAsset.ID, fileActor); !errors.Is(err, files.ErrNotFound) {
+		t.Fatalf("files.Get(deleted) error = %v, want ErrNotFound", err)
+	}
 {{- end}}
 
 {{- if .Jobs}}

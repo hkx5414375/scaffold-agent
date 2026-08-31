@@ -1,0 +1,77 @@
+package local
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/files"
+)
+
+func TestStoreWriteOpenDelete(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	const content = "atomic-content"
+	size, digest, err := store.Write(context.Background(), "objects/ab/asset", strings.NewReader(content), 1024)
+	if err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	wantDigest := sha256.Sum256([]byte(content))
+	if size != int64(len(content)) || digest != hex.EncodeToString(wantDigest[:]) {
+		t.Fatalf("Write() = %d, %q", size, digest)
+	}
+	reader, err := store.Open(context.Background(), "objects/ab/asset")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	loaded, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil || string(loaded) != content {
+		t.Fatalf("Open() content = %q, error = %v", loaded, readErr)
+	}
+	if err := store.Delete(context.Background(), "objects/ab/asset"); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := store.Open(context.Background(), "objects/ab/asset"); !errors.Is(err, files.ErrNotFound) {
+		t.Fatalf("Open(deleted) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStoreRejectsOversizeAndUnsafeKeys(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, _, err := store.Write(context.Background(), "objects/ab/large", strings.NewReader("12345"), 4); !errors.Is(err, files.ErrTooLarge) {
+		t.Fatalf("Write(oversize) error = %v, want ErrTooLarge", err)
+	}
+	for _, key := range []string{"../escape", "/absolute", `objects\escape`, "objects/./escape", "objects//escape"} {
+		if _, _, err := store.Write(context.Background(), key, strings.NewReader("x"), 4); !errors.Is(err, files.ErrInvalidInput) {
+			t.Fatalf("Write(%q) error = %v, want ErrInvalidInput", key, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "escape")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe write created a file: %v", err)
+	}
+}
+
+func TestStoreHonorsCanceledContext(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := store.Write(ctx, "objects/ab/canceled", strings.NewReader("content"), 1024); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Write(canceled) error = %v, want context.Canceled", err)
+	}
+}

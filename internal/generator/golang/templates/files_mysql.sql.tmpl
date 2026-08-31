@@ -1,0 +1,30 @@
+insert into identity_permissions (code, description) values
+    ('files:create', 'Upload file assets'),
+    ('files:read', 'Read and download file assets'),
+    ('files:delete', 'Delete file assets');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'files:create'),
+    ('admin', 'files:read'),
+    ('admin', 'files:delete'),
+    ('user', 'files:create'),
+    ('user', 'files:read'),
+    ('user', 'files:delete');
+
+create table file_assets (
+    id varchar(191) primary key,
+    organization_id varchar(191){{if .Tenancy}} not null{{end}},
+    name varchar(255) not null,
+    media_type varchar(255) not null,
+    size_bytes bigint not null,
+    sha256 char(64) not null,
+    storage_key varchar(512) not null,
+    created_at datetime(6) not null,
+    deleted_at datetime(6),
+    unique key file_assets_storage_key_unique (storage_key),
+    index file_assets_scope_idx ({{if .Tenancy}}organization_id, {{end}}deleted_at, id),
+    index file_assets_deleted_idx (deleted_at){{if .Tenancy}},
+    constraint file_assets_organization_fk foreign key (organization_id) references organizations (id) on delete cascade{{end}},
+    constraint file_assets_size_check check (size_bytes >= 0),
+    constraint file_assets_sha256_check check (char_length(sha256) = 64)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

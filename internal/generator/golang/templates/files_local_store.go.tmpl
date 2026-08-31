@@ -1,0 +1,195 @@
+// Package local provides atomic filesystem object storage for file assets.
+package local
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"unicode"
+
+	"{{.ModulePath}}/internal/files"
+)
+
+// Store keeps objects below one resolved root directory.
+type Store struct {
+	root string
+}
+
+// New creates and resolves the storage root. Symlinked roots are resolved once.
+func New(root string) (*Store, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, errors.New("file storage root is required")
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve file storage root: %w", err)
+	}
+	if err := os.MkdirAll(absolute, 0o750); err != nil {
+		return nil, fmt.Errorf("create file storage root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("evaluate file storage root: %w", err)
+	}
+	return &Store{root: filepath.Clean(resolved)}, nil
+}
+
+// Write streams an object to a same-directory temporary file and atomically links it without overwrite.
+func (store *Store) Write(ctx context.Context, key string, source io.Reader, maximumBytes int64) (int64, string, error) {
+	if source == nil || maximumBytes < 1 {
+		return 0, "", files.ErrInvalidInput
+	}
+	target, err := store.safePath(key)
+	if err != nil {
+		return 0, "", err
+	}
+	directory := filepath.Dir(target)
+	if err := store.createSafeDirectory(directory); err != nil {
+		return 0, "", err
+	}
+	temporary, err := os.CreateTemp(directory, ".upload-*")
+	if err != nil {
+		return 0, "", fmt.Errorf("create temporary object: %w", err)
+	}
+	temporaryName := temporary.Name()
+	committed := false
+	defer func() {
+		_ = temporary.Close()
+		if !committed {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return 0, "", fmt.Errorf("restrict temporary object: %w", err)
+	}
+	digest := sha256.New()
+	size, err := io.Copy(io.MultiWriter(temporary, digest), io.LimitReader(contextReader{ctx: ctx, reader: source}, maximumBytes+1))
+	if err != nil {
+		return 0, "", fmt.Errorf("stream file object: %w", err)
+	}
+	if size > maximumBytes {
+		return 0, "", files.ErrTooLarge
+	}
+	if err := temporary.Sync(); err != nil {
+		return 0, "", fmt.Errorf("sync file object: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return 0, "", fmt.Errorf("close file object: %w", err)
+	}
+	if err := os.Link(temporaryName, target); err != nil {
+		return 0, "", fmt.Errorf("commit file object: %w", err)
+	}
+	if err := os.Remove(temporaryName); err != nil {
+		_ = os.Remove(target)
+		return 0, "", fmt.Errorf("remove temporary object link: %w", err)
+	}
+	committed = true
+	return size, hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// Open returns a streaming reader for one validated key.
+func (store *Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	target, err := store.safePath(key)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, files.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open file object: %w", err)
+	}
+	return file, nil
+}
+
+// Delete removes one object. Missing objects are already deleted.
+func (store *Store) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	target, err := store.safePath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove file object: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) safePath(key string) (string, error) {
+	if !validKey(key) {
+		return "", files.ErrInvalidInput
+	}
+	target := filepath.Join(store.root, filepath.FromSlash(key))
+	relative, err := filepath.Rel(store.root, target)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", files.ErrInvalidInput
+	}
+	return target, nil
+}
+
+func (store *Store) createSafeDirectory(directory string) error {
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		return fmt.Errorf("create object directory: %w", err)
+	}
+	relative, err := filepath.Rel(store.root, directory)
+	if err != nil {
+		return fmt.Errorf("resolve object directory: %w", err)
+	}
+	current := store.root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "." || component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect object directory: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("object directory must not contain symlinks")
+		}
+	}
+	return nil
+}
+
+func validKey(key string) bool {
+	if key == "" || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+		for _, character := range segment {
+			if !unicode.IsLetter(character) && !unicode.IsDigit(character) && character != '-' && character != '_' {
+				return false
+			}
+		}
+	}
+	return !strings.Contains(key, `\`)
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
+}

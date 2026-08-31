@@ -1,0 +1,212 @@
+// Package files owns durable file metadata and object-storage coordination.
+package files
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"strings"
+	"time"
+	"unicode"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const MaximumBytes int64 = 10 << 20
+
+var (
+	ErrInvalidInput = errors.New("file input is invalid")
+	ErrNotFound     = errors.New("file asset not found")
+	ErrTooLarge     = errors.New("file exceeds the maximum size")
+)
+
+// Asset is public metadata for one stored object. StorageKey never crosses the HTTP boundary.
+type Asset struct {
+	ID             string    `json:"id"`
+	OrganizationID string    `json:"organization_id,omitempty"`
+	Name           string    `json:"name"`
+	MediaType      string    `json:"media_type"`
+	Size           int64     `json:"size"`
+	SHA256         string    `json:"sha256"`
+	StorageKey     string    `json:"-"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// Page is one bounded keyset page of active file metadata.
+type Page struct {
+	Items      []Asset `json:"items"`
+	NextCursor string  `json:"next_cursor,omitempty"`
+}
+
+// UploadInput carries streaming upload data without buffering the complete object in memory.
+type UploadInput struct {
+	Name      string
+	MediaType string
+	Content   io.Reader
+}
+
+// Store persists metadata mutations and security audit events atomically.
+type Store interface {
+	Create(context.Context, Asset, identity.AuditEvent) error
+	Get(context.Context, string, string) (Asset, error)
+	List(context.Context, string, string, int) ([]Asset, string, error)
+	MarkDeleted(context.Context, string, string, time.Time, identity.AuditEvent) (Asset, error)
+	Restore(context.Context, string, string) error
+}
+
+// BlobStore is the binary object boundary. Implementations must reject unsafe keys.
+type BlobStore interface {
+	Write(context.Context, string, io.Reader, int64) (int64, string, error)
+	Open(context.Context, string) (io.ReadCloser, error)
+	Delete(context.Context, string) error
+}
+
+// Service coordinates metadata and blob mutations with compensating cleanup.
+type Service struct {
+	store Store
+	blobs BlobStore
+	now   func() time.Time
+}
+
+// NewService returns file asset use cases.
+func NewService(store Store, blobs BlobStore) *Service {
+	return &Service{store: store, blobs: blobs, now: time.Now}
+}
+
+// Upload streams one validated object to storage and then commits its metadata.
+func (service *Service) Upload(ctx context.Context, input UploadInput, actor identity.Principal) (Asset, error) {
+	organizationID, err := actorScope(actor)
+	if err != nil {
+		return Asset{}, err
+	}
+	name, mediaType, err := validateUpload(input)
+	if err != nil {
+		return Asset{}, err
+	}
+	id := rand.Text()
+	asset := Asset{
+		ID: id, OrganizationID: organizationID, Name: name, MediaType: mediaType,
+		StorageKey: "objects/" + id[:2] + "/" + id, CreatedAt: service.now().UTC(),
+	}
+	asset.Size, asset.SHA256, err = service.blobs.Write(ctx, asset.StorageKey, input.Content, MaximumBytes)
+	if err != nil {
+		return Asset{}, fmt.Errorf("write file object: %w", err)
+	}
+	audit := newAudit(actor, "files:create", id, asset.CreatedAt)
+	if err := service.store.Create(ctx, asset, audit); err != nil {
+		cleanupErr := service.blobs.Delete(context.WithoutCancel(ctx), asset.StorageKey)
+		return Asset{}, errors.Join(fmt.Errorf("create file metadata: %w", err), cleanupErr)
+	}
+	return asset, nil
+}
+
+// Get returns active metadata in the caller's scope.
+func (service *Service) Get(ctx context.Context, id string, actor identity.Principal) (Asset, error) {
+	organizationID, err := actorScope(actor)
+	if err != nil {
+		return Asset{}, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Asset{}, ErrInvalidInput
+	}
+	asset, err := service.store.Get(ctx, organizationID, id)
+	if err != nil {
+		return Asset{}, fmt.Errorf("get file metadata: %w", err)
+	}
+	return asset, nil
+}
+
+// Open returns active metadata and a streaming object reader.
+func (service *Service) Open(ctx context.Context, id string, actor identity.Principal) (Asset, io.ReadCloser, error) {
+	asset, err := service.Get(ctx, id, actor)
+	if err != nil {
+		return Asset{}, nil, err
+	}
+	reader, err := service.blobs.Open(ctx, asset.StorageKey)
+	if err != nil {
+		return Asset{}, nil, fmt.Errorf("open file object: %w", err)
+	}
+	return asset, reader, nil
+}
+
+// List returns one bounded keyset page in the caller's scope.
+func (service *Service) List(ctx context.Context, cursor string, limit int, actor identity.Principal) (Page, error) {
+	organizationID, err := actorScope(actor)
+	if err != nil {
+		return Page{}, err
+	}
+	if limit < 1 || limit > 100 {
+		return Page{}, ErrInvalidInput
+	}
+	items, nextCursor, err := service.store.List(ctx, organizationID, strings.TrimSpace(cursor), limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("list file metadata: %w", err)
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+// Delete hides metadata before deleting the object and restores metadata if object deletion fails.
+func (service *Service) Delete(ctx context.Context, id string, actor identity.Principal) error {
+	organizationID, err := actorScope(actor)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ErrInvalidInput
+	}
+	now := service.now().UTC()
+	asset, err := service.store.MarkDeleted(ctx, organizationID, id, now, newAudit(actor, "files:delete", id, now))
+	if err != nil {
+		return fmt.Errorf("mark file metadata deleted: %w", err)
+	}
+	if err := service.blobs.Delete(ctx, asset.StorageKey); err != nil {
+		restoreErr := service.store.Restore(context.WithoutCancel(ctx), organizationID, id)
+		return errors.Join(fmt.Errorf("delete file object: %w", err), restoreErr)
+	}
+	return nil
+}
+
+func actorScope(actor identity.Principal) (string, error) {
+	if actor.UserID == ""{{if .Tenancy}} || strings.TrimSpace(actor.OrganizationID) == ""{{end}} {
+		return "", identity.ErrInvalidCredentials
+	}
+{{- if .Tenancy}}
+	return strings.TrimSpace(actor.OrganizationID), nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func validateUpload(input UploadInput) (string, string, error) {
+	name := strings.TrimSpace(input.Name)
+	if input.Content == nil || name == "" || len(name) > 255 || strings.ContainsAny(name, `/\\`) {
+		return "", "", ErrInvalidInput
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return "", "", ErrInvalidInput
+		}
+	}
+	mediaType := strings.TrimSpace(input.MediaType)
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	} else {
+		parsed, _, err := mime.ParseMediaType(mediaType)
+		if err != nil {
+			return "", "", ErrInvalidInput
+		}
+		mediaType = parsed
+	}
+	return name, mediaType, nil
+}
+
+func newAudit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: action, Outcome: "allowed", Target: target, CreatedAt: now,
+	}
+}

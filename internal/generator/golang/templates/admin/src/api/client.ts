@@ -20,7 +20,7 @@ export class ApiError extends Error {
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body !== undefined && !headers.has("Content-Type")) {
+  if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 {{- if .Tenancy}}
@@ -46,6 +46,26 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     return undefined as T;
   }
   return (await response.json()) as T;
+}
+
+export async function download(path: string): Promise<Blob> {
+  const headers = new Headers();
+{{- if .Tenancy}}
+  if (typeof localStorage !== "undefined") {
+    const organizationId = localStorage.getItem("scaffold.organization_id");
+    if (organizationId) headers.set("X-Organization-ID", organizationId);
+  }
+{{- end}}
+  const response = await fetch(`${apiBase}${path}`, { headers, credentials: "include" });
+  if (!response.ok) {
+    const envelope = await readError(response);
+    throw new ApiError(
+      response.status,
+      envelope.error?.code ?? "request.failed",
+      envelope.error?.message ?? `request failed with status ${response.status}`,
+    );
+  }
+  return await response.blob();
 }
 
 async function readError(response: Response): Promise<ErrorEnvelope> {

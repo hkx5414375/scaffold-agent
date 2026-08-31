@@ -461,6 +461,69 @@ func TestGenerateNotificationsResolvesBackgroundJobs(t *testing.T) {
 	}
 }
 
+func TestGenerateTenantFileAssetsCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+		{Name: filesCapability, Version: filesVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[filesCapability] != filesVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"internal/files/files.go":                                     false,
+		"internal/files/httpapi/handler.go":                           false,
+		"internal/files/local/store.go":                               false,
+		"internal/files/postgres/store.go":                            false,
+		"internal/platform/migrate/migrations/000210_file_assets.sql": false,
+	}
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000210_file_assets.sql"))
+	openAPI := string(outputContent(generated, "api/openapi.yaml"))
+	if !strings.Contains(migration, "references organizations") ||
+		!strings.Contains(openAPI, "/api/v1/files/{id}/content:") ||
+		!strings.Contains(openAPI, "files:create") {
+		t.Fatal("Generate() did not produce the tenant file persistence and HTTP contracts")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated file OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestGenerateGlobalMySQLFileAssetsCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Database.Engine = "mysql"
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: filesCapability, Version: filesVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000210_file_assets.sql"))
+	mainSource := string(outputContent(generated, "cmd/server/main.go"))
+	if strings.Contains(migration, "references organizations") ||
+		!strings.Contains(mainSource, `os.Getenv("FILE_STORAGE_ROOT")`) {
+		t.Fatal("Generate() did not produce an explicit global MySQL file scope")
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

@@ -1,0 +1,132 @@
+// Package httpapi exposes file asset use cases over HTTP.
+package httpapi
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"mime"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"{{.ModulePath}}/internal/files"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const (
+	defaultPageLimit      = 20
+	multipartOverheadBytes = 1 << 20
+)
+
+// Handler maps file asset operations to bounded streaming HTTP routes.
+type Handler struct {
+	service *files.Service
+}
+
+// New returns a file asset HTTP adapter.
+func New(service *files.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds explicit permission-protected file routes.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/files", security.Authorized("files:create", handler.upload))
+	mux.HandleFunc("GET /api/v1/files", security.Authorized("files:read", handler.list))
+	mux.HandleFunc("GET /api/v1/files/{id}", security.Authorized("files:read", handler.get))
+	mux.HandleFunc("GET /api/v1/files/{id}/content", security.Authorized("files:read", handler.download))
+	mux.HandleFunc("DELETE /api/v1/files/{id}", security.Authorized("files:delete", handler.delete))
+}
+
+func (handler *Handler) upload(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	request.Body = http.MaxBytesReader(response, request.Body, files.MaximumBytes+multipartOverheadBytes)
+	if err := request.ParseMultipartForm(files.MaximumBytes); err != nil {
+		handleError(response, "parse file upload", err)
+		return
+	}
+	file, header, err := request.FormFile("file")
+	if err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "files.invalid", "multipart field file is required")
+		return
+	}
+	defer file.Close()
+	asset, err := handler.service.Upload(request.Context(), files.UploadInput{
+		Name: header.Filename, MediaType: header.Header.Get("Content-Type"), Content: file,
+	}, actor)
+	if err != nil {
+		handleError(response, "upload file", err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, asset)
+}
+
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	asset, err := handler.service.Get(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "get file", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, asset)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "files.invalid", "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	page, err := handler.service.List(request.Context(), request.URL.Query().Get("cursor"), limit, actor)
+	if err != nil {
+		handleError(response, "list files", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) download(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	asset, content, err := handler.service.Open(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "download file", err)
+		return
+	}
+	defer content.Close()
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": asset.Name})
+	response.Header().Set("Content-Disposition", disposition)
+	response.Header().Set("Content-Length", strconv.FormatInt(asset.Size, 10))
+	response.Header().Set("Content-Type", asset.MediaType)
+	response.Header().Set("X-Content-Type-Options", "nosniff")
+	response.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(response, content); err != nil {
+		slog.Error("stream file response", "file_id", asset.ID, "error", err)
+	}
+}
+
+func (handler *Handler) delete(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	if err := handler.service.Delete(request.Context(), request.PathValue("id"), actor); err != nil {
+		handleError(response, "delete file", err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	var maximumError *http.MaxBytesError
+	switch {
+	case errors.Is(err, files.ErrTooLarge), errors.As(err, &maximumError), strings.Contains(err.Error(), "message too large"):
+		httpjson.WriteError(response, http.StatusRequestEntityTooLarge, "files.too_large", fmt.Sprintf("file size must not exceed %d bytes", files.MaximumBytes))
+	case errors.Is(err, files.ErrInvalidInput), errors.Is(err, http.ErrMissingFile):
+		httpjson.WriteError(response, http.StatusBadRequest, "files.invalid", "file request is invalid")
+	case errors.Is(err, files.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "files.not_found", "file was not found")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

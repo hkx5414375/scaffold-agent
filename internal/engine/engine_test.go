@@ -171,6 +171,22 @@ func TestGoNotificationsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T)
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", notificationsSelection, "", 62, false)
 }
 
+func TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyFilesSelection, "0.3.0", 76, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantFilesMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyFilesSelection, "0.3.0", 77, false)
+}
+
+func TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", filesSelection, "", 56, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoFilesWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", filesSelection, "", 57, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -207,6 +223,18 @@ const jobsSelection = `  capabilities:
 
 const notificationsSelection = `  capabilities:
     - name: notifications
+      version: 0.1.0
+`
+
+const tenancyFilesSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: file-assets
+      version: 0.1.0
+`
+
+const filesSelection = `  capabilities:
+    - name: file-assets
       version: 0.1.0
 `
 
@@ -271,6 +299,9 @@ CAPABILITIES
 		if plannedData.CapabilityLock["notifications"] != "0.1.0" || plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
 			t.Fatalf("Plan() notifications lock = %#v", plannedData.CapabilityLock)
 		}
+	}
+	if strings.Contains(capabilities, "file-assets") && plannedData.CapabilityLock["file-assets"] != "0.1.0" {
+		t.Fatalf("Plan() file assets lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

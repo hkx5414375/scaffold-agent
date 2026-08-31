@@ -1,0 +1,171 @@
+// Package postgres persists file asset metadata in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/files"
+	"{{.ModulePath}}/internal/identity"
+)
+
+// Store implements the file metadata persistence boundary.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL file metadata store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Create inserts metadata and its audit event in one transaction.
+func (store *Store) Create(ctx context.Context, asset files.Asset, audit identity.AuditEvent) error {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin file create: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `
+		insert into file_assets (id, organization_id, name, media_type, size_bytes, sha256, storage_key, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		asset.ID, nullableOrganization(asset.OrganizationID), asset.Name, asset.MediaType,
+		asset.Size, asset.SHA256, asset.StorageKey, asset.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert file metadata: %w", err)
+	}
+	if err := appendAudit(ctx, tx, audit); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit file create: %w", err)
+	}
+	return nil
+}
+
+// Get returns active metadata in one scope.
+func (store *Store) Get(ctx context.Context, organizationID, id string) (files.Asset, error) {
+	return scanAsset(store.pool.QueryRow(ctx, `
+		select id, organization_id, name, media_type, size_bytes, sha256, storage_key, created_at
+		from file_assets where id = $1{{if .Tenancy}} and organization_id = $2{{end}} and deleted_at is null`,
+		id{{if .Tenancy}}, organizationID{{end}}))
+}
+
+// List returns one active metadata page ordered by stable identifier.
+func (store *Store) List(ctx context.Context, organizationID, cursor string, limit int) ([]files.Asset, string, error) {
+	rows, err := store.pool.Query(ctx, `
+		select id, organization_id, name, media_type, size_bytes, sha256, storage_key, created_at
+		from file_assets
+		where deleted_at is null{{if .Tenancy}} and organization_id = $1 and ($2 = '' or id > $2){{else}} and ($1 = '' or id > $1){{end}}
+		order by id
+		limit {{if .Tenancy}}$3{{else}}$2{{end}}`, {{if .Tenancy}}organizationID, {{end}}cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query file metadata: %w", err)
+	}
+	defer rows.Close()
+	items := make([]files.Asset, 0, limit)
+	for rows.Next() {
+		asset, err := scanAsset(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, asset)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate file metadata: %w", err)
+	}
+	nextCursor := ""
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+// MarkDeleted soft-deletes metadata and appends its audit event atomically.
+func (store *Store) MarkDeleted(ctx context.Context, organizationID, id string, now time.Time, audit identity.AuditEvent) (files.Asset, error) {
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return files.Asset{}, fmt.Errorf("begin file deletion: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	asset, err := scanAsset(tx.QueryRow(ctx, `
+		update file_assets set deleted_at = $1
+		where id = $2{{if .Tenancy}} and organization_id = $3{{end}} and deleted_at is null
+		returning id, organization_id, name, media_type, size_bytes, sha256, storage_key, created_at`,
+		now, id{{if .Tenancy}}, organizationID{{end}}))
+	if err != nil {
+		return files.Asset{}, err
+	}
+	if err := appendAudit(ctx, tx, audit); err != nil {
+		return files.Asset{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return files.Asset{}, fmt.Errorf("commit file deletion: %w", err)
+	}
+	return asset, nil
+}
+
+// Restore makes metadata active again after a failed object deletion.
+func (store *Store) Restore(ctx context.Context, organizationID, id string) error {
+	command, err := store.pool.Exec(ctx, `
+		update file_assets set deleted_at = null
+		where id = $1{{if .Tenancy}} and organization_id = $2{{end}} and deleted_at is not null`,
+		id{{if .Tenancy}}, organizationID{{end}})
+	if err != nil {
+		return fmt.Errorf("restore file metadata: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return files.ErrNotFound
+	}
+	return nil
+}
+
+type scanner interface {
+	Scan(...any) error
+}
+
+func scanAsset(row scanner) (files.Asset, error) {
+	var asset files.Asset
+	var organizationID *string
+	err := row.Scan(
+		&asset.ID, &organizationID, &asset.Name, &asset.MediaType, &asset.Size,
+		&asset.SHA256, &asset.StorageKey, &asset.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return files.Asset{}, files.ErrNotFound
+	}
+	if err != nil {
+		return files.Asset{}, fmt.Errorf("scan file metadata: %w", err)
+	}
+	if organizationID != nil {
+		asset.OrganizationID = *organizationID
+	}
+	return asset, nil
+}
+
+func appendAudit(ctx context.Context, tx pgx.Tx, audit identity.AuditEvent) error {
+	_, err := tx.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		audit.ID, audit.UserID, audit.Action, audit.Outcome, audit.Target,
+		audit.IPAddress, audit.UserAgent, audit.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append file audit: %w", err)
+	}
+	return nil
+}
+
+func nullableOrganization(organizationID string) any {
+	if organizationID == "" {
+		return nil
+	}
+	return organizationID
+}
