@@ -9,6 +9,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -230,6 +231,75 @@ func TestGenerateOrganizationTenancyCapability(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationMemberCapabilityVersion(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyMembersVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[tenancyCapability] != tenancyMembersVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"internal/tenancy/members.go":                                          false,
+		"internal/tenancy/httpapi/members_handler.go":                          false,
+		"internal/tenancy/postgres/members.go":                                 false,
+		"internal/platform/migrate/migrations/000060_organization_members.sql": false,
+		"web/admin/src/views/MembersView.vue":                                  false,
+	}
+	var openAPI string
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+		if output.Path == "api/openapi.yaml" {
+			openAPI = string(output.Content)
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	if !strings.Contains(openAPI, "/api/v1/organization-invitations/accept:") ||
+		!strings.Contains(openAPI, "tenancy:members:manage") {
+		t.Fatal("Generate() did not expose the member administration contract")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated member OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestOrganizationMemberUpgradePreservesBaseMigration(t *testing.T) {
+	t.Parallel()
+
+	versionOne := businessProject()
+	versionOne.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyVersion}}
+	versionTwo := businessProject()
+	versionTwo.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyMembersVersion}}
+	first, err := New().Generate(context.Background(), versionOne)
+	if err != nil {
+		t.Fatalf("Generate(0.1.0) error = %v", err)
+	}
+	second, err := New().Generate(context.Background(), versionTwo)
+	if err != nil {
+		t.Fatalf("Generate(0.2.0) error = %v", err)
+	}
+	const baseMigration = "internal/platform/migrate/migrations/000050_organization_tenancy.sql"
+	if !bytes.Equal(outputContent(first, baseMigration), outputContent(second, baseMigration)) {
+		t.Fatal("organization-tenancy 0.2.0 rewrites the already-applied 0.1.0 migration")
+	}
+	const memberMigration = "internal/platform/migrate/migrations/000060_organization_members.sql"
+	if outputContent(first, memberMigration) != nil || outputContent(second, memberMigration) == nil {
+		t.Fatal("organization member migration is not isolated to 0.2.0")
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 
@@ -319,4 +389,13 @@ func businessProject() spec.Project {
 		},
 	}}
 	return project
+}
+
+func outputContent(generated generator.Result, path string) []byte {
+	for _, output := range generated.Outputs {
+		if output.Path == path {
+			return output.Content
+		}
+	}
+	return nil
 }

@@ -1,0 +1,26 @@
+insert into identity_permissions (code, description) values
+    ('tenancy:members:read', 'Read organization members'),
+    ('tenancy:members:manage', 'Invite, update, and remove organization members')
+on conflict (code) do nothing;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'tenancy:members:read'),
+    ('admin', 'tenancy:members:manage'),
+    ('user', 'tenancy:members:read')
+on conflict (role_code, permission_code) do nothing;
+
+create table organization_invitations (
+    id text primary key,
+    organization_id text not null references organizations (id) on delete cascade,
+    email text not null,
+    role_code text not null references identity_roles (code),
+    token_hash bytea not null unique,
+    invited_by text not null references identity_users (id),
+    expires_at timestamptz not null,
+    accepted_at timestamptz,
+    accepted_by text references identity_users (id),
+    created_at timestamptz not null
+);
+
+create index organization_invitations_organization_idx on organization_invitations (organization_id, created_at desc);
+create index organization_invitations_email_idx on organization_invitations (email, expires_at desc);

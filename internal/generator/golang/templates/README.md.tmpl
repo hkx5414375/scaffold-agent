@@ -49,6 +49,13 @@ The machine-readable HTTP contract is `api/openapi.yaml`.
 {{if .Tenancy}}
 - `POST /api/v1/organizations`
 - `GET /api/v1/organizations`
+{{if .TenancyMembers}}
+- `GET /api/v1/organizations/{organizationID}/members`
+- `POST /api/v1/organizations/{organizationID}/invitations`
+- `PATCH /api/v1/organizations/{organizationID}/members/{userID}`
+- `DELETE /api/v1/organizations/{organizationID}/members/{userID}`
+- `POST /api/v1/organization-invitations/accept`
+{{end}}
 {{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
@@ -66,6 +73,12 @@ Create an organization after signing in, then send its identifier in
 include the organization in reads, writes, uniqueness, pagination, and optimistic
 locking predicates; a valid record identifier from another organization is still
 reported as not found.
+{{if .TenancyMembers}}
+Administrators can create 72-hour email-bound invitations, change member roles,
+and remove members. Invitation secrets are stored only as SHA-256 digests and are
+returned once for delivery. Role changes and removals are serialized per
+organization so the final administrator cannot be removed or demoted.
+{{end}}
 {{end}}
 {{if .Admin}}
 ## Administration UI

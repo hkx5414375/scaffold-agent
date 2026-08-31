@@ -21,6 +21,30 @@ export interface Organization {
 export interface OrganizationPage {
   items: Organization[];
 }
+{{- if .TenancyMembers}}
+
+export interface OrganizationMember {
+  organization_id: string;
+  user_id: string;
+  email: string;
+  role: "admin" | "user";
+  joined_at: string;
+}
+
+export interface OrganizationMemberPage {
+  items: OrganizationMember[];
+}
+
+export interface OrganizationInvitation {
+  id: string;
+  organization_id: string;
+  email: string;
+  role: "admin" | "user";
+  acceptance_token: string;
+  expires_at: string;
+  created_at: string;
+}
+{{- end}}
 {{- end}}
 {{- if .Business}}
 

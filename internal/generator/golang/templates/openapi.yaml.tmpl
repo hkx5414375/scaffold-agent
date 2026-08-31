@@ -149,6 +149,138 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "500":
           $ref: "#/components/responses/ErrorResponse"
+{{if .TenancyMembers}}
+  /api/v1/organizations/{organizationID}/members:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+      - $ref: "#/components/parameters/OrganizationId"
+    get:
+      operationId: listOrganizationMembers
+      x-required-permission: tenancy:members:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Organization members
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationMemberPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organizations/{organizationID}/invitations:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+      - $ref: "#/components/parameters/OrganizationId"
+    post:
+      operationId: createOrganizationInvitation
+      x-required-permission: tenancy:members:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationInvitationWrite"
+      responses:
+        "201":
+          description: Invitation with its acceptance token returned exactly once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationInvitation"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organizations/{organizationID}/members/{userID}:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+      - $ref: "#/components/parameters/OrganizationMemberUserId"
+      - $ref: "#/components/parameters/OrganizationId"
+    patch:
+      operationId: changeOrganizationMemberRole
+      x-required-permission: tenancy:members:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationMemberRoleWrite"
+      responses:
+        "200":
+          description: Updated organization member
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationMember"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      operationId: removeOrganizationMember
+      x-required-permission: tenancy:members:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "204":
+          description: Organization member removed
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organization-invitations/accept:
+    post:
+      operationId: acceptOrganizationInvitation
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationInvitationAccept"
+      responses:
+        "200":
+          description: Accepted organization membership
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationMember"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
 {{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
@@ -326,6 +458,20 @@ components:
       required: true
       schema:
         type: string
+{{if .TenancyMembers}}
+    OrganizationPathId:
+      name: organizationID
+      in: path
+      required: true
+      schema:
+        type: string
+    OrganizationMemberUserId:
+      name: userID
+      in: path
+      required: true
+      schema:
+        type: string
+{{end}}
 {{end}}
   responses:
     ErrorResponse:
@@ -422,6 +568,82 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Organization"
+{{if .TenancyMembers}}
+    OrganizationMember:
+      type: object
+      required: [organization_id, user_id, email, role, joined_at]
+      properties:
+        organization_id:
+          type: string
+        user_id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, user]
+        joined_at:
+          type: string
+          format: date-time
+    OrganizationMemberPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrganizationMember"
+    OrganizationInvitation:
+      type: object
+      required: [id, organization_id, email, role, acceptance_token, expires_at, created_at]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, user]
+        acceptance_token:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    OrganizationInvitationWrite:
+      type: object
+      additionalProperties: false
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [admin, user]
+    OrganizationMemberRoleWrite:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, user]
+    OrganizationInvitationAccept:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+{{end}}
 {{end}}
 {{if .Business}}
     {{.Business.EntityType}}:

@@ -2,8 +2,15 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 
 import { ApiError, request } from "../api/client";
-import type { {{if .Tenancy}}Organization, OrganizationPage, {{end}}Principal, PrincipalResponse } from "../types";
-
+{{if .TenancyMembers}}import type {
+  Organization,
+  OrganizationPage,
+  OrganizationMember,
+  Principal,
+  PrincipalResponse,
+} from "../types";
+{{else}}import type { {{if .Tenancy}}Organization, OrganizationPage, {{end}}Principal, PrincipalResponse } from "../types";
+{{end}}
 export const useSessionStore = defineStore("session", () => {
   const principal = ref<Principal | null>(null);
   const initialized = ref(false);
@@ -50,8 +57,7 @@ export const useSessionStore = defineStore("session", () => {
     localStorage.removeItem("scaffold.organization_id");
 {{- end}}
   }
-
-{{- if .Tenancy}}
+{{if .Tenancy}}
   async function loadOrganizations(): Promise<void> {
     const page = await request<OrganizationPage>("/api/v1/organizations");
     organizations.value = page.items;
@@ -76,7 +82,16 @@ export const useSessionStore = defineStore("session", () => {
     organizations.value.push(organization);
     selectOrganization(organization.id);
   }
-
+{{if .TenancyMembers}}
+  async function acceptInvitation(token: string): Promise<void> {
+    const member = await request<OrganizationMember>("/api/v1/organization-invitations/accept", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+    await loadOrganizations();
+    selectOrganization(member.organization_id);
+  }
+{{end}}
   return {
     principal,
     initialized,
@@ -87,6 +102,9 @@ export const useSessionStore = defineStore("session", () => {
     logout,
     selectOrganization,
     createOrganization,
+{{- if .TenancyMembers}}
+    acceptInvitation,
+{{- end}}
   };
 {{- else}}
   return { principal, initialized, load, login, logout };

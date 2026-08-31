@@ -1,0 +1,138 @@
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+const (
+	readMembersPermission   = "tenancy:members:read"
+	manageMembersPermission = "tenancy:members:manage"
+)
+
+// RegisterMembers adds member administration and invitation acceptance routes.
+func RegisterMembers(mux *http.ServeMux, security *identityhttp.Handler, service *tenancy.MemberService) {
+	handler := &memberHandler{service: service}
+	mux.HandleFunc("GET /api/v1/organizations/{organizationID}/members", security.Authorized(readMembersPermission, handler.list))
+	mux.HandleFunc("POST /api/v1/organizations/{organizationID}/invitations", security.Authorized(manageMembersPermission, handler.invite))
+	mux.HandleFunc("PATCH /api/v1/organizations/{organizationID}/members/{userID}", security.Authorized(manageMembersPermission, handler.changeRole))
+	mux.HandleFunc("DELETE /api/v1/organizations/{organizationID}/members/{userID}", security.Authorized(manageMembersPermission, handler.remove))
+	mux.HandleFunc("POST /api/v1/organization-invitations/accept", security.Authenticated(handler.accept))
+}
+
+type memberHandler struct {
+	service *tenancy.MemberService
+}
+
+func (handler *memberHandler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	if !matchesOrganization(request, actor) {
+		writeMemberError(response, tenancy.ErrNotFound)
+		return
+	}
+	members, err := handler.service.List(request.Context(), actor)
+	if err != nil {
+		writeMemberError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, struct {
+		Items []tenancy.Member `json:"items"`
+	}{Items: members})
+}
+
+func (handler *memberHandler) invite(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	if !matchesOrganization(request, actor) {
+		writeMemberError(response, tenancy.ErrNotFound)
+		return
+	}
+	var input struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	invitation, err := handler.service.Invite(request.Context(), input.Email, input.Role, actor)
+	if err != nil {
+		writeMemberError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, invitation)
+}
+
+func (handler *memberHandler) accept(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input struct {
+		Token string `json:"token"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	member, err := handler.service.Accept(request.Context(), input.Token, actor)
+	if err != nil {
+		writeMemberError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, member)
+}
+
+func (handler *memberHandler) changeRole(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	if !matchesOrganization(request, actor) {
+		writeMemberError(response, tenancy.ErrNotFound)
+		return
+	}
+	var input struct {
+		Role string `json:"role"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	member, err := handler.service.ChangeRole(request.Context(), request.PathValue("userID"), input.Role, actor)
+	if err != nil {
+		writeMemberError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, member)
+}
+
+func (handler *memberHandler) remove(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	if !matchesOrganization(request, actor) {
+		writeMemberError(response, tenancy.ErrNotFound)
+		return
+	}
+	if err := handler.service.Remove(request.Context(), request.PathValue("userID"), actor); err != nil {
+		writeMemberError(response, err)
+		return
+	}
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func matchesOrganization(request *http.Request, actor identity.Principal) bool {
+	return actor.OrganizationID != "" && strings.TrimSpace(request.PathValue("organizationID")) == actor.OrganizationID
+}
+
+func writeMemberError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, tenancy.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "tenancy.member.invalid", "member email and role must be valid")
+	case errors.Is(err, tenancy.ErrInvitationInvalid):
+		httpjson.WriteError(response, http.StatusBadRequest, "tenancy.invitation.invalid", "invitation is invalid or expired")
+	case errors.Is(err, tenancy.ErrMemberConflict):
+		httpjson.WriteError(response, http.StatusConflict, "tenancy.member.conflict", "member or active invitation already exists")
+	case errors.Is(err, tenancy.ErrLastAdministrator):
+		httpjson.WriteError(response, http.StatusConflict, "tenancy.last_administrator", "organization must retain an administrator")
+	case errors.Is(err, tenancy.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "tenancy.member.not_found", "organization member was not found")
+	default:
+		slog.Error("organization member request", "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

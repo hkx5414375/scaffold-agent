@@ -108,27 +108,40 @@ func TestVerifyStoresPageableFinding(t *testing.T) {
 }
 
 func TestGoPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", "", 47, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", "", "", 47, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
 }
 
 func TestGoMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "mysql", "element-plus", "", 48, false)
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", "", "", 48, false)
 }
 
 func TestGoTenantPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancySelection, 53, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancySelectionV1, "0.1.0", 53, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
 }
 
 func TestGoTenantMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelection, 54, false)
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelectionV1, "0.1.0", 54, false)
 }
 
-const tenancySelection = `  capabilities:
+func TestGoTenantMembersPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancySelectionV2, "0.2.0", 60, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantMembersMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelectionV2, "0.2.0", 61, false)
+}
+
+const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
 `
 
-func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities string, wantChanges int, runAdminBuild bool) {
+const tenancySelectionV2 = `  capabilities:
+    - name: organization-tenancy
+      version: 0.2.0
+`
+
+func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
 	ctx := context.Background()
@@ -179,7 +192,7 @@ CAPABILITIES
 	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
-	if capabilities != "" && plannedData.CapabilityLock["organization-tenancy"] != "0.1.0" {
+	if capabilities != "" && plannedData.CapabilityLock["organization-tenancy"] != expectedTenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

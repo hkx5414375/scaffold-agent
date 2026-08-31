@@ -21,10 +21,14 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。第一个 Go 适配器已能生成带 PostgreSQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC 及审计事件的 HTTP 服务，也能从一个 Blueprint 模块和一个实体生成第一套完整 CRUD。对尚未支持的数据库、前端、认证组合、字段类型、工作流、页面和更大的模块形态，它会明确拒绝，不会静默漏生代码。Java 和 Python 目前会返回稳定诊断 `generator.adapter.unavailable`。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1 和 Vue/Element Plus 管理端。对尚未支持的数据库、前端、认证组合、字段类型、工作流、页面和更大的模块形态，它会明确拒绝，不会静默漏生代码。Java 和 Python 目前会返回稳定诊断 `generator.adapter.unavailable`。
 
 当前支持的业务模块写法参见 `examples/task-service/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
+
+选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组织创建与查询、成员身份范围内的权限校验、管理端组织选择，以及所有业务读写的 `X-Organization-ID` 租户条件。`0.2.0` 进一步加入成员列表、72 小时且绑定邮箱的邀请、邀请接受、角色变更、成员移除和最后管理员保护。邀请明文只在创建响应中返回一次，数据库只保存摘要，AI 不应尝试从数据库恢复邀请明文。
+
+项目能力选择必须锁定精确版本；传递依赖可以声明语义版本范围。Engine 会在全部约束下确定性选择最高兼容版本，并把精确结果写入能力锁。AI 应复用该锁，不要自行重新推导依赖版本。
 
 ## STDIO 协议
 

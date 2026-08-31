@@ -1,0 +1,255 @@
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+func (store *Store) ListMembers(ctx context.Context, organizationID string) ([]tenancy.Member, error) {
+	rows, err := store.database.QueryContext(ctx, `
+		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at
+		from organization_memberships memberships
+		join identity_users users on users.id = memberships.user_id
+		where memberships.organization_id = ?
+		order by users.email, users.id`, organizationID)
+	if err != nil {
+		return nil, fmt.Errorf("query organization members: %w", err)
+	}
+	defer rows.Close()
+	members := make([]tenancy.Member, 0)
+	for rows.Next() {
+		var member tenancy.Member
+		if err := rows.Scan(&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt); err != nil {
+			return nil, fmt.Errorf("scan organization member: %w", err)
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read organization members: %w", err)
+	}
+	return members, nil
+}
+
+func (store *Store) CreateInvitation(ctx context.Context, invitation tenancy.InvitationRecord, audit identity.AuditEvent) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin organization invitation: %w", err)
+	}
+	if err := lockOrganization(ctx, transaction, invitation.OrganizationID); err != nil {
+		return rollback(transaction, err)
+	}
+	var conflict bool
+	if err := transaction.QueryRowContext(ctx, `
+		select exists(
+			select 1
+			from organization_memberships memberships
+			join identity_users users on users.id = memberships.user_id
+			where memberships.organization_id = ? and users.email = ?
+		) or exists(
+			select 1 from organization_invitations
+			where organization_id = ? and email = ? and accepted_at is null and expires_at > ?
+		)`, invitation.OrganizationID, invitation.Email, invitation.OrganizationID, invitation.Email, invitation.CreatedAt).Scan(&conflict); err != nil {
+		return rollback(transaction, fmt.Errorf("check organization invitation conflict: %w", err))
+	}
+	if conflict {
+		return commitDenied(ctx, transaction, audit, tenancy.ErrMemberConflict)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into organization_invitations
+			(id, organization_id, email, role_code, token_hash, invited_by, expires_at, created_at)
+		values (?, ?, ?, ?, ?, ?, ?, ?)`,
+		invitation.ID, invitation.OrganizationID, invitation.Email, invitation.Role,
+		invitation.TokenHash, invitation.InvitedBy, invitation.ExpiresAt, invitation.CreatedAt,
+	); err != nil {
+		return rollback(transaction, fmt.Errorf("insert organization invitation: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit organization invitation: %w", err)
+	}
+	return nil
+}
+
+func (store *Store) AcceptInvitation(ctx context.Context, tokenHash []byte, email, userID string, now time.Time, audit identity.AuditEvent) (tenancy.Member, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return tenancy.Member{}, fmt.Errorf("begin invitation acceptance: %w", err)
+	}
+	var invitationID, organizationID, role string
+	if err := transaction.QueryRowContext(ctx, `
+		select id, organization_id, role_code
+		from organization_invitations
+		where token_hash = ? and email = ? and accepted_at is null and expires_at > ?
+		for update`, tokenHash, email, now).Scan(&invitationID, &organizationID, &role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tenancy.Member{}, commitDenied(ctx, transaction, audit, tenancy.ErrInvitationInvalid)
+		}
+		return tenancy.Member{}, rollback(transaction, fmt.Errorf("select organization invitation: %w", err))
+	}
+	if err := lockOrganization(ctx, transaction, organizationID); err != nil {
+		return tenancy.Member{}, rollback(transaction, err)
+	}
+	var exists bool
+	if err := transaction.QueryRowContext(ctx, `
+		select exists(select 1 from organization_memberships where organization_id = ? and user_id = ?)`,
+		organizationID, userID).Scan(&exists); err != nil {
+		return tenancy.Member{}, rollback(transaction, fmt.Errorf("check invited organization membership: %w", err))
+	}
+	if exists {
+		audit.Target = organizationID + ":" + userID
+		return tenancy.Member{}, commitDenied(ctx, transaction, audit, tenancy.ErrMemberConflict)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into organization_memberships (organization_id, user_id, role_code, created_at)
+		values (?, ?, ?, ?)`, organizationID, userID, role, now); err != nil {
+		return tenancy.Member{}, rollback(transaction, fmt.Errorf("insert invited organization membership: %w", err))
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		update organization_invitations
+		set accepted_at = ?, accepted_by = ?
+		where id = ?`, now, userID, invitationID); err != nil {
+		return tenancy.Member{}, rollback(transaction, fmt.Errorf("mark organization invitation accepted: %w", err))
+	}
+	audit.Target = organizationID + ":" + userID
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return tenancy.Member{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return tenancy.Member{}, fmt.Errorf("commit invitation acceptance: %w", err)
+	}
+	return tenancy.Member{
+		OrganizationID: organizationID, UserID: userID, Email: email,
+		Role: role, JoinedAt: now,
+	}, nil
+}
+
+func (store *Store) ChangeMemberRole(ctx context.Context, organizationID, userID, role string, audit identity.AuditEvent) (tenancy.Member, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return tenancy.Member{}, fmt.Errorf("begin member role change: %w", err)
+	}
+	if err := lockOrganization(ctx, transaction, organizationID); err != nil {
+		return tenancy.Member{}, rollback(transaction, err)
+	}
+	member, err := memberForUpdate(ctx, transaction, organizationID, userID)
+	if err != nil {
+		return tenancy.Member{}, rollback(transaction, err)
+	}
+	if member.Role == "admin" && role != "admin" {
+		if err := requireAnotherAdministrator(ctx, transaction, organizationID); err != nil {
+			if errors.Is(err, tenancy.ErrLastAdministrator) {
+				return tenancy.Member{}, commitDenied(ctx, transaction, audit, err)
+			}
+			return tenancy.Member{}, rollback(transaction, err)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		update organization_memberships set role_code = ?
+		where organization_id = ? and user_id = ?`, role, organizationID, userID); err != nil {
+		return tenancy.Member{}, rollback(transaction, fmt.Errorf("update organization member role: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return tenancy.Member{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return tenancy.Member{}, fmt.Errorf("commit member role change: %w", err)
+	}
+	member.Role = role
+	return member, nil
+}
+
+func (store *Store) RemoveMember(ctx context.Context, organizationID, userID string, audit identity.AuditEvent) error {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin member removal: %w", err)
+	}
+	if err := lockOrganization(ctx, transaction, organizationID); err != nil {
+		return rollback(transaction, err)
+	}
+	member, err := memberForUpdate(ctx, transaction, organizationID, userID)
+	if err != nil {
+		return rollback(transaction, err)
+	}
+	if member.Role == "admin" {
+		if err := requireAnotherAdministrator(ctx, transaction, organizationID); err != nil {
+			if errors.Is(err, tenancy.ErrLastAdministrator) {
+				return commitDenied(ctx, transaction, audit, err)
+			}
+			return rollback(transaction, err)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		delete from organization_memberships where organization_id = ? and user_id = ?`, organizationID, userID); err != nil {
+		return rollback(transaction, fmt.Errorf("delete organization member: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("commit member removal: %w", err)
+	}
+	return nil
+}
+
+func lockOrganization(ctx context.Context, transaction *sql.Tx, organizationID string) error {
+	var id string
+	if err := transaction.QueryRowContext(ctx, `select id from organizations where id = ? for update`, organizationID).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tenancy.ErrNotFound
+		}
+		return fmt.Errorf("lock organization: %w", err)
+	}
+	return nil
+}
+
+func memberForUpdate(ctx context.Context, transaction *sql.Tx, organizationID, userID string) (tenancy.Member, error) {
+	var member tenancy.Member
+	if err := transaction.QueryRowContext(ctx, `
+		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at
+		from organization_memberships memberships
+		join identity_users users on users.id = memberships.user_id
+		where memberships.organization_id = ? and memberships.user_id = ?
+		for update`, organizationID, userID).Scan(
+		&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tenancy.Member{}, tenancy.ErrNotFound
+		}
+		return tenancy.Member{}, fmt.Errorf("select organization member: %w", err)
+	}
+	return member, nil
+}
+
+func requireAnotherAdministrator(ctx context.Context, transaction *sql.Tx, organizationID string) error {
+	var count int
+	if err := transaction.QueryRowContext(ctx, `
+		select count(*) from organization_memberships
+		where organization_id = ? and role_code = 'admin'`, organizationID).Scan(&count); err != nil {
+		return fmt.Errorf("count organization administrators: %w", err)
+	}
+	if count <= 1 {
+		return tenancy.ErrLastAdministrator
+	}
+	return nil
+}
+
+func commitDenied(ctx context.Context, transaction *sql.Tx, audit identity.AuditEvent, denial error) error {
+	audit.Outcome = "denied"
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, errors.Join(denial, err))
+	}
+	if err := transaction.Commit(); err != nil {
+		return errors.Join(denial, fmt.Errorf("commit denied organization member mutation: %w", err))
+	}
+	return denial
+}
+
+var _ tenancy.MemberStore = (*Store)(nil)

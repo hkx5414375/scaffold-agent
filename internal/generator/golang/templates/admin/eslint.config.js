@@ -10,7 +10,7 @@ export default tseslint.config(
   {
     files: ["**/*.vue"],
     languageOptions: {
-      globals: { URLSearchParams: "readonly" },
+      globals: { navigator: "readonly", URLSearchParams: "readonly" },
       parserOptions: { parser: tseslint.parser },
     },
     rules: {

@@ -1,0 +1,180 @@
+package tenancy
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const invitationLifetime = 72 * time.Hour
+
+var (
+	// ErrMemberConflict means the identity is already a member or has an active invitation.
+	ErrMemberConflict = errors.New("organization member conflicts with existing state")
+	// ErrInvitationInvalid hides whether an invitation is unknown, expired, accepted, or belongs to another email.
+	ErrInvitationInvalid = errors.New("organization invitation is invalid")
+	// ErrLastAdministrator prevents an organization from losing its final administrator.
+	ErrLastAdministrator = errors.New("organization must retain an administrator")
+)
+
+// Member is one identity and role inside an organization.
+type Member struct {
+	OrganizationID string    `json:"organization_id"`
+	UserID         string    `json:"user_id"`
+	Email          string    `json:"email"`
+	Role           string    `json:"role"`
+	JoinedAt       time.Time `json:"joined_at"`
+}
+
+// Invitation is the public invitation metadata. AcceptanceToken is returned only on creation.
+type Invitation struct {
+	ID              string    `json:"id"`
+	OrganizationID  string    `json:"organization_id"`
+	Email           string    `json:"email"`
+	Role            string    `json:"role"`
+	AcceptanceToken string    `json:"acceptance_token,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+// InvitationRecord is the secret-free persistence representation of an invitation.
+type InvitationRecord struct {
+	Invitation
+	TokenHash []byte
+	InvitedBy string
+}
+
+// MemberStore persists organization membership changes and their audit event atomically.
+type MemberStore interface {
+	ListMembers(context.Context, string) ([]Member, error)
+	CreateInvitation(context.Context, InvitationRecord, identity.AuditEvent) error
+	AcceptInvitation(context.Context, []byte, string, string, time.Time, identity.AuditEvent) (Member, error)
+	ChangeMemberRole(context.Context, string, string, string, identity.AuditEvent) (Member, error)
+	RemoveMember(context.Context, string, string, identity.AuditEvent) error
+}
+
+// MemberService implements member discovery, secure invitations, and role administration.
+type MemberService struct {
+	store MemberStore
+	now   func() time.Time
+}
+
+// NewMemberService returns organization member use cases.
+func NewMemberService(store MemberStore) *MemberService {
+	return &MemberService{store: store, now: time.Now}
+}
+
+// List returns members from the already-authorized organization scope.
+func (service *MemberService) List(ctx context.Context, actor identity.Principal) ([]Member, error) {
+	if actor.UserID == "" || actor.OrganizationID == "" {
+		return nil, identity.ErrInvalidCredentials
+	}
+	members, err := service.store.ListMembers(ctx, actor.OrganizationID)
+	if err != nil {
+		return nil, fmt.Errorf("list organization members: %w", err)
+	}
+	return members, nil
+}
+
+// Invite creates a time-limited invitation and returns its raw acceptance token once.
+func (service *MemberService) Invite(ctx context.Context, email, role string, actor identity.Principal) (Invitation, error) {
+	if actor.UserID == "" || actor.OrganizationID == "" {
+		return Invitation{}, identity.ErrInvalidCredentials
+	}
+	normalizedEmail, err := normalizeMemberEmail(email)
+	if err != nil || !validMemberRole(role) {
+		return Invitation{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	rawToken := rand.Text()
+	invitation := Invitation{
+		ID: rand.Text(), OrganizationID: actor.OrganizationID, Email: normalizedEmail,
+		Role: role, AcceptanceToken: rawToken, ExpiresAt: now.Add(invitationLifetime), CreatedAt: now,
+	}
+	record := InvitationRecord{
+		Invitation: invitation, TokenHash: memberTokenDigest(rawToken), InvitedBy: actor.UserID,
+	}
+	record.AcceptanceToken = ""
+	audit := memberAudit(actor.UserID, "tenancy.member.invite", actor.OrganizationID+":"+normalizedEmail, now)
+	if err := service.store.CreateInvitation(ctx, record, audit); err != nil {
+		return Invitation{}, fmt.Errorf("create organization invitation: %w", err)
+	}
+	return invitation, nil
+}
+
+// Accept exchanges one raw invitation token for organization membership.
+func (service *MemberService) Accept(ctx context.Context, rawToken string, actor identity.Principal) (Member, error) {
+	if actor.UserID == "" || actor.Email == "" || strings.TrimSpace(rawToken) == "" {
+		return Member{}, ErrInvitationInvalid
+	}
+	normalizedEmail, err := normalizeMemberEmail(actor.Email)
+	if err != nil {
+		return Member{}, ErrInvitationInvalid
+	}
+	now := service.now().UTC()
+	audit := memberAudit(actor.UserID, "tenancy.invitation.accept", "", now)
+	member, err := service.store.AcceptInvitation(ctx, memberTokenDigest(rawToken), normalizedEmail, actor.UserID, now, audit)
+	if err != nil {
+		return Member{}, fmt.Errorf("accept organization invitation: %w", err)
+	}
+	return member, nil
+}
+
+// ChangeRole changes one member role while the store protects the final administrator.
+func (service *MemberService) ChangeRole(ctx context.Context, userID, role string, actor identity.Principal) (Member, error) {
+	userID, role = strings.TrimSpace(userID), strings.TrimSpace(role)
+	if actor.UserID == "" || actor.OrganizationID == "" || userID == "" || !validMemberRole(role) {
+		return Member{}, ErrInvalidInput
+	}
+	audit := memberAudit(actor.UserID, "tenancy.member.role.change", actor.OrganizationID+":"+userID+":"+role, service.now().UTC())
+	member, err := service.store.ChangeMemberRole(ctx, actor.OrganizationID, userID, role, audit)
+	if err != nil {
+		return Member{}, fmt.Errorf("change organization member role: %w", err)
+	}
+	return member, nil
+}
+
+// Remove removes one member while the store protects the final administrator.
+func (service *MemberService) Remove(ctx context.Context, userID string, actor identity.Principal) error {
+	userID = strings.TrimSpace(userID)
+	if actor.UserID == "" || actor.OrganizationID == "" || userID == "" {
+		return ErrInvalidInput
+	}
+	audit := memberAudit(actor.UserID, "tenancy.member.remove", actor.OrganizationID+":"+userID, service.now().UTC())
+	if err := service.store.RemoveMember(ctx, actor.OrganizationID, userID, audit); err != nil {
+		return fmt.Errorf("remove organization member: %w", err)
+	}
+	return nil
+}
+
+func normalizeMemberEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || len(value) > 254 {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func validMemberRole(role string) bool {
+	return role == "admin" || role == "user"
+}
+
+func memberTokenDigest(value string) []byte {
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
+}
+
+func memberAudit(userID, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: userID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

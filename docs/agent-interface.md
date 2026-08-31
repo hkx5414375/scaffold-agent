@@ -42,6 +42,13 @@ business mutation and query. Agents should select an organization once and send
 its identifier through `X-Organization-ID`; they do not need to rediscover the
 tenant propagation rules from handlers or SQL stores.
 
+Version `0.2.0` additionally generates organization member discovery, 72-hour
+email-bound invitation tokens, invitation acceptance, role changes, removals,
+last-administrator protection, additive database migrations, OpenAPI operations,
+and a member administration view. The raw invitation token is returned once for
+delivery; agents must not search the database for it because only its digest is
+stored.
+
 Project capability selections pin exact versions. Transitive dependencies may use
 semantic-version ranges; the Engine deterministically selects the highest release
 that satisfies the complete graph and records every exact result in the capability

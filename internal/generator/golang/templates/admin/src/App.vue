@@ -3,6 +3,9 @@ import { ElMessage } from "element-plus";
 import { onMounted{{if .Tenancy}}, ref{{end}} } from "vue";
 
 import { useSessionStore } from "./stores/session";
+{{- if .TenancyMembers}}
+import MembersView from "./views/MembersView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -12,6 +15,9 @@ import LoginView from "./views/LoginView.vue";
 const session = useSessionStore();
 {{- if .Tenancy}}
 const organizationName = ref("");
+{{- if .TenancyMembers}}
+const invitationToken = ref("");
+{{- end}}
 {{- end}}
 
 onMounted(async () => {
@@ -40,6 +46,18 @@ async function createOrganization(): Promise<void> {
     ElMessage.error("Organization could not be created");
   }
 }
+{{- if .TenancyMembers}}
+
+async function acceptInvitation(): Promise<void> {
+  try {
+    await session.acceptInvitation(invitationToken.value);
+    invitationToken.value = "";
+    ElMessage.success("Invitation accepted");
+  } catch {
+    ElMessage.error("Invitation is invalid or expired");
+  }
+}
+{{- end}}
 {{- end}}
 </script>
 
@@ -84,8 +102,29 @@ async function createOrganization(): Promise<void> {
         <p class="muted">Business data is isolated by organization.</p>
         <el-input v-model="organizationName" maxlength="120" placeholder="Organization name" />
         <el-button type="primary" @click="createOrganization">Create organization</el-button>
+{{- if .TenancyMembers}}
+        <el-divider>or join an organization</el-divider>
+        <el-input v-model="invitationToken" placeholder="Invitation token" />
+        <el-button @click="acceptInvitation">Accept invitation</el-button>
+{{- end}}
       </el-card>
 {{- end}}
+{{- if .TenancyMembers}}
+      <el-tabs v-else class="workspace-tabs">
+{{- if .Business}}
+        <el-tab-pane label="Business" name="business">
+          <BusinessView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- else}}
+        <el-tab-pane label="Overview" name="overview">
+          <DashboardView />
+        </el-tab-pane>
+{{- end}}
+        <el-tab-pane label="Members" name="members">
+          <MembersView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+      </el-tabs>
+{{- else}}
 {{- if .Business}}
 {{- if .Tenancy}}
       <BusinessView v-else :key="session.currentOrganizationId" />
@@ -97,6 +136,7 @@ async function createOrganization(): Promise<void> {
       <DashboardView v-else />
 {{- else}}
       <DashboardView />
+{{- end}}
 {{- end}}
 {{- end}}
     </el-main>

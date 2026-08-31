@@ -1,0 +1,97 @@
+package tenancy
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestInviteReturnsRawTokenButPersistsOnlyDigest(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryMemberStore{}
+	service := NewMemberService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "admin-1", Email: "admin@example.com", OrganizationID: "organization-1", Role: "admin"}
+	invitation, err := service.Invite(context.Background(), " Member@Example.com ", "user", actor)
+	if err != nil {
+		t.Fatalf("Invite() error = %v", err)
+	}
+	if invitation.AcceptanceToken == "" || invitation.Email != "member@example.com" {
+		t.Fatalf("Invite() = %#v", invitation)
+	}
+	if store.invitation.AcceptanceToken != "" ||
+		bytes.Equal(store.invitation.TokenHash, []byte(invitation.AcceptanceToken)) ||
+		!bytes.Equal(store.invitation.TokenHash, memberTokenDigest(invitation.AcceptanceToken)) {
+		t.Fatalf("persisted invitation leaks raw token: %#v", store.invitation)
+	}
+	if invitation.ExpiresAt.Sub(invitation.CreatedAt) != invitationLifetime {
+		t.Fatalf("Invite() lifetime = %s", invitation.ExpiresAt.Sub(invitation.CreatedAt))
+	}
+}
+
+func TestAcceptUsesAuthenticatedEmailAndMapsMembership(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryMemberStore{member: Member{OrganizationID: "organization-1", UserID: "user-1", Email: "member@example.com", Role: "user"}}
+	service := NewMemberService(store)
+	actor := identity.Principal{UserID: "user-1", Email: "MEMBER@example.com"}
+	member, err := service.Accept(context.Background(), "secret", actor)
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if member.OrganizationID != "organization-1" || store.acceptEmail != "member@example.com" || store.acceptUserID != "user-1" {
+		t.Fatalf("Accept() = %#v, email = %q, user = %q", member, store.acceptEmail, store.acceptUserID)
+	}
+}
+
+func TestMemberAdministrationPropagatesLastAdministratorError(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryMemberStore{changeError: ErrLastAdministrator, removeError: ErrLastAdministrator}
+	service := NewMemberService(store)
+	actor := identity.Principal{UserID: "admin-1", OrganizationID: "organization-1", Role: "admin"}
+	if _, err := service.ChangeRole(context.Background(), "admin-1", "user", actor); !errors.Is(err, ErrLastAdministrator) {
+		t.Fatalf("ChangeRole() error = %v, want ErrLastAdministrator", err)
+	}
+	if err := service.Remove(context.Background(), "admin-1", actor); !errors.Is(err, ErrLastAdministrator) {
+		t.Fatalf("Remove() error = %v, want ErrLastAdministrator", err)
+	}
+}
+
+type memoryMemberStore struct {
+	invitation   InvitationRecord
+	member       Member
+	acceptEmail  string
+	acceptUserID string
+	changeError  error
+	removeError  error
+}
+
+func (store *memoryMemberStore) ListMembers(context.Context, string) ([]Member, error) {
+	return []Member{store.member}, nil
+}
+
+func (store *memoryMemberStore) CreateInvitation(_ context.Context, invitation InvitationRecord, _ identity.AuditEvent) error {
+	store.invitation = invitation
+	return nil
+}
+
+func (store *memoryMemberStore) AcceptInvitation(_ context.Context, _ []byte, email, userID string, _ time.Time, _ identity.AuditEvent) (Member, error) {
+	store.acceptEmail, store.acceptUserID = email, userID
+	return store.member, nil
+}
+
+func (store *memoryMemberStore) ChangeMemberRole(context.Context, string, string, string, identity.AuditEvent) (Member, error) {
+	return store.member, store.changeError
+}
+
+func (store *memoryMemberStore) RemoveMember(context.Context, string, string, identity.AuditEvent) error {
+	return store.removeError
+}
+
+var _ MemberStore = (*memoryMemberStore)(nil)

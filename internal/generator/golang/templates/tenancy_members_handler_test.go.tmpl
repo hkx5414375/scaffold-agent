@@ -1,0 +1,56 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+func TestMemberRouteRejectsPathScopeMismatch(t *testing.T) {
+	t.Parallel()
+
+	handler := &memberHandler{service: tenancy.NewMemberService(emptyMemberStore{})}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/organizations/other/members", nil)
+	request.SetPathValue("organizationID", "other")
+	response := httptest.NewRecorder()
+	handler.list(response, request, identity.Principal{UserID: "user-1", OrganizationID: "organization-1"})
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("list(scope mismatch) status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestAcceptMapsInvalidInvitationWithoutLeakingState(t *testing.T) {
+	t.Parallel()
+
+	handler := &memberHandler{service: tenancy.NewMemberService(emptyMemberStore{})}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/organization-invitations/accept", strings.NewReader(`{"token":"unknown"}`))
+	response := httptest.NewRecorder()
+	handler.accept(response, request, identity.Principal{UserID: "user-1", Email: "user@example.com"})
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "tenancy.invitation.invalid") {
+		t.Fatalf("accept(invalid) = %d %s", response.Code, response.Body.String())
+	}
+}
+
+type emptyMemberStore struct{}
+
+func (emptyMemberStore) ListMembers(context.Context, string) ([]tenancy.Member, error) {
+	return nil, nil
+}
+func (emptyMemberStore) CreateInvitation(context.Context, tenancy.InvitationRecord, identity.AuditEvent) error {
+	return nil
+}
+func (emptyMemberStore) AcceptInvitation(context.Context, []byte, string, string, time.Time, identity.AuditEvent) (tenancy.Member, error) {
+	return tenancy.Member{}, tenancy.ErrInvitationInvalid
+}
+func (emptyMemberStore) ChangeMemberRole(context.Context, string, string, string, identity.AuditEvent) (tenancy.Member, error) {
+	return tenancy.Member{}, nil
+}
+func (emptyMemberStore) RemoveMember(context.Context, string, string, identity.AuditEvent) error {
+	return nil
+}

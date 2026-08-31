@@ -39,8 +39,8 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != {{if .Tenancy}}3{{else}}2{{end}} {
-		t.Fatalf("migration count = %d, want {{if .Tenancy}}3{{else}}2{{end}}", migrationCount)
+	if migrationCount != {{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}} {
+		t.Fatalf("migration count = %d, want {{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}", migrationCount)
 	}
 
 	identityStore := identitypostgres.New(pool)
@@ -113,6 +113,41 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := tenancyStore.CreateOrganization(ctx, organization, membership, audit(user.ID, "tenancy.organization:create", organizationID, now)); err != nil {
 		t.Fatalf("CreateOrganization() error = %v", err)
 	}
+{{- if .TenancyMembers}}
+	memberUser := identity.User{ID: "integration-member", Email: "member@example.com", PasswordHash: user.PasswordHash, Role: "user"}
+	if err := identityStore.CreateUser(ctx, memberUser); err != nil {
+		t.Fatalf("CreateUser(member) error = %v", err)
+	}
+	members := tenancy.NewMemberService(tenancyStore)
+	invitation, err := members.Invite(ctx, memberUser.Email, "user", identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID})
+	if err != nil {
+		t.Fatalf("Invite() error = %v", err)
+	}
+	accepted, err := members.Accept(ctx, invitation.AcceptanceToken, identity.Principal{UserID: memberUser.ID, Email: memberUser.Email, Role: "user"})
+	if err != nil || accepted.OrganizationID != organizationID {
+		t.Fatalf("Accept() = %#v, %v", accepted, err)
+	}
+	listedMembers, err := tenancyStore.ListMembers(ctx, organizationID)
+	if err != nil || len(listedMembers) != 2 {
+		t.Fatalf("ListMembers() = %#v, %v", listedMembers, err)
+	}
+	adminPrincipal := identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID}
+	if _, err := members.ChangeRole(ctx, memberUser.ID, "admin", adminPrincipal); err != nil {
+		t.Fatalf("ChangeRole() error = %v", err)
+	}
+	if err := members.Remove(ctx, memberUser.ID, adminPrincipal); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	if err := members.Remove(ctx, user.ID, adminPrincipal); !errors.Is(err, tenancy.ErrLastAdministrator) {
+		t.Fatalf("Remove(last administrator) error = %v, want ErrLastAdministrator", err)
+	}
+	var deniedMemberAudit int
+	if err := pool.QueryRow(ctx, `
+		select count(*) from audit_events
+		where action = 'tenancy.member.remove' and outcome = 'denied' and target = $1`, organizationID+":"+user.ID).Scan(&deniedMemberAudit); err != nil || deniedMemberAudit != 1 {
+		t.Fatalf("denied member audit count = %d, %v, want 1", deniedMemberAudit, err)
+	}
+{{- end}}
 {{- end}}
 
 {{- range .Business.Fields}}

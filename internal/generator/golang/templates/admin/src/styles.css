@@ -83,6 +83,18 @@ textarea {
   margin: 20px 0 14px;
 }
 
+.setup-card .el-divider + .el-input {
+  margin-top: 0;
+}
+
+.workspace-tabs > .el-tabs__content {
+  padding-top: 12px;
+}
+
+.invitation-token {
+  margin-top: 16px;
+}
+
 .page-heading {
   justify-content: space-between;
   margin-bottom: 20px;
