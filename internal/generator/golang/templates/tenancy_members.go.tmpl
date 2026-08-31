@@ -31,6 +31,9 @@ type Member struct {
 	Email          string    `json:"email"`
 	Role           string    `json:"role"`
 	JoinedAt       time.Time `json:"joined_at"`
+{{- if .TenancyLifecycle}}
+	IsOwner        bool      `json:"is_owner"`
+{{- end}}
 }
 
 // Invitation is the public invitation metadata. AcceptanceToken is returned only on creation.

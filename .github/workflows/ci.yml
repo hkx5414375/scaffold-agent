@@ -59,7 +59,7 @@ jobs:
       - name: Generate, lint, test, and build administration UI
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantMembersPostgreSQLPlanApplyVerifyEndToEnd)$' -count=1
+        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd)$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration

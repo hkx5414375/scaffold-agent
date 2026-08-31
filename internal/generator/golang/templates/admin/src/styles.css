@@ -91,6 +91,17 @@ textarea {
   padding-top: 12px;
 }
 
+.panel-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.panel-stack .el-card .el-button,
+.panel-stack .el-card .el-select {
+  margin-top: 14px;
+  margin-right: 10px;
+}
+
 .invitation-token {
   margin-top: 16px;
 }

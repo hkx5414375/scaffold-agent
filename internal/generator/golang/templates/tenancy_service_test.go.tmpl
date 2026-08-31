@@ -23,6 +23,11 @@ func TestCreateAndAuthorizeOrganization(t *testing.T) {
 	if organization.ID == "" || organization.Name != "Acme" || organization.Role != "admin" || store.membership.Role != "admin" {
 		t.Fatalf("Create() = %#v, membership = %#v", organization, store.membership)
 	}
+{{- if .TenancyLifecycle}}
+	if organization.OwnerUserID != actor.UserID || !organization.IsOwner || organization.Status != OrganizationActive || organization.UpdatedAt.IsZero() {
+		t.Fatalf("Create() lifecycle fields = %#v", organization)
+	}
+{{- end}}
 	authorized, err := service.Authorize(context.Background(), actor, organization.ID, "tasks:task:read", "", "")
 	if err != nil {
 		t.Fatalf("Authorize() error = %v", err)

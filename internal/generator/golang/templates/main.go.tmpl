@@ -72,6 +72,9 @@ func run() error {
 	{{- if .TenancyMembers}}
 	tenancyMembers := tenancy.NewMemberService(tenancyStore)
 	{{- end}}
+	{{- if .TenancyLifecycle}}
+	tenancyLifecycle := tenancy.NewLifecycleService(tenancyStore)
+	{{- end}}
 	identityAPI := httpapi.New(identityService, secureCookies, httpapi.WithAuthorizer(tenancyService))
 	tenancyAPI := tenancyhttp.New(tenancyService)
 {{- else}}
@@ -87,6 +90,9 @@ func run() error {
 		tenancyAPI.Register(mux, identityAPI)
 	{{- if .TenancyMembers}}
 		tenancyhttp.RegisterMembers(mux, identityAPI, tenancyMembers)
+	{{- end}}
+	{{- if .TenancyLifecycle}}
+		tenancyhttp.RegisterLifecycle(mux, identityAPI, tenancyLifecycle)
 	{{- end}}
 {{- end}}
 {{- if .Business}}

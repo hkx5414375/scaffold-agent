@@ -63,6 +63,22 @@ func TestMemberAdministrationPropagatesLastAdministratorError(t *testing.T) {
 	}
 }
 
+{{- if .TenancyLifecycle}}
+func TestMemberAdministrationPropagatesOwnerProtection(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryMemberStore{changeError: ErrOwnerProtected, removeError: ErrOwnerProtected}
+	service := NewMemberService(store)
+	actor := identity.Principal{UserID: "admin-1", OrganizationID: "organization-1", Role: "admin"}
+	if _, err := service.ChangeRole(context.Background(), "owner-1", "user", actor); !errors.Is(err, ErrOwnerProtected) {
+		t.Fatalf("ChangeRole(owner) error = %v, want ErrOwnerProtected", err)
+	}
+	if err := service.Remove(context.Background(), "owner-1", actor); !errors.Is(err, ErrOwnerProtected) {
+		t.Fatalf("Remove(owner) error = %v, want ErrOwnerProtected", err)
+	}
+}
+{{- end}}
+
 type memoryMemberStore struct {
 	invitation   InvitationRecord
 	member       Member

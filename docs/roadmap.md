@@ -35,7 +35,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Organization creation, discovery, membership-scoped authorization, tenant-aware administration, and cross-tenant data isolation.
 - [x] Email-bound invitations, member administration, role changes, removals, and concurrent last-administrator protection.
 - [x] Tenant-aware durable jobs, idempotent enqueue, leased workers, heartbeat, retry, and dead-letter state.
-- [ ] Organization lifecycle and ownership transfer.
+- [x] Reversible organization deactivation, reactivation, rename, ownership transfer, and owner protection.
 - [ ] Files, notifications, cache, import/export, job administration, and observability.
 - [ ] Portable approval workflows.
 

@@ -1,0 +1,109 @@
+package tenancy
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	OrganizationActive   = "active"
+	OrganizationInactive = "inactive"
+)
+
+var (
+	// ErrLifecycleForbidden hides whether an actor is not an administrator or not the owner.
+	ErrLifecycleForbidden = errors.New("organization lifecycle action is forbidden")
+	// ErrLifecycleConflict means the organization is already in the requested state.
+	ErrLifecycleConflict = errors.New("organization lifecycle state conflicts with the request")
+	// ErrOwnerProtected prevents the current owner from being demoted or removed before transfer.
+	ErrOwnerProtected = errors.New("organization owner must transfer ownership first")
+)
+
+// LifecycleStore persists organization metadata, ownership, and activation changes atomically.
+type LifecycleStore interface {
+	RenameOrganization(context.Context, string, string, string, time.Time, identity.AuditEvent) (Organization, error)
+	TransferOrganizationOwnership(context.Context, string, string, string, time.Time, identity.AuditEvent) (Organization, error)
+	SetOrganizationActive(context.Context, string, string, bool, time.Time, identity.AuditEvent) (Organization, error)
+}
+
+// LifecycleService owns organization rename, ownership transfer, and reversible deactivation rules.
+type LifecycleService struct {
+	store LifecycleStore
+	now   func() time.Time
+}
+
+// NewLifecycleService returns organization lifecycle use cases.
+func NewLifecycleService(store LifecycleStore) *LifecycleService {
+	return &LifecycleService{store: store, now: time.Now}
+}
+
+// Rename changes the organization display name. The store requires an active administrator.
+func (service *LifecycleService) Rename(ctx context.Context, organizationID, name string, actor identity.Principal) (Organization, error) {
+	organizationID, name = strings.TrimSpace(organizationID), strings.TrimSpace(name)
+	if actor.UserID == "" || organizationID == "" || name == "" || len(name) > 120 {
+		return Organization{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	audit := lifecycleAudit(actor.UserID, "tenancy.organization.rename", organizationID, now)
+	organization, err := service.store.RenameOrganization(ctx, organizationID, name, actor.UserID, now, audit)
+	if err != nil {
+		return Organization{}, fmt.Errorf("rename organization: %w", err)
+	}
+	return organization, nil
+}
+
+// TransferOwnership atomically promotes one existing member and makes it the sole owner.
+func (service *LifecycleService) TransferOwnership(ctx context.Context, organizationID, targetUserID string, actor identity.Principal) (Organization, error) {
+	organizationID, targetUserID = strings.TrimSpace(organizationID), strings.TrimSpace(targetUserID)
+	if actor.UserID == "" || organizationID == "" || targetUserID == "" || targetUserID == actor.UserID {
+		return Organization{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	audit := lifecycleAudit(actor.UserID, "tenancy.organization.ownership.transfer", organizationID+":"+targetUserID, now)
+	organization, err := service.store.TransferOrganizationOwnership(ctx, organizationID, actor.UserID, targetUserID, now, audit)
+	if err != nil {
+		return Organization{}, fmt.Errorf("transfer organization ownership: %w", err)
+	}
+	return organization, nil
+}
+
+// Deactivate blocks new tenant-authorized requests while retaining all organization data.
+func (service *LifecycleService) Deactivate(ctx context.Context, organizationID string, actor identity.Principal) (Organization, error) {
+	return service.setActive(ctx, organizationID, actor, false)
+}
+
+// Reactivate restores tenant authorization. Only the current owner can reactivate.
+func (service *LifecycleService) Reactivate(ctx context.Context, organizationID string, actor identity.Principal) (Organization, error) {
+	return service.setActive(ctx, organizationID, actor, true)
+}
+
+func (service *LifecycleService) setActive(ctx context.Context, organizationID string, actor identity.Principal, active bool) (Organization, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	if actor.UserID == "" || organizationID == "" {
+		return Organization{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	action := "tenancy.organization.deactivate"
+	if active {
+		action = "tenancy.organization.reactivate"
+	}
+	audit := lifecycleAudit(actor.UserID, action, organizationID, now)
+	organization, err := service.store.SetOrganizationActive(ctx, organizationID, actor.UserID, active, now, audit)
+	if err != nil {
+		return Organization{}, fmt.Errorf("set organization active state: %w", err)
+	}
+	return organization, nil
+}
+
+func lifecycleAudit(userID, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: userID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

@@ -131,12 +131,20 @@ func TestGoTenantMembersMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelectionV2, "0.2.0", 61, false)
 }
 
+func TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancySelectionV3, "0.3.0", 67, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantLifecycleMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelectionV3, "0.3.0", 68, false)
+}
+
 func TestGoTenantJobsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyJobsSelection, "0.2.0", 68, false)
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyJobsSelection, "0.3.0", 75, false)
 }
 
 func TestGoTenantJobsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyJobsSelection, "0.2.0", 69, false)
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyJobsSelection, "0.3.0", 76, false)
 }
 
 func TestGoJobsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
@@ -157,9 +165,14 @@ const tenancySelectionV2 = `  capabilities:
       version: 0.2.0
 `
 
+const tenancySelectionV3 = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+`
+
 const tenancyJobsSelection = `  capabilities:
     - name: organization-tenancy
-      version: 0.2.0
+      version: 0.3.0
     - name: background-jobs
       version: 0.1.0
 `

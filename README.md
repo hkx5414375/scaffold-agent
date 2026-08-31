@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Versioned capabilities now provide tenant isolation, secure member administration, and durable background workers with idempotency, leases, retries, and dead-letter state. Nuxt storefronts and broader capability packs remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, and a build-tested Vue/Element Plus administration UI. Versioned capabilities now provide tenant isolation, secure member administration, reversible organization lifecycle and ownership transfer, plus durable background workers with idempotency, leases, retries, and dead-letter state. Nuxt storefronts and broader capability packs remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 

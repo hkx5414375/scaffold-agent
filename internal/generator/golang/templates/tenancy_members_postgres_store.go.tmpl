@@ -14,9 +14,12 @@ import (
 
 func (store *Store) ListMembers(ctx context.Context, organizationID string) ([]tenancy.Member, error) {
 	rows, err := store.pool.Query(ctx, `
-		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at
+		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at{{if .TenancyLifecycle}}, organizations.owner_user_id = users.id{{end}}
 		from organization_memberships memberships
 		join identity_users users on users.id = memberships.user_id
+{{- if .TenancyLifecycle}}
+		join organizations on organizations.id = memberships.organization_id
+{{- end}}
 		where memberships.organization_id = $1
 		order by users.email, users.id`, organizationID)
 	if err != nil {
@@ -26,7 +29,7 @@ func (store *Store) ListMembers(ctx context.Context, organizationID string) ([]t
 	members := make([]tenancy.Member, 0)
 	for rows.Next() {
 		var member tenancy.Member
-		if err := rows.Scan(&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt); err != nil {
+		if err := rows.Scan(&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt{{if .TenancyLifecycle}}, &member.IsOwner{{end}}); err != nil {
 			return nil, fmt.Errorf("scan organization member: %w", err)
 		}
 		members = append(members, member)
@@ -96,6 +99,11 @@ func (store *Store) AcceptInvitation(ctx context.Context, tokenHash []byte, emai
 		return tenancy.Member{}, rollback(transaction, fmt.Errorf("select organization invitation: %w", err))
 	}
 	if err := lockOrganization(ctx, transaction, organizationID); err != nil {
+{{- if .TenancyLifecycle}}
+		if errors.Is(err, tenancy.ErrNotFound) {
+			return tenancy.Member{}, commitDenied(ctx, transaction, audit, tenancy.ErrInvitationInvalid)
+		}
+{{- end}}
 		return tenancy.Member{}, rollback(transaction, err)
 	}
 	command, err := transaction.Exec(ctx, `
@@ -140,6 +148,17 @@ func (store *Store) ChangeMemberRole(ctx context.Context, organizationID, userID
 	if err != nil {
 		return tenancy.Member{}, rollback(transaction, err)
 	}
+{{- if .TenancyLifecycle}}
+	if role != "admin" {
+		owner, err := organizationOwner(ctx, transaction, organizationID, userID)
+		if err != nil {
+			return tenancy.Member{}, rollback(transaction, err)
+		}
+		if owner {
+			return tenancy.Member{}, commitDenied(ctx, transaction, audit, tenancy.ErrOwnerProtected)
+		}
+	}
+{{- end}}
 	if member.Role == "admin" && role != "admin" {
 		if err := requireAnotherAdministrator(ctx, transaction, organizationID); err != nil {
 			if errors.Is(err, tenancy.ErrLastAdministrator) {
@@ -175,6 +194,15 @@ func (store *Store) RemoveMember(ctx context.Context, organizationID, userID str
 	if err != nil {
 		return rollback(transaction, err)
 	}
+{{- if .TenancyLifecycle}}
+	owner, err := organizationOwner(ctx, transaction, organizationID, userID)
+	if err != nil {
+		return rollback(transaction, err)
+	}
+	if owner {
+		return commitDenied(ctx, transaction, audit, tenancy.ErrOwnerProtected)
+	}
+{{- end}}
 	if member.Role == "admin" {
 		if err := requireAnotherAdministrator(ctx, transaction, organizationID); err != nil {
 			if errors.Is(err, tenancy.ErrLastAdministrator) {
@@ -198,7 +226,7 @@ func (store *Store) RemoveMember(ctx context.Context, organizationID, userID str
 
 func lockOrganization(ctx context.Context, transaction pgx.Tx, organizationID string) error {
 	var id string
-	if err := transaction.QueryRow(ctx, `select id from organizations where id = $1 for update`, organizationID).Scan(&id); err != nil {
+	if err := transaction.QueryRow(ctx, `select id from organizations where id = $1{{if .TenancyLifecycle}} and status = 'active'{{end}} for update`, organizationID).Scan(&id); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return tenancy.ErrNotFound
 		}
@@ -210,12 +238,15 @@ func lockOrganization(ctx context.Context, transaction pgx.Tx, organizationID st
 func memberForUpdate(ctx context.Context, transaction pgx.Tx, organizationID, userID string) (tenancy.Member, error) {
 	var member tenancy.Member
 	if err := transaction.QueryRow(ctx, `
-		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at
+		select memberships.organization_id, users.id, users.email, memberships.role_code, memberships.created_at{{if .TenancyLifecycle}}, organizations.owner_user_id = users.id{{end}}
 		from organization_memberships memberships
 		join identity_users users on users.id = memberships.user_id
+{{- if .TenancyLifecycle}}
+		join organizations on organizations.id = memberships.organization_id
+{{- end}}
 		where memberships.organization_id = $1 and memberships.user_id = $2
 		for update of memberships`, organizationID, userID).Scan(
-		&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt,
+		&member.OrganizationID, &member.UserID, &member.Email, &member.Role, &member.JoinedAt{{if .TenancyLifecycle}}, &member.IsOwner{{end}},
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return tenancy.Member{}, tenancy.ErrNotFound
@@ -224,6 +255,17 @@ func memberForUpdate(ctx context.Context, transaction pgx.Tx, organizationID, us
 	}
 	return member, nil
 }
+
+{{- if .TenancyLifecycle}}
+func organizationOwner(ctx context.Context, transaction pgx.Tx, organizationID, userID string) (bool, error) {
+	var owner bool
+	if err := transaction.QueryRow(ctx, `
+		select owner_user_id = $2 from organizations where id = $1`, organizationID, userID).Scan(&owner); err != nil {
+		return false, fmt.Errorf("check organization owner: %w", err)
+	}
+	return owner, nil
+}
+{{- end}}
 
 func requireAnotherAdministrator(ctx context.Context, transaction pgx.Tx, organizationID string) error {
 	var count int

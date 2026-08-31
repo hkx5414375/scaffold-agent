@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器。生成项目已包含安全认证、权限码 RBAC、事务审计、Blueprint 驱动的 CRUD、OpenAPI 3.1，以及经过真实构建验证的 Vue/Element Plus 管理端。版本化能力包现已提供租户隔离、安全成员管理，以及具备幂等、租约、重试和死信的可靠后台 Worker。Nuxt 商城和更广的能力包仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器。生成项目已包含安全认证、权限码 RBAC、事务审计、Blueprint 驱动的 CRUD、OpenAPI 3.1，以及经过真实构建验证的 Vue/Element Plus 管理端。版本化能力包现已提供租户隔离、安全成员管理、可逆组织生命周期与所有权转移，以及具备幂等、租约、重试和死信的可靠后台 Worker。Nuxt 商城和更广的能力包仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 

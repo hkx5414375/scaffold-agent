@@ -1,0 +1,94 @@
+package httpapi
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+// RegisterLifecycle adds reversible organization lifecycle and ownership routes.
+// Store-level checks are authoritative so the owner can reactivate an inactive organization.
+func RegisterLifecycle(mux *http.ServeMux, security *identityhttp.Handler, service *tenancy.LifecycleService) {
+	handler := &lifecycleHandler{service: service}
+	mux.HandleFunc("PATCH /api/v1/organizations/{organizationID}", security.Authenticated(handler.rename))
+	mux.HandleFunc("POST /api/v1/organizations/{organizationID}/ownership-transfers", security.Authenticated(handler.transferOwnership))
+	mux.HandleFunc("POST /api/v1/organizations/{organizationID}/deactivation", security.Authenticated(handler.deactivate))
+	mux.HandleFunc("POST /api/v1/organizations/{organizationID}/reactivation", security.Authenticated(handler.reactivate))
+}
+
+type lifecycleHandler struct {
+	service *tenancy.LifecycleService
+}
+
+func (handler *lifecycleHandler) rename(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	organization, err := handler.service.Rename(request.Context(), request.PathValue("organizationID"), input.Name, actor)
+	if err != nil {
+		writeLifecycleError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, organization)
+}
+
+func (handler *lifecycleHandler) transferOwnership(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input struct {
+		TargetUserID string `json:"target_user_id"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	organization, err := handler.service.TransferOwnership(
+		request.Context(), request.PathValue("organizationID"), input.TargetUserID, actor,
+	)
+	if err != nil {
+		writeLifecycleError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, organization)
+}
+
+func (handler *lifecycleHandler) deactivate(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	organization, err := handler.service.Deactivate(request.Context(), request.PathValue("organizationID"), actor)
+	if err != nil {
+		writeLifecycleError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, organization)
+}
+
+func (handler *lifecycleHandler) reactivate(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	organization, err := handler.service.Reactivate(request.Context(), request.PathValue("organizationID"), actor)
+	if err != nil {
+		writeLifecycleError(response, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, organization)
+}
+
+func writeLifecycleError(response http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, tenancy.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "tenancy.organization.invalid", "organization input is invalid")
+	case errors.Is(err, tenancy.ErrLifecycleForbidden):
+		httpjson.WriteError(response, http.StatusForbidden, "tenancy.organization.forbidden", "organization lifecycle action is forbidden")
+	case errors.Is(err, tenancy.ErrLifecycleConflict):
+		httpjson.WriteError(response, http.StatusConflict, "tenancy.organization.state_conflict", "organization is already in the requested state")
+	case errors.Is(err, tenancy.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "tenancy.organization.not_found", "organization was not found")
+	default:
+		slog.Error("organization lifecycle request", "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

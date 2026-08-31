@@ -1,0 +1,167 @@
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"{{.ModulePath}}/internal/identity"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+func (store *Store) RenameOrganization(ctx context.Context, organizationID, name, actorID string, now time.Time, audit identity.AuditEvent) (tenancy.Organization, error) {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return tenancy.Organization{}, fmt.Errorf("begin organization rename: %w", err)
+	}
+	organization, err := lifecycleOrganizationForUpdate(ctx, transaction, organizationID, actorID)
+	if err != nil {
+		return tenancy.Organization{}, lifecycleFailure(ctx, transaction, audit, err)
+	}
+	if organization.Status != tenancy.OrganizationActive {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleConflict)
+	}
+	if organization.Role != "admin" {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleForbidden)
+	}
+	if _, err := transaction.Exec(ctx, `update organizations set name = $1, updated_at = $2 where id = $3`, name, now, organizationID); err != nil {
+		return tenancy.Organization{}, rollback(transaction, fmt.Errorf("update organization name: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return tenancy.Organization{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return tenancy.Organization{}, fmt.Errorf("commit organization rename: %w", err)
+	}
+	organization.Name, organization.UpdatedAt = name, now
+	return organization, nil
+}
+
+func (store *Store) TransferOrganizationOwnership(ctx context.Context, organizationID, actorID, targetUserID string, now time.Time, audit identity.AuditEvent) (tenancy.Organization, error) {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return tenancy.Organization{}, fmt.Errorf("begin organization ownership transfer: %w", err)
+	}
+	organization, err := lifecycleOrganizationForUpdate(ctx, transaction, organizationID, actorID)
+	if err != nil {
+		return tenancy.Organization{}, lifecycleFailure(ctx, transaction, audit, err)
+	}
+	if organization.Status != tenancy.OrganizationActive {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleConflict)
+	}
+	if !organization.IsOwner {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleForbidden)
+	}
+	var targetRole string
+	if err := transaction.QueryRow(ctx, `
+		select role_code from organization_memberships
+		where organization_id = $1 and user_id = $2 for update`, organizationID, targetUserID).Scan(&targetRole); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return tenancy.Organization{}, rollback(transaction, fmt.Errorf("lock target organization owner: %w", err))
+		}
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrNotFound)
+	}
+	if targetRole != "admin" {
+		if _, err := transaction.Exec(ctx, `
+			update organization_memberships set role_code = 'admin'
+			where organization_id = $1 and user_id = $2`, organizationID, targetUserID); err != nil {
+			return tenancy.Organization{}, rollback(transaction, fmt.Errorf("promote organization owner: %w", err))
+		}
+	}
+	if _, err := transaction.Exec(ctx, `
+		update organizations set owner_user_id = $1, updated_at = $2 where id = $3`, targetUserID, now, organizationID); err != nil {
+		return tenancy.Organization{}, rollback(transaction, fmt.Errorf("update organization owner: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return tenancy.Organization{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return tenancy.Organization{}, fmt.Errorf("commit organization ownership transfer: %w", err)
+	}
+	organization.OwnerUserID, organization.IsOwner, organization.UpdatedAt = targetUserID, false, now
+	return organization, nil
+}
+
+func (store *Store) SetOrganizationActive(ctx context.Context, organizationID, actorID string, active bool, now time.Time, audit identity.AuditEvent) (tenancy.Organization, error) {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return tenancy.Organization{}, fmt.Errorf("begin organization state change: %w", err)
+	}
+	organization, err := lifecycleOrganizationForUpdate(ctx, transaction, organizationID, actorID)
+	if err != nil {
+		return tenancy.Organization{}, lifecycleFailure(ctx, transaction, audit, err)
+	}
+	if !organization.IsOwner {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleForbidden)
+	}
+	wantStatus := tenancy.OrganizationInactive
+	var deactivatedAt *time.Time
+	if active {
+		wantStatus = tenancy.OrganizationActive
+	} else {
+		deactivatedAt = &now
+	}
+	if organization.Status == wantStatus {
+		return tenancy.Organization{}, commitLifecycleDenied(ctx, transaction, audit, tenancy.ErrLifecycleConflict)
+	}
+	if _, err := transaction.Exec(ctx, `
+		update organizations set status = $1, deactivated_at = $2, updated_at = $3 where id = $4`,
+		wantStatus, deactivatedAt, now, organizationID); err != nil {
+		return tenancy.Organization{}, rollback(transaction, fmt.Errorf("update organization state: %w", err))
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return tenancy.Organization{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return tenancy.Organization{}, fmt.Errorf("commit organization state change: %w", err)
+	}
+	organization.Status, organization.DeactivatedAt, organization.UpdatedAt = wantStatus, deactivatedAt, now
+	return organization, nil
+}
+
+func lifecycleOrganizationForUpdate(ctx context.Context, transaction pgx.Tx, organizationID, actorID string) (tenancy.Organization, error) {
+	var organization tenancy.Organization
+	if err := transaction.QueryRow(ctx, `
+		select organizations.id, organizations.name, organizations.owner_user_id,
+			organizations.status, organizations.deactivated_at, organizations.created_at,
+			organizations.updated_at, memberships.role_code
+		from organizations
+		join organization_memberships memberships
+			on memberships.organization_id = organizations.id and memberships.user_id = $2
+		where organizations.id = $1
+		for update of organizations`, organizationID, actorID).Scan(
+		&organization.ID, &organization.Name, &organization.OwnerUserID,
+		&organization.Status, &organization.DeactivatedAt, &organization.CreatedAt,
+		&organization.UpdatedAt, &organization.Role,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tenancy.Organization{}, tenancy.ErrNotFound
+		}
+		return tenancy.Organization{}, fmt.Errorf("lock organization lifecycle: %w", err)
+	}
+	organization.IsOwner = organization.OwnerUserID == actorID
+	return organization, nil
+}
+
+func lifecycleFailure(ctx context.Context, transaction pgx.Tx, audit identity.AuditEvent, err error) error {
+	if errors.Is(err, tenancy.ErrNotFound) {
+		return commitLifecycleDenied(ctx, transaction, audit, err)
+	}
+	return rollback(transaction, err)
+}
+
+func commitLifecycleDenied(ctx context.Context, transaction pgx.Tx, audit identity.AuditEvent, denial error) error {
+	audit.Outcome = "denied"
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return rollback(transaction, errors.Join(denial, err))
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return errors.Join(denial, fmt.Errorf("commit denied organization lifecycle mutation: %w", err))
+	}
+	return denial
+}
+
+var _ tenancy.LifecycleStore = (*Store)(nil)

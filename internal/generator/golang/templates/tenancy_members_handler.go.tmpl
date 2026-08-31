@@ -129,6 +129,10 @@ func writeMemberError(response http.ResponseWriter, err error) {
 		httpjson.WriteError(response, http.StatusConflict, "tenancy.member.conflict", "member or active invitation already exists")
 	case errors.Is(err, tenancy.ErrLastAdministrator):
 		httpjson.WriteError(response, http.StatusConflict, "tenancy.last_administrator", "organization must retain an administrator")
+{{- if .TenancyLifecycle}}
+	case errors.Is(err, tenancy.ErrOwnerProtected):
+		httpjson.WriteError(response, http.StatusConflict, "tenancy.owner_protected", "transfer ownership before changing or removing the owner")
+{{- end}}
 	case errors.Is(err, tenancy.ErrNotFound):
 		httpjson.WriteError(response, http.StatusNotFound, "tenancy.member.not_found", "organization member was not found")
 	default:

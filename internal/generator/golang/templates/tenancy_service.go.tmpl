@@ -25,6 +25,13 @@ type Organization struct {
 	Name      string    `json:"name"`
 	Role      string    `json:"role,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+{{- if .TenancyLifecycle}}
+	OwnerUserID  string     `json:"owner_user_id"`
+	IsOwner     bool       `json:"is_owner"`
+	Status      string     `json:"status"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	DeactivatedAt *time.Time `json:"deactivated_at,omitempty"`
+{{- end}}
 }
 
 // Membership grants one identity role inside an organization.
@@ -62,7 +69,7 @@ func (service *Service) Create(ctx context.Context, name string, actor identity.
 		return Organization{}, ErrInvalidInput
 	}
 	now := service.now().UTC()
-	organization := Organization{ID: rand.Text(), Name: name, Role: "admin", CreatedAt: now}
+	organization := Organization{ID: rand.Text(), Name: name, Role: "admin", CreatedAt: now{{if .TenancyLifecycle}}, OwnerUserID: actor.UserID, IsOwner: true, Status: OrganizationActive, UpdatedAt: now{{end}}}
 	membership := Membership{
 		OrganizationID: organization.ID, UserID: actor.UserID,
 		Role: "admin", CreatedAt: now,

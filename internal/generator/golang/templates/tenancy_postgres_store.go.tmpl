@@ -32,8 +32,8 @@ func (store *Store) CreateOrganization(ctx context.Context, organization tenancy
 		return fmt.Errorf("begin organization creation: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
-		insert into organizations (id, name, created_by, created_at, updated_at)
-		values ($1, $2, $3, $4, $4)`, organization.ID, organization.Name, membership.UserID, organization.CreatedAt); err != nil {
+		insert into organizations (id, name, created_by, created_at, updated_at{{if .TenancyLifecycle}}, owner_user_id, status{{end}})
+		values ($1, $2, $3, $4, $4{{if .TenancyLifecycle}}, $3, 'active'{{end}})`, organization.ID, organization.Name, membership.UserID, organization.CreatedAt); err != nil {
 		return rollback(transaction, fmt.Errorf("insert organization: %w", err))
 	}
 	if _, err := transaction.Exec(ctx, `
@@ -52,7 +52,9 @@ func (store *Store) CreateOrganization(ctx context.Context, organization tenancy
 
 func (store *Store) ListOrganizations(ctx context.Context, userID string) ([]tenancy.Organization, error) {
 	rows, err := store.pool.Query(ctx, `
-		select organizations.id, organizations.name, memberships.role_code, organizations.created_at
+		select organizations.id, organizations.name, memberships.role_code, organizations.created_at{{if .TenancyLifecycle}},
+			organizations.owner_user_id, organizations.owner_user_id = memberships.user_id,
+			organizations.status, organizations.updated_at, organizations.deactivated_at{{end}}
 		from organization_memberships memberships
 		join organizations on organizations.id = memberships.organization_id
 		where memberships.user_id = $1
@@ -64,7 +66,9 @@ func (store *Store) ListOrganizations(ctx context.Context, userID string) ([]ten
 	organizations := make([]tenancy.Organization, 0)
 	for rows.Next() {
 		var organization tenancy.Organization
-		if err := rows.Scan(&organization.ID, &organization.Name, &organization.Role, &organization.CreatedAt); err != nil {
+		if err := rows.Scan(&organization.ID, &organization.Name, &organization.Role, &organization.CreatedAt{{if .TenancyLifecycle}},
+			&organization.OwnerUserID, &organization.IsOwner, &organization.Status,
+			&organization.UpdatedAt, &organization.DeactivatedAt{{end}}); err != nil {
 			return nil, fmt.Errorf("scan organization: %w", err)
 		}
 		organizations = append(organizations, organization)
@@ -78,8 +82,11 @@ func (store *Store) ListOrganizations(ctx context.Context, userID string) ([]ten
 func (store *Store) MembershipRole(ctx context.Context, organizationID, userID string) (string, error) {
 	var role string
 	if err := store.pool.QueryRow(ctx, `
-		select role_code from organization_memberships
-		where organization_id = $1 and user_id = $2`, organizationID, userID).Scan(&role); err != nil {
+		select memberships.role_code from organization_memberships memberships
+{{- if .TenancyLifecycle}}
+		join organizations on organizations.id = memberships.organization_id and organizations.status = 'active'
+{{- end}}
+		where memberships.organization_id = $1 and memberships.user_id = $2`, organizationID, userID).Scan(&role); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", tenancy.ErrNotFound
 		}

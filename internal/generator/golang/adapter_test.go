@@ -300,6 +300,80 @@ func TestOrganizationMemberUpgradePreservesBaseMigration(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationLifecycleCapabilityVersion(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyLifecycleVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[tenancyCapability] != tenancyLifecycleVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"internal/tenancy/lifecycle.go":                                          false,
+		"internal/tenancy/httpapi/lifecycle_handler.go":                          false,
+		"internal/tenancy/postgres/lifecycle.go":                                 false,
+		"internal/platform/migrate/migrations/000070_organization_lifecycle.sql": false,
+		"web/admin/src/views/OrganizationSettingsView.vue":                       false,
+	}
+	var openAPI string
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+		if output.Path == "api/openapi.yaml" {
+			openAPI = string(output.Content)
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+	if !strings.Contains(openAPI, "/api/v1/organizations/{organizationID}/ownership-transfers:") ||
+		!strings.Contains(openAPI, "deactivateOrganization") ||
+		!strings.Contains(openAPI, "is_owner") {
+		t.Fatal("Generate() did not expose the organization lifecycle contract")
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
+		t.Fatalf("generated lifecycle OpenAPI is invalid YAML: %v", err)
+	}
+}
+
+func TestOrganizationLifecycleUpgradePreservesEarlierMigrations(t *testing.T) {
+	t.Parallel()
+
+	versionTwo := businessProject()
+	versionTwo.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyMembersVersion}}
+	versionThree := businessProject()
+	versionThree.Spec.Capabilities = []spec.CapabilitySelection{{Name: tenancyCapability, Version: tenancyLifecycleVersion}}
+	second, err := New().Generate(context.Background(), versionTwo)
+	if err != nil {
+		t.Fatalf("Generate(0.2.0) error = %v", err)
+	}
+	third, err := New().Generate(context.Background(), versionThree)
+	if err != nil {
+		t.Fatalf("Generate(0.3.0) error = %v", err)
+	}
+	for _, path := range []string{
+		"internal/platform/migrate/migrations/000050_organization_tenancy.sql",
+		"internal/platform/migrate/migrations/000060_organization_members.sql",
+	} {
+		if !bytes.Equal(outputContent(second, path), outputContent(third, path)) {
+			t.Fatalf("organization-tenancy 0.3.0 rewrites already-applied migration %s", path)
+		}
+	}
+	const lifecycleMigration = "internal/platform/migrate/migrations/000070_organization_lifecycle.sql"
+	if outputContent(second, lifecycleMigration) != nil || outputContent(third, lifecycleMigration) == nil {
+		t.Fatal("organization lifecycle migration is not isolated to 0.3.0")
+	}
+}
+
 func TestGenerateBackgroundJobsCapability(t *testing.T) {
 	t.Parallel()
 

@@ -49,6 +49,13 @@ and a member administration view. The raw invitation token is returned once for
 delivery; agents must not search the database for it because only its digest is
 stored.
 
+Version `0.3.0` adds an explicit owner, organization rename, atomic ownership
+transfer, reversible deactivation, and reactivation. Transfer only targets an
+existing member and promotes that identity to administrator. Agents must not add
+a destructive organization-delete shortcut or bypass owner protection. An
+inactive organization remains visible to its members but cannot authorize tenant
+business requests.
+
 Project capability selections pin exact versions. Transitive dependencies may use
 semantic-version ranges; the Engine deterministically selects the highest release
 that satisfies the complete graph and records every exact result in the capability

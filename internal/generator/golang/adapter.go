@@ -18,18 +18,19 @@ import (
 )
 
 const (
-	backend               = "go"
-	baseCapability        = "go-service"
-	baseVersion           = "0.3.0"
-	businessCapability    = "go-crud"
-	businessVersion       = "0.3.0"
-	adminCapability       = "vue-admin"
-	adminVersion          = "0.1.0"
-	tenancyCapability     = "organization-tenancy"
-	tenancyVersion        = "0.1.0"
-	tenancyMembersVersion = "0.2.0"
-	jobsCapability        = "background-jobs"
-	jobsVersion           = "0.1.0"
+	backend                 = "go"
+	baseCapability          = "go-service"
+	baseVersion             = "0.3.0"
+	businessCapability      = "go-crud"
+	businessVersion         = "0.3.0"
+	adminCapability         = "vue-admin"
+	adminVersion            = "0.1.0"
+	tenancyCapability       = "organization-tenancy"
+	tenancyVersion          = "0.1.0"
+	tenancyMembersVersion   = "0.2.0"
+	tenancyLifecycleVersion = "0.3.0"
+	jobsCapability          = "background-jobs"
+	jobsVersion             = "0.1.0"
 )
 
 //go:embed all:templates
@@ -62,22 +63,25 @@ var businessTemplates = []struct {
 }
 
 type databaseTemplateSet struct {
-	Data                            databaseData
-	Outputs                         map[string]string
-	BusinessStorePath               string
-	BusinessStoreTemplate           string
-	BusinessMigrationTemplate       string
-	IntegrationPath                 string
-	IntegrationTemplate             string
-	TenancyStorePath                string
-	TenancyStoreTemplate            string
-	TenancyMigrationTemplate        string
-	TenancyMembersStorePath         string
-	TenancyMembersStoreTemplate     string
-	TenancyMembersMigrationTemplate string
-	JobsStorePath                   string
-	JobsStoreTemplate               string
-	JobsMigrationTemplate           string
+	Data                              databaseData
+	Outputs                           map[string]string
+	BusinessStorePath                 string
+	BusinessStoreTemplate             string
+	BusinessMigrationTemplate         string
+	IntegrationPath                   string
+	IntegrationTemplate               string
+	TenancyStorePath                  string
+	TenancyStoreTemplate              string
+	TenancyMigrationTemplate          string
+	TenancyMembersStorePath           string
+	TenancyMembersStoreTemplate       string
+	TenancyMembersMigrationTemplate   string
+	TenancyLifecycleStorePath         string
+	TenancyLifecycleStoreTemplate     string
+	TenancyLifecycleMigrationTemplate string
+	JobsStorePath                     string
+	JobsStoreTemplate                 string
+	JobsMigrationTemplate             string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -91,20 +95,23 @@ var databaseTemplates = map[string]databaseTemplateSet{
 			"internal/platform/migrate/migrations/000001_identity.sql": "templates/000001_identity.sql.tmpl",
 			"internal/platform/postgres/pool.go":                       "templates/postgres_pool.go.tmpl",
 		},
-		BusinessStorePath:               "postgres/store.go",
-		BusinessStoreTemplate:           "templates/business_postgres_store.go.tmpl",
-		BusinessMigrationTemplate:       "templates/business.sql.tmpl",
-		IntegrationPath:                 "internal/integration/postgres_test.go",
-		IntegrationTemplate:             "templates/postgres_integration_test.go.tmpl",
-		TenancyStorePath:                "internal/tenancy/postgres/store.go",
-		TenancyStoreTemplate:            "templates/tenancy_postgres_store.go.tmpl",
-		TenancyMigrationTemplate:        "templates/tenancy_postgres.sql.tmpl",
-		TenancyMembersStorePath:         "internal/tenancy/postgres/members.go",
-		TenancyMembersStoreTemplate:     "templates/tenancy_members_postgres_store.go.tmpl",
-		TenancyMembersMigrationTemplate: "templates/tenancy_members_postgres.sql.tmpl",
-		JobsStorePath:                   "internal/jobs/postgres/store.go",
-		JobsStoreTemplate:               "templates/jobs_postgres_store.go.tmpl",
-		JobsMigrationTemplate:           "templates/jobs_postgres.sql.tmpl",
+		BusinessStorePath:                 "postgres/store.go",
+		BusinessStoreTemplate:             "templates/business_postgres_store.go.tmpl",
+		BusinessMigrationTemplate:         "templates/business.sql.tmpl",
+		IntegrationPath:                   "internal/integration/postgres_test.go",
+		IntegrationTemplate:               "templates/postgres_integration_test.go.tmpl",
+		TenancyStorePath:                  "internal/tenancy/postgres/store.go",
+		TenancyStoreTemplate:              "templates/tenancy_postgres_store.go.tmpl",
+		TenancyMigrationTemplate:          "templates/tenancy_postgres.sql.tmpl",
+		TenancyMembersStorePath:           "internal/tenancy/postgres/members.go",
+		TenancyMembersStoreTemplate:       "templates/tenancy_members_postgres_store.go.tmpl",
+		TenancyMembersMigrationTemplate:   "templates/tenancy_members_postgres.sql.tmpl",
+		TenancyLifecycleStorePath:         "internal/tenancy/postgres/lifecycle.go",
+		TenancyLifecycleStoreTemplate:     "templates/tenancy_lifecycle_postgres_store.go.tmpl",
+		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_postgres.sql.tmpl",
+		JobsStorePath:                     "internal/jobs/postgres/store.go",
+		JobsStoreTemplate:                 "templates/jobs_postgres_store.go.tmpl",
+		JobsMigrationTemplate:             "templates/jobs_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -117,20 +124,23 @@ var databaseTemplates = map[string]databaseTemplateSet{
 			"internal/platform/migrate/migrations/000001_identity.sql": "templates/mysql_000001_identity.sql.tmpl",
 			"internal/platform/mysql/pool.go":                          "templates/mysql_pool.go.tmpl",
 		},
-		BusinessStorePath:               "mysql/store.go",
-		BusinessStoreTemplate:           "templates/business_mysql_store.go.tmpl",
-		BusinessMigrationTemplate:       "templates/mysql_business.sql.tmpl",
-		IntegrationPath:                 "internal/integration/mysql_test.go",
-		IntegrationTemplate:             "templates/mysql_integration_test.go.tmpl",
-		TenancyStorePath:                "internal/tenancy/mysql/store.go",
-		TenancyStoreTemplate:            "templates/tenancy_mysql_store.go.tmpl",
-		TenancyMigrationTemplate:        "templates/tenancy_mysql.sql.tmpl",
-		TenancyMembersStorePath:         "internal/tenancy/mysql/members.go",
-		TenancyMembersStoreTemplate:     "templates/tenancy_members_mysql_store.go.tmpl",
-		TenancyMembersMigrationTemplate: "templates/tenancy_members_mysql.sql.tmpl",
-		JobsStorePath:                   "internal/jobs/mysql/store.go",
-		JobsStoreTemplate:               "templates/jobs_mysql_store.go.tmpl",
-		JobsMigrationTemplate:           "templates/jobs_mysql.sql.tmpl",
+		BusinessStorePath:                 "mysql/store.go",
+		BusinessStoreTemplate:             "templates/business_mysql_store.go.tmpl",
+		BusinessMigrationTemplate:         "templates/mysql_business.sql.tmpl",
+		IntegrationPath:                   "internal/integration/mysql_test.go",
+		IntegrationTemplate:               "templates/mysql_integration_test.go.tmpl",
+		TenancyStorePath:                  "internal/tenancy/mysql/store.go",
+		TenancyStoreTemplate:              "templates/tenancy_mysql_store.go.tmpl",
+		TenancyMigrationTemplate:          "templates/tenancy_mysql.sql.tmpl",
+		TenancyMembersStorePath:           "internal/tenancy/mysql/members.go",
+		TenancyMembersStoreTemplate:       "templates/tenancy_members_mysql_store.go.tmpl",
+		TenancyMembersMigrationTemplate:   "templates/tenancy_members_mysql.sql.tmpl",
+		TenancyLifecycleStorePath:         "internal/tenancy/mysql/lifecycle.go",
+		TenancyLifecycleStoreTemplate:     "templates/tenancy_lifecycle_mysql_store.go.tmpl",
+		TenancyLifecycleMigrationTemplate: "templates/tenancy_lifecycle_mysql.sql.tmpl",
+		JobsStorePath:                     "internal/jobs/mysql/store.go",
+		JobsStoreTemplate:                 "templates/jobs_mysql_store.go.tmpl",
+		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
 	},
 }
 
@@ -141,6 +151,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyCapability, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization membership and tenant-scoped authorization",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization ownership, lifecycle, invitations, and tenant-scoped authorization",
 			Backends:    []string{"go"},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -179,6 +199,13 @@ var tenancyMembersTemplates = map[string]string{
 	"internal/tenancy/members_test.go":                 "templates/tenancy_members_test.go.tmpl",
 	"internal/tenancy/httpapi/members_handler.go":      "templates/tenancy_members_handler.go.tmpl",
 	"internal/tenancy/httpapi/members_handler_test.go": "templates/tenancy_members_handler_test.go.tmpl",
+}
+
+var tenancyLifecycleTemplates = map[string]string{
+	"internal/tenancy/lifecycle.go":                      "templates/tenancy_lifecycle.go.tmpl",
+	"internal/tenancy/lifecycle_test.go":                 "templates/tenancy_lifecycle_test.go.tmpl",
+	"internal/tenancy/httpapi/lifecycle_handler.go":      "templates/tenancy_lifecycle_handler.go.tmpl",
+	"internal/tenancy/httpapi/lifecycle_handler_test.go": "templates/tenancy_lifecycle_handler_test.go.tmpl",
 }
 
 var jobsTemplates = map[string]string{
@@ -253,6 +280,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
+	tenancyLifecycleEnabled := false
 	jobsEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
@@ -262,7 +290,8 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyCapability {
 			tenancyEnabled = true
-			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
+			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion || pack.Metadata.Version == tenancyLifecycleVersion
+			tenancyLifecycleEnabled = pack.Metadata.Version == tenancyLifecycleVersion
 		}
 		if pack.Metadata.Name == jobsCapability {
 			jobsEnabled = true
@@ -273,14 +302,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		return generator.Result{}, err
 	}
 	data := templateData{
-		ProjectName:    project.Metadata.Name,
-		ModulePath:     "example.com/" + project.Metadata.Name,
-		Database:       database.Data,
-		Business:       business,
-		Admin:          adminEnabled,
-		Tenancy:        tenancyEnabled,
-		TenancyMembers: tenancyMembersEnabled,
-		Jobs:           jobsEnabled,
+		ProjectName:      project.Metadata.Name,
+		ModulePath:       "example.com/" + project.Metadata.Name,
+		Database:         database.Data,
+		Business:         business,
+		Admin:            adminEnabled,
+		Tenancy:          tenancyEnabled,
+		TenancyMembers:   tenancyMembersEnabled,
+		TenancyLifecycle: tenancyLifecycleEnabled,
+		Jobs:             jobsEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -338,6 +368,22 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if adminEnabled {
 			targets["web/admin/src/views/MembersView.vue"] = renderTarget{
 				TemplatePath: "templates/admin/src/views/MembersView.vue",
+				Owner:        tenancyCapability,
+			}
+		}
+	}
+	if tenancyLifecycleEnabled {
+		for path, templatePath := range tenancyLifecycleTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: tenancyCapability}
+		}
+		targets[database.TenancyLifecycleStorePath] = renderTarget{TemplatePath: database.TenancyLifecycleStoreTemplate, Owner: tenancyCapability}
+		targets["internal/platform/migrate/migrations/000070_organization_lifecycle.sql"] = renderTarget{
+			TemplatePath: database.TenancyLifecycleMigrationTemplate,
+			Owner:        tenancyCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/OrganizationSettingsView.vue"] = renderTarget{
+				TemplatePath: "templates/admin/src/views/OrganizationSettingsView.vue",
 				Owner:        tenancyCapability,
 			}
 		}
@@ -403,14 +449,15 @@ func hasExactAuthModes(actual []string, expected ...string) bool {
 }
 
 type templateData struct {
-	ProjectName    string
-	ModulePath     string
-	Database       databaseData
-	Business       *businessData
-	Admin          bool
-	Tenancy        bool
-	TenancyMembers bool
-	Jobs           bool
+	ProjectName      string
+	ModulePath       string
+	Database         databaseData
+	Business         *businessData
+	Admin            bool
+	Tenancy          bool
+	TenancyMembers   bool
+	TenancyLifecycle bool
+	Jobs             bool
 }
 
 type databaseData struct {

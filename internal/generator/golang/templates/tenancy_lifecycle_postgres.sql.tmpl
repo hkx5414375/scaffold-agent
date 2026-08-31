@@ -1,0 +1,12 @@
+alter table organizations add column owner_user_id text;
+update organizations set owner_user_id = created_by;
+alter table organizations alter column owner_user_id set not null;
+alter table organizations add constraint organizations_owner_fk foreign key (owner_user_id) references identity_users (id);
+alter table organizations add column status text not null default 'active';
+alter table organizations add column deactivated_at timestamptz;
+alter table organizations add constraint organizations_lifecycle_check check (
+    (status = 'active' and deactivated_at is null)
+    or (status = 'inactive' and deactivated_at is not null)
+);
+
+create index organizations_owner_idx on organizations (owner_user_id, id);

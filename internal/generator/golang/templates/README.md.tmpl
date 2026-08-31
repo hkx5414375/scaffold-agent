@@ -9,6 +9,11 @@ pagination, optimistic locking, transactional audit events, and explicit RBAC.
 {{if .Tenancy}}
 It also contains the `organization-tenancy` capability. Protected business data
 is scoped by organization membership and the `X-Organization-ID` request header.
+{{if .TenancyLifecycle}}
+Organization version `0.3.0` adds an explicit owner, atomic ownership transfer,
+and reversible deactivation. Inactive organizations retain data but cannot
+authorize tenant business requests.
+{{end}}
 {{end}}
 {{if .Jobs}}
 It also contains the `background-jobs` capability with idempotent enqueue,

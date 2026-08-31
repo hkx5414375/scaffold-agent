@@ -1,0 +1,77 @@
+package tenancy
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestLifecycleServiceDelegatesValidatedMutations(t *testing.T) {
+	t.Parallel()
+
+	store := &lifecycleStore{}
+	service := NewLifecycleService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "owner"}
+
+	renamed, err := service.Rename(context.Background(), "organization", " Renamed ", actor)
+	if err != nil || renamed.Name != "Renamed" || store.action != "rename" {
+		t.Fatalf("Rename() = %#v, %v; action = %q", renamed, err, store.action)
+	}
+	transferred, err := service.TransferOwnership(context.Background(), "organization", "member", actor)
+	if err != nil || transferred.OwnerUserID != "member" || store.action != "transfer" {
+		t.Fatalf("TransferOwnership() = %#v, %v; action = %q", transferred, err, store.action)
+	}
+	deactivated, err := service.Deactivate(context.Background(), "organization", actor)
+	if err != nil || deactivated.Status != OrganizationInactive || store.action != "deactivate" {
+		t.Fatalf("Deactivate() = %#v, %v; action = %q", deactivated, err, store.action)
+	}
+	reactivated, err := service.Reactivate(context.Background(), "organization", actor)
+	if err != nil || reactivated.Status != OrganizationActive || store.action != "reactivate" {
+		t.Fatalf("Reactivate() = %#v, %v; action = %q", reactivated, err, store.action)
+	}
+}
+
+func TestLifecycleServiceRejectsInvalidRequests(t *testing.T) {
+	t.Parallel()
+
+	service := NewLifecycleService(&lifecycleStore{})
+	actor := identity.Principal{UserID: "owner"}
+	if _, err := service.Rename(context.Background(), "", "name", actor); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Rename() error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.TransferOwnership(context.Background(), "organization", "owner", actor); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("TransferOwnership(self) error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.Deactivate(context.Background(), "organization", identity.Principal{}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Deactivate() error = %v, want ErrInvalidInput", err)
+	}
+}
+
+type lifecycleStore struct {
+	action string
+}
+
+func (store *lifecycleStore) RenameOrganization(_ context.Context, organizationID, name, actorID string, now time.Time, _ identity.AuditEvent) (Organization, error) {
+	store.action = "rename"
+	return Organization{ID: organizationID, Name: name, OwnerUserID: actorID, IsOwner: true, Status: OrganizationActive, UpdatedAt: now}, nil
+}
+
+func (store *lifecycleStore) TransferOrganizationOwnership(_ context.Context, organizationID, _, targetUserID string, now time.Time, _ identity.AuditEvent) (Organization, error) {
+	store.action = "transfer"
+	return Organization{ID: organizationID, OwnerUserID: targetUserID, Status: OrganizationActive, UpdatedAt: now}, nil
+}
+
+func (store *lifecycleStore) SetOrganizationActive(_ context.Context, organizationID, actorID string, active bool, now time.Time, _ identity.AuditEvent) (Organization, error) {
+	store.action = "deactivate"
+	status := OrganizationInactive
+	if active {
+		store.action, status = "reactivate", OrganizationActive
+	}
+	return Organization{ID: organizationID, OwnerUserID: actorID, IsOwner: true, Status: status, UpdatedAt: now}, nil
+}
+
+var _ LifecycleStore = (*lifecycleStore)(nil)

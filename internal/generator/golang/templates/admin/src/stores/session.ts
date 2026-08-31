@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+{{if .Tenancy}}import { computed, ref } from "vue";{{else}}import { ref } from "vue";{{end}}
 
 import { ApiError, request } from "../api/client";
 {{if .TenancyMembers}}import type {
@@ -17,6 +17,9 @@ export const useSessionStore = defineStore("session", () => {
 {{- if .Tenancy}}
   const organizations = ref<Organization[]>([]);
   const currentOrganizationId = ref("");
+  const currentOrganization = computed(
+    () => organizations.value.find((item) => item.id === currentOrganizationId.value) ?? null,
+  );
 {{- end}}
 
   async function load(): Promise<void> {
@@ -97,11 +100,13 @@ export const useSessionStore = defineStore("session", () => {
     initialized,
     organizations,
     currentOrganizationId,
+    currentOrganization,
     load,
     login,
     logout,
     selectOrganization,
     createOrganization,
+    loadOrganizations,
 {{- if .TenancyMembers}}
     acceptInvitation,
 {{- end}}

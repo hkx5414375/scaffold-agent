@@ -149,6 +149,116 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "500":
           $ref: "#/components/responses/ErrorResponse"
+{{if .TenancyLifecycle}}
+  /api/v1/organizations/{organizationID}:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+    patch:
+      operationId: renameOrganization
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationWrite"
+      responses:
+        "200":
+          description: Renamed organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organizations/{organizationID}/ownership-transfers:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+    post:
+      operationId: transferOrganizationOwnership
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationOwnershipTransfer"
+      responses:
+        "200":
+          description: Organization ownership transferred to an existing member
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organizations/{organizationID}/deactivation:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+    post:
+      operationId: deactivateOrganization
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Organization deactivated without deleting its data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/organizations/{organizationID}/reactivation:
+    parameters:
+      - $ref: "#/components/parameters/OrganizationPathId"
+    post:
+      operationId: reactivateOrganization
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Organization reactivated by its owner
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{end}}
 {{if .TenancyMembers}}
   /api/v1/organizations/{organizationID}/members:
     parameters:
@@ -538,7 +648,7 @@ components:
 {{if .Tenancy}}
     Organization:
       type: object
-      required: [id, name, role, created_at]
+      required: [id, name, role, created_at{{if .TenancyLifecycle}}, owner_user_id, is_owner, status, updated_at{{end}}]
       properties:
         id:
           type: string
@@ -551,6 +661,21 @@ components:
         created_at:
           type: string
           format: date-time
+{{if .TenancyLifecycle}}
+        owner_user_id:
+          type: string
+        is_owner:
+          type: boolean
+        status:
+          type: string
+          enum: [active, inactive]
+        updated_at:
+          type: string
+          format: date-time
+        deactivated_at:
+          type: string
+          format: date-time
+{{end}}
     OrganizationWrite:
       type: object
       additionalProperties: false
@@ -571,7 +696,7 @@ components:
 {{if .TenancyMembers}}
     OrganizationMember:
       type: object
-      required: [organization_id, user_id, email, role, joined_at]
+      required: [organization_id, user_id, email, role, joined_at{{if .TenancyLifecycle}}, is_owner{{end}}]
       properties:
         organization_id:
           type: string
@@ -586,6 +711,10 @@ components:
         joined_at:
           type: string
           format: date-time
+{{if .TenancyLifecycle}}
+        is_owner:
+          type: boolean
+{{end}}
     OrganizationMemberPage:
       type: object
       required: [items]
@@ -643,6 +772,16 @@ components:
         token:
           type: string
           minLength: 1
+{{if .TenancyLifecycle}}
+    OrganizationOwnershipTransfer:
+      type: object
+      additionalProperties: false
+      required: [target_user_id]
+      properties:
+        target_user_id:
+          type: string
+          minLength: 1
+{{end}}
 {{end}}
 {{end}}
 {{if .Business}}

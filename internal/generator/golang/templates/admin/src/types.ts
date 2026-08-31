@@ -16,6 +16,13 @@ export interface Organization {
   name: string;
   role: string;
   created_at: string;
+{{- if .TenancyLifecycle}}
+  owner_user_id: string;
+  is_owner: boolean;
+  status: "active" | "inactive";
+  updated_at: string;
+  deactivated_at?: string;
+{{- end}}
 }
 
 export interface OrganizationPage {
@@ -29,6 +36,9 @@ export interface OrganizationMember {
   email: string;
   role: "admin" | "user";
   joined_at: string;
+{{- if .TenancyLifecycle}}
+  is_owner: boolean;
+{{- end}}
 }
 
 export interface OrganizationMemberPage {

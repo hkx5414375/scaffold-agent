@@ -47,8 +47,8 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != {{if .Jobs}}{{if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}} {
-		t.Fatalf("migration count = %d, want {{if .Jobs}}{{if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}}", migrationCount)
+	if migrationCount != {{if .Jobs}}{{if .TenancyLifecycle}}6{{else if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyLifecycle}}5{{else if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}} {
+		t.Fatalf("migration count = %d, want {{if .Jobs}}{{if .TenancyLifecycle}}6{{else if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyLifecycle}}5{{else if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}}", migrationCount)
 	}
 
 	identityStore := identitymysql.New(database)
@@ -143,16 +143,46 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if _, err := members.ChangeRole(ctx, memberUser.ID, "admin", adminPrincipal); err != nil {
 		t.Fatalf("ChangeRole() error = %v", err)
 	}
+{{- if .TenancyLifecycle}}
+	lifecycle := tenancy.NewLifecycleService(tenancyStore)
+	renamed, err := lifecycle.Rename(ctx, organizationID, "Renamed Integration", adminPrincipal)
+	if err != nil || renamed.Name != "Renamed Integration" || !renamed.IsOwner {
+		t.Fatalf("Rename() = %#v, %v", renamed, err)
+	}
+	transferred, err := lifecycle.TransferOwnership(ctx, organizationID, memberUser.ID, adminPrincipal)
+	if err != nil || transferred.OwnerUserID != memberUser.ID || transferred.IsOwner {
+		t.Fatalf("TransferOwnership() = %#v, %v", transferred, err)
+	}
+	if err := members.Remove(ctx, memberUser.ID, adminPrincipal); !errors.Is(err, tenancy.ErrOwnerProtected) {
+		t.Fatalf("Remove(owner) error = %v, want ErrOwnerProtected", err)
+	}
+	if _, err := lifecycle.Deactivate(ctx, organizationID, adminPrincipal); !errors.Is(err, tenancy.ErrLifecycleForbidden) {
+		t.Fatalf("Deactivate(previous owner) error = %v, want ErrLifecycleForbidden", err)
+	}
+	ownerPrincipal := identity.Principal{UserID: memberUser.ID, Email: memberUser.Email, Role: "admin", OrganizationID: organizationID}
+	inactive, err := lifecycle.Deactivate(ctx, organizationID, ownerPrincipal)
+	if err != nil || inactive.Status != tenancy.OrganizationInactive {
+		t.Fatalf("Deactivate() = %#v, %v", inactive, err)
+	}
+	if _, err := tenancyStore.MembershipRole(ctx, organizationID, user.ID); !errors.Is(err, tenancy.ErrNotFound) {
+		t.Fatalf("MembershipRole(inactive) error = %v, want ErrNotFound", err)
+	}
+	active, err := lifecycle.Reactivate(ctx, organizationID, ownerPrincipal)
+	if err != nil || active.Status != tenancy.OrganizationActive {
+		t.Fatalf("Reactivate() = %#v, %v", active, err)
+	}
+{{- else}}
 	if err := members.Remove(ctx, memberUser.ID, adminPrincipal); err != nil {
 		t.Fatalf("Remove() error = %v", err)
 	}
 	if err := members.Remove(ctx, user.ID, adminPrincipal); !errors.Is(err, tenancy.ErrLastAdministrator) {
 		t.Fatalf("Remove(last administrator) error = %v, want ErrLastAdministrator", err)
 	}
+{{- end}}
 	var deniedMemberAudit int
 	if err := database.QueryRowContext(ctx, `
 		select count(*) from audit_events
-		where action = 'tenancy.member.remove' and outcome = 'denied' and target = ?`, organizationID+":"+user.ID).Scan(&deniedMemberAudit); err != nil || deniedMemberAudit != 1 {
+		where action = 'tenancy.member.remove' and outcome = 'denied' and target = ?`, organizationID+":"+{{if .TenancyLifecycle}}memberUser.ID{{else}}user.ID{{end}}).Scan(&deniedMemberAudit); err != nil || deniedMemberAudit != 1 {
 		t.Fatalf("denied member audit count = %d, %v, want 1", deniedMemberAudit, err)
 	}
 {{- end}}

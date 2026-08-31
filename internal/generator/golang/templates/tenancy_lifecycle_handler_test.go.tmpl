@@ -1,0 +1,83 @@
+package httpapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/tenancy"
+)
+
+func TestLifecycleRoutesRequireAuthentication(t *testing.T) {
+	t.Parallel()
+
+	security := identityhttp.New(identity.NewService(emptyIdentityStore{}), false)
+	mux := http.NewServeMux()
+	RegisterLifecycle(mux, security, tenancy.NewLifecycleService(handlerLifecycleStore{}))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/organizations/organization/deactivation", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("deactivation status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestLifecycleHandlerRenamesOrganization(t *testing.T) {
+	t.Parallel()
+
+	handler := &lifecycleHandler{service: tenancy.NewLifecycleService(handlerLifecycleStore{})}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/organizations/organization", strings.NewReader(`{"name":"Renamed"}`))
+	request.SetPathValue("organizationID", "organization")
+	response := httptest.NewRecorder()
+	handler.rename(response, request, identity.Principal{UserID: "owner"})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"name":"Renamed"`) {
+		t.Fatalf("rename response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLifecycleHandlerMapsForbiddenWithoutLeakingOwnership(t *testing.T) {
+	t.Parallel()
+
+	handler := &lifecycleHandler{service: tenancy.NewLifecycleService(handlerLifecycleStore{forbidden: true})}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/organizations/organization/deactivation", nil)
+	request.SetPathValue("organizationID", "organization")
+	response := httptest.NewRecorder()
+	handler.deactivate(response, request, identity.Principal{UserID: "member"})
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "tenancy.organization.forbidden") {
+		t.Fatalf("deactivate response = %d %s", response.Code, response.Body.String())
+	}
+}
+
+type handlerLifecycleStore struct {
+	forbidden bool
+}
+
+func (store handlerLifecycleStore) RenameOrganization(_ context.Context, organizationID, name, actorID string, now time.Time, _ identity.AuditEvent) (tenancy.Organization, error) {
+	if store.forbidden {
+		return tenancy.Organization{}, tenancy.ErrLifecycleForbidden
+	}
+	return tenancy.Organization{ID: organizationID, Name: name, OwnerUserID: actorID, IsOwner: true, Status: tenancy.OrganizationActive, UpdatedAt: now}, nil
+}
+
+func (store handlerLifecycleStore) TransferOrganizationOwnership(_ context.Context, organizationID, _, targetUserID string, now time.Time, _ identity.AuditEvent) (tenancy.Organization, error) {
+	if store.forbidden {
+		return tenancy.Organization{}, tenancy.ErrLifecycleForbidden
+	}
+	return tenancy.Organization{ID: organizationID, OwnerUserID: targetUserID, Status: tenancy.OrganizationActive, UpdatedAt: now}, nil
+}
+
+func (store handlerLifecycleStore) SetOrganizationActive(_ context.Context, organizationID, actorID string, active bool, now time.Time, _ identity.AuditEvent) (tenancy.Organization, error) {
+	if store.forbidden {
+		return tenancy.Organization{}, tenancy.ErrLifecycleForbidden
+	}
+	status := tenancy.OrganizationInactive
+	if active {
+		status = tenancy.OrganizationActive
+	}
+	return tenancy.Organization{ID: organizationID, OwnerUserID: actorID, IsOwner: true, Status: status, UpdatedAt: now}, nil
+}

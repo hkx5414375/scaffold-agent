@@ -151,7 +151,7 @@ function showError(error: unknown, fallback: string): void {
         <template #default="scope">
           <el-select
             :model-value="scope.row.role"
-            :disabled="!canManage"
+            :disabled="!canManage{{if .TenancyLifecycle}} || scope.row.is_owner{{end}}"
             @change="changeRole(scope.row, $event)"
           >
             <el-option label="User" value="user" />
@@ -159,10 +159,26 @@ function showError(error: unknown, fallback: string): void {
           </el-select>
         </template>
       </el-table-column>
+{{- if .TenancyLifecycle}}
+      <el-table-column label="Owner" width="90">
+        <template #default="scope">
+          <el-tag v-if="scope.row.is_owner" type="warning" effect="plain">Owner</el-tag>
+        </template>
+      </el-table-column>
+{{- end}}
       <el-table-column prop="joined_at" label="Joined" min-width="220" />
       <el-table-column label="Actions" width="120" align="right">
         <template #default="scope">
+{{- if .TenancyLifecycle}}
+          <el-button
+            type="danger"
+            text
+            :disabled="!canManage || scope.row.is_owner"
+            @click="remove(scope.row)"
+          >
+{{- else}}
           <el-button type="danger" text :disabled="!canManage" @click="remove(scope.row)">
+{{- end}}
             Remove
           </el-button>
         </template>

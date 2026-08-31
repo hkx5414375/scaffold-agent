@@ -6,6 +6,9 @@ import { useSessionStore } from "./stores/session";
 {{- if .TenancyMembers}}
 import MembersView from "./views/MembersView.vue";
 {{- end}}
+{{- if .TenancyLifecycle}}
+import OrganizationSettingsView from "./views/OrganizationSettingsView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -84,7 +87,7 @@ async function acceptInvitation(): Promise<void> {
           <el-option
             v-for="organization in session.organizations"
             :key="organization.id"
-            :label="organization.name"
+            :label="organization.name{{if .TenancyLifecycle}} + (organization.status === 'inactive' ? ' (inactive)' : ''){{end}}"
             :value="organization.id"
           />
         </el-select>
@@ -112,7 +115,15 @@ async function acceptInvitation(): Promise<void> {
 {{- if .TenancyMembers}}
       <el-tabs v-else class="workspace-tabs">
 {{- if .Business}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="Business"
+          name="business"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
         <el-tab-pane label="Business" name="business">
+{{- end}}
           <BusinessView :key="session.currentOrganizationId" />
         </el-tab-pane>
 {{- else}}
@@ -120,9 +131,22 @@ async function acceptInvitation(): Promise<void> {
           <DashboardView />
         </el-tab-pane>
 {{- end}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="Members"
+          name="members"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
         <el-tab-pane label="Members" name="members">
+{{- end}}
           <MembersView :key="session.currentOrganizationId" />
         </el-tab-pane>
+{{- if .TenancyLifecycle}}
+        <el-tab-pane label="Organization" name="organization">
+          <OrganizationSettingsView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
 {{- if .Business}}

@@ -78,6 +78,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"vue-element-plus-admin",
 				"organization-tenancy-capability",
 				"organization-member-invitations",
+				"organization-lifecycle-and-ownership",
 				"durable-background-jobs",
 			},
 			ContractTargets: map[string][]string{
