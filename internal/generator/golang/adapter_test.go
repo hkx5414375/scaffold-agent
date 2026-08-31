@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -83,7 +85,21 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 	if generated.CapabilityLock[businessCapability] != businessVersion {
 		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
 	}
+	openAPIFound := false
 	for _, output := range generated.Outputs {
+		if output.Path == "api/openapi.yaml" {
+			openAPIFound = true
+			var document struct {
+				OpenAPI string         `yaml:"openapi"`
+				Paths   map[string]any `yaml:"paths"`
+			}
+			if err := yaml.Unmarshal(output.Content, &document); err != nil {
+				t.Fatalf("generated OpenAPI is invalid YAML: %v\n%s", err, output.Content)
+			}
+			if document.OpenAPI != "3.1.0" || document.Paths["/api/v1/tasks"] == nil {
+				t.Fatalf("generated OpenAPI document = %#v", document)
+			}
+		}
 		if !strings.HasSuffix(output.Path, ".go") {
 			continue
 		}
@@ -94,6 +110,9 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 		if !bytes.Equal(formatted, output.Content) {
 			t.Fatalf("generated %q is not gofmt formatted\n--- got ---\n%s\n--- want ---\n%s", output.Path, output.Content, formatted)
 		}
+	}
+	if !openAPIFound {
+		t.Fatal("Generate() did not produce api/openapi.yaml")
 	}
 }
 

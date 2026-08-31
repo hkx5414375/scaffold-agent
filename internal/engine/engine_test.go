@@ -146,7 +146,7 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 25 || plannedData.CapabilityLock["go-service"] != "0.1.0" || plannedData.CapabilityLock["go-crud"] != "0.1.0" {
+	if plannedData.ChangeCount != 26 || plannedData.CapabilityLock["go-service"] != "0.2.0" || plannedData.CapabilityLock["go-crud"] != "0.2.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

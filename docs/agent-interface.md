@@ -24,6 +24,10 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 The six-tool surface and storage contracts are implemented. The first Go adapter generates a PostgreSQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, and audit events. It can also generate the first complete CRUD slice from one Blueprint module and entity. Unsupported databases, frontends, authentication selections, field types, workflows, pages, and wider module shapes are rejected instead of being silently omitted. Java and Python currently return the stable `generator.adapter.unavailable` diagnostic.
 
 See `examples/task-service/scaffold.yaml` for the currently supported business-module contract.
+Every generated service includes `api/openapi.yaml`, including stable operation IDs,
+authentication schemes, permission extensions, request schemas, response schemas,
+pagination, and optimistic-lock inputs. Agents should read that contract before
+opening transport implementation files.
 
 ## STDIO protocol
 

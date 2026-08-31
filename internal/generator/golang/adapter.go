@@ -19,9 +19,9 @@ import (
 const (
 	backend            = "go"
 	baseCapability     = "go-service"
-	baseVersion        = "0.1.0"
+	baseVersion        = "0.2.0"
 	businessCapability = "go-crud"
-	businessVersion    = "0.1.0"
+	businessVersion    = "0.2.0"
 )
 
 //go:embed templates
@@ -30,6 +30,7 @@ var templateFS embed.FS
 var outputTemplates = map[string]string{
 	".gitignore":                           "templates/gitignore.tmpl",
 	"README.md":                            "templates/README.md.tmpl",
+	"api/openapi.yaml":                     "templates/openapi.yaml.tmpl",
 	"cmd/server/main.go":                   "templates/main.go.tmpl",
 	"go.mod":                               "templates/go.mod.tmpl",
 	"go.sum":                               "templates/go.sum.tmpl",
@@ -185,19 +186,22 @@ type businessData struct {
 	RoutePath        string
 	PermissionPrefix string
 	Fields           []businessField
+	RequiredFields   []string
 }
 
 type businessField struct {
-	Name       string
-	GoName     string
-	GoType     string
-	EntityType string
-	SQLType    string
-	Required   bool
-	Unique     bool
-	StringLike bool
-	SampleOne  string
-	SampleTwo  string
+	Name          string
+	GoName        string
+	GoType        string
+	EntityType    string
+	SQLType       string
+	Required      bool
+	Unique        bool
+	StringLike    bool
+	SampleOne     string
+	SampleTwo     string
+	OpenAPIType   string
+	OpenAPIFormat string
 }
 
 func buildBusinessData(modules []spec.Module) (*businessData, error) {
@@ -238,12 +242,13 @@ func buildBusinessData(modules []spec.Module) (*businessData, error) {
 		delete(wantPermissions, permission.Code)
 	}
 	fields := make([]businessField, 0, len(entity.Fields))
+	requiredFields := make([]string, 0, len(entity.Fields))
 	reserved := map[string]struct{}{"id": {}, "version": {}, "created_at": {}, "updated_at": {}}
 	for _, field := range entity.Fields {
 		if _, exists := reserved[field.Name]; exists {
 			return nil, fmt.Errorf("business field %q is reserved", field.Name)
 		}
-		goType, sqlType, stringLike, sampleOne, sampleTwo, ok := businessFieldType(field.Type)
+		goType, sqlType, stringLike, sampleOne, sampleTwo, openAPIType, openAPIFormat, ok := businessFieldType(field.Type)
 		if !ok {
 			return nil, fmt.Errorf("business field %q uses unsupported Go CRUD type %q", field.Name, field.Type)
 		}
@@ -255,29 +260,34 @@ func buildBusinessData(modules []spec.Module) (*businessData, error) {
 			Name: field.Name, GoName: exportedName(field.Name), GoType: goType,
 			EntityType: entityType, SQLType: sqlType, Required: field.Required,
 			Unique: field.Unique, StringLike: stringLike, SampleOne: sampleOne, SampleTwo: sampleTwo,
+			OpenAPIType: openAPIType, OpenAPIFormat: openAPIFormat,
 		})
+		if field.Required {
+			requiredFields = append(requiredFields, field.Name)
+		}
 	}
 	return &businessData{
 		ModuleName: module.Name, PackageName: module.Name, EntityName: entity.Name,
 		EntityType: exportedName(entity.Name), TableName: module.Name + "_" + entity.Name,
-		RoutePath: "/api/v1/" + module.Name, PermissionPrefix: prefix, Fields: fields,
+		RoutePath: "/api/v1/" + module.Name, PermissionPrefix: prefix,
+		Fields: fields, RequiredFields: requiredFields,
 	}, nil
 }
 
-func businessFieldType(value string) (goType, sqlType string, stringLike bool, sampleOne, sampleTwo string, ok bool) {
+func businessFieldType(value string) (goType, sqlType string, stringLike bool, sampleOne, sampleTwo, openAPIType, openAPIFormat string, ok bool) {
 	switch value {
 	case "string":
-		return "string", "varchar(255)", true, `"first"`, `"second"`, true
+		return "string", "varchar(255)", true, `"first"`, `"second"`, "string", "", true
 	case "text":
-		return "string", "text", true, `"first text"`, `"second text"`, true
+		return "string", "text", true, `"first text"`, `"second text"`, "string", "", true
 	case "bool":
-		return "bool", "boolean", false, "true", "false", true
+		return "bool", "boolean", false, "true", "false", "boolean", "", true
 	case "int64":
-		return "int64", "bigint", false, "int64(1)", "int64(2)", true
+		return "int64", "bigint", false, "int64(1)", "int64(2)", "integer", "int64", true
 	case "datetime":
-		return "time.Time", "timestamptz", false, "time.Unix(1_700_000_000, 0).UTC()", "time.Unix(1_700_000_100, 0).UTC()", true
+		return "time.Time", "timestamptz", false, "time.Unix(1_700_000_000, 0).UTC()", "time.Unix(1_700_000_100, 0).UTC()", "string", "date-time", true
 	default:
-		return "", "", false, "", "", false
+		return "", "", false, "", "", "", "", false
 	}
 }
 

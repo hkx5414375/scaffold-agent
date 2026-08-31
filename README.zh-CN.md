@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务和第一版 Go/PostgreSQL 生成器。生成的 Go 服务已经包含数据库迁移、密码哈希、浏览器 Session、API Token、按权限码授权的 RBAC、安全审计事件，以及由 Blueprint 驱动、带游标分页和乐观锁的 CRUD 模块；OpenAPI 和前端仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务和第一版 Go/PostgreSQL 生成器。生成的 Go 服务已经包含数据库迁移、密码哈希、浏览器 Session、API Token、按权限码授权的 RBAC、安全审计事件、由 Blueprint 驱动且带游标分页和乐观锁的 CRUD 模块，以及 OpenAPI 3.1 契约；前端仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 

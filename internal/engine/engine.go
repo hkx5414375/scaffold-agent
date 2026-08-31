@@ -72,6 +72,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"go-base-generator",
 				"go-postgresql-identity",
 				"go-postgresql-crud",
+				"go-openapi-contract",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

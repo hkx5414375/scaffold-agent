@@ -24,6 +24,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 六个工具和存储协议已实现。第一个 Go 适配器已能生成带 PostgreSQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC 及审计事件的 HTTP 服务，也能从一个 Blueprint 模块和一个实体生成第一套完整 CRUD。对尚未支持的数据库、前端、认证组合、字段类型、工作流、页面和更大的模块形态，它会明确拒绝，不会静默漏生代码。Java 和 Python 目前会返回稳定诊断 `generator.adapter.unavailable`。
 
 当前支持的业务模块写法参见 `examples/task-service/scaffold.yaml`。
+每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
 
 ## STDIO 协议
 
