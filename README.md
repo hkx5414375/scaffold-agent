@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The repository currently contains the quality baseline and the first executable CLI skeleton. Public schemas and generation behavior are not stable yet.
+Scaffold Agent is under active construction. The quality baseline, versioned protocol core, capability dependency resolver, and deterministic filesystem transactions with ownership protection, preview, apply, rollback, and interrupted-run recovery are implemented. The public CLI/MCP surface is still under construction, and schemas remain experimental until 1.0.
 
 ## Design goals
 
@@ -47,4 +47,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [the architecture decision](docs/adr/000
 ## License
 
 Apache-2.0
-

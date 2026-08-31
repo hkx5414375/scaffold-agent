@@ -2,15 +2,17 @@ package schema
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/hkx5414375/scaffold-agent/internal/manifest"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
 func TestEmbeddedSchemasAreValidJSON(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"project.schema.json", "capability-pack.schema.json", "plan.schema.json", "result.schema.json"} {
+	for _, name := range []string{"project.schema.json", "capability-pack.schema.json", "plan.schema.json", "result.schema.json", "manifest.schema.json"} {
 		content, err := Read("v1alpha1", name)
 		if err != nil {
 			t.Fatalf("Read(%q) error = %v", name, err)
@@ -22,6 +24,21 @@ func TestEmbeddedSchemasAreValidJSON(t *testing.T) {
 		if document["$schema"] != "https://json-schema.org/draft/2020-12/schema" {
 			t.Fatalf("schema %q has unexpected $schema = %v", name, document["$schema"])
 		}
+	}
+}
+
+func TestManifestSchemaAcceptsValidManifest(t *testing.T) {
+	t.Parallel()
+
+	value := manifest.Empty()
+	value.BlueprintHash = strings.Repeat("a", 64)
+	value.CapabilityLock["auth"] = "1.0.0"
+	value.Files["internal/auth/service.go"] = manifest.File{
+		Owner: "auth",
+		Hash:  strings.Repeat("b", 64),
+	}
+	if err := Validate("v1alpha1", "manifest.schema.json", value); err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 
