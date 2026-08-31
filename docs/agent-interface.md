@@ -54,6 +54,13 @@ semantic-version ranges; the Engine deterministically selects the highest releas
 that satisfies the complete graph and records every exact result in the capability
 lock. Agents should reuse that lock instead of re-resolving dependency versions.
 
+Selecting `background-jobs` version `0.1.0` generates a database-backed queue and
+an independent `cmd/worker`. Feature code should enqueue a bounded JSON payload
+through `jobs.Service` with a stable idempotency key. Handlers receive the verified
+organization identifier on `jobs.Job`; they must honor context cancellation and
+must never log the payload. Retry, lease renewal, dead-letter decisions, and
+expired-lease recovery are Engine-provided behavior, not code for an agent to copy.
+
 ## STDIO protocol
 
 Run the server with:

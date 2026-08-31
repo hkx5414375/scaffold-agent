@@ -1,0 +1,65 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"{{.ModulePath}}/internal/jobs"
+	jobsdatabase "{{.ModulePath}}/internal/jobs/{{.Database.PackageName}}"
+	_ "{{.ModulePath}}/internal/jobhandlers"
+	"{{.ModulePath}}/internal/platform/migrate"
+	platformdatabase "{{.ModulePath}}/internal/platform/{{.Database.PackageName}}"
+)
+
+const workerStartupTimeout = 30 * time.Second
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("worker stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	workerContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	startupContext, cancelStartup := context.WithTimeout(workerContext, workerStartupTimeout)
+	defer cancelStartup()
+	database, err := platformdatabase.Open(startupContext, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := migrate.Run(startupContext, database); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	workerID := workerIdentifier()
+	worker, err := jobs.NewWorker(jobs.NewService(jobsdatabase.New(database)), workerID, jobs.DefaultHandlers())
+	if err != nil {
+		return fmt.Errorf("configure worker: %w", err)
+	}
+	slog.Info("start background worker", "worker_id", workerID)
+	if err := worker.Run(workerContext); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
+}
+
+func workerIdentifier() string {
+	if configured := strings.TrimSpace(os.Getenv("WORKER_ID")); configured != "" {
+		return configured
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "worker"
+	}
+	return hostname + "-" + strconv.Itoa(os.Getpid())
+}

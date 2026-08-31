@@ -30,6 +30,8 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 项目能力选择必须锁定精确版本；传递依赖可以声明语义版本范围。Engine 会在全部约束下确定性选择最高兼容版本，并把精确结果写入能力锁。AI 应复用该锁，不要自行重新推导依赖版本。
 
+选择 `background-jobs` `0.1.0` 后，生成项目会加入数据库可靠队列和独立的 `cmd/worker`。业务能力应通过 `jobs.Service` 提交有大小限制的 JSON 载荷和稳定幂等键；Handler 可以从 `jobs.Job` 读取已经确认的组织标识，必须响应 Context 取消，并且不得记录载荷内容。任务抢占、租约续期、指数重试、死信和过期租约恢复均由能力包提供，AI 不需要重复编写。
+
 ## STDIO 协议
 
 启动服务：

@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+{{- if .Jobs}}
+	"encoding/json"
+{{- end}}
 	"errors"
 	"os"
 	"reflect"
@@ -15,6 +18,10 @@ import (
 
 	"{{.ModulePath}}/internal/identity"
 	identitymysql "{{.ModulePath}}/internal/identity/mysql"
+	{{- if .Jobs}}
+	"{{.ModulePath}}/internal/jobs"
+	jobsmysql "{{.ModulePath}}/internal/jobs/mysql"
+	{{- end}}
 	"{{.ModulePath}}/internal/platform/migrate"
 	platformmysql "{{.ModulePath}}/internal/platform/mysql"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
@@ -40,8 +47,8 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 	if err := database.QueryRowContext(ctx, `select count(*) from scaffold_schema_migrations`).Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != {{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}} {
-		t.Fatalf("migration count = %d, want {{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}", migrationCount)
+	if migrationCount != {{if .Jobs}}{{if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}} {
+		t.Fatalf("migration count = %d, want {{if .Jobs}}{{if .TenancyMembers}}5{{else if .Tenancy}}4{{else}}3{{end}}{{else}}{{if .TenancyMembers}}4{{else if .Tenancy}}3{{else}}2{{end}}{{end}}", migrationCount)
 	}
 
 	identityStore := identitymysql.New(database)
@@ -149,6 +156,41 @@ func TestMySQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("denied member audit count = %d, %v, want 1", deniedMemberAudit, err)
 	}
 {{- end}}
+{{- end}}
+
+{{- if .Jobs}}
+	jobStore := jobsmysql.New(database)
+	jobService := jobs.NewService(jobStore)
+	jobInput := jobs.EnqueueInput{
+		Type: "system.noop", Payload: json.RawMessage(`{"source":"integration"}`),
+		IdempotencyKey: "integration-request", MaxAttempts: 3,
+	}
+	queued, err := jobService.Enqueue(ctx, organizationID, jobInput)
+	if err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	duplicate, err := jobService.Enqueue(ctx, organizationID, jobInput)
+	if err != nil || duplicate.ID != queued.ID {
+		t.Fatalf("Enqueue(duplicate) = %#v, %v, want %s", duplicate, err, queued.ID)
+	}
+	leased, err := jobService.LeaseNext(ctx, "worker-1", 30*time.Second)
+	if err != nil || leased.ID != queued.ID || leased.Attempts != 1 || leased.OrganizationID != organizationID {
+		t.Fatalf("LeaseNext() = %#v, %v", leased, err)
+	}
+	if err := jobService.Fail(ctx, leased, "worker-1", errors.New("retry integration job")); err != nil {
+		t.Fatalf("Fail() error = %v", err)
+	}
+	retryNow := time.Now().UTC().Add(time.Hour)
+	retried, err := jobStore.LeaseNext(ctx, "worker-2", retryNow, retryNow.Add(30*time.Second))
+	if err != nil || retried.ID != queued.ID || retried.Attempts != 2 {
+		t.Fatalf("LeaseNext(retry) = %#v, %v", retried, err)
+	}
+	if err := jobService.Complete(ctx, retried.ID, "worker-2"); err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if err := jobStore.Complete(ctx, retried.ID, "worker-2", time.Now().UTC()); !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("Complete(after completion) error = %v, want ErrLeaseLost", err)
+	}
 {{- end}}
 
 {{- range .Business.Fields}}

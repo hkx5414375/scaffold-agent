@@ -28,6 +28,8 @@ const (
 	tenancyCapability     = "organization-tenancy"
 	tenancyVersion        = "0.1.0"
 	tenancyMembersVersion = "0.2.0"
+	jobsCapability        = "background-jobs"
+	jobsVersion           = "0.1.0"
 )
 
 //go:embed all:templates
@@ -73,6 +75,9 @@ type databaseTemplateSet struct {
 	TenancyMembersStorePath         string
 	TenancyMembersStoreTemplate     string
 	TenancyMembersMigrationTemplate string
+	JobsStorePath                   string
+	JobsStoreTemplate               string
+	JobsMigrationTemplate           string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -97,6 +102,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		TenancyMembersStorePath:         "internal/tenancy/postgres/members.go",
 		TenancyMembersStoreTemplate:     "templates/tenancy_members_postgres_store.go.tmpl",
 		TenancyMembersMigrationTemplate: "templates/tenancy_members_postgres.sql.tmpl",
+		JobsStorePath:                   "internal/jobs/postgres/store.go",
+		JobsStoreTemplate:               "templates/jobs_postgres_store.go.tmpl",
+		JobsMigrationTemplate:           "templates/jobs_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -120,6 +128,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		TenancyMembersStorePath:         "internal/tenancy/mysql/members.go",
 		TenancyMembersStoreTemplate:     "templates/tenancy_members_mysql_store.go.tmpl",
 		TenancyMembersMigrationTemplate: "templates/tenancy_members_mysql.sql.tmpl",
+		JobsStorePath:                   "internal/jobs/mysql/store.go",
+		JobsStoreTemplate:               "templates/jobs_mysql_store.go.tmpl",
+		JobsMigrationTemplate:           "templates/jobs_mysql.sql.tmpl",
 	},
 }
 
@@ -144,6 +155,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobsCapability, Version: jobsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Reliable leased background jobs with retries and idempotent enqueue",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -158,6 +179,15 @@ var tenancyMembersTemplates = map[string]string{
 	"internal/tenancy/members_test.go":                 "templates/tenancy_members_test.go.tmpl",
 	"internal/tenancy/httpapi/members_handler.go":      "templates/tenancy_members_handler.go.tmpl",
 	"internal/tenancy/httpapi/members_handler_test.go": "templates/tenancy_members_handler_test.go.tmpl",
+}
+
+var jobsTemplates = map[string]string{
+	"cmd/worker/main.go":               "templates/jobs_main.go.tmpl",
+	"internal/jobhandlers/registry.go": "templates/jobs_registry.go.tmpl",
+	"internal/jobs/jobs.go":            "templates/jobs.go.tmpl",
+	"internal/jobs/jobs_test.go":       "templates/jobs_test.go.tmpl",
+	"internal/jobs/worker.go":          "templates/jobs_worker.go.tmpl",
+	"internal/jobs/worker_test.go":     "templates/jobs_worker_test.go.tmpl",
 }
 
 var adminTemplates = map[string]string{
@@ -223,6 +253,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
+	jobsEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -232,6 +263,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == tenancyCapability {
 			tenancyEnabled = true
 			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
+		}
+		if pack.Metadata.Name == jobsCapability {
+			jobsEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine)
@@ -246,6 +280,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Admin:          adminEnabled,
 		Tenancy:        tenancyEnabled,
 		TenancyMembers: tenancyMembersEnabled,
+		Jobs:           jobsEnabled,
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range outputTemplates {
@@ -307,6 +342,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if jobsEnabled {
+		for path, templatePath := range jobsTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: jobsCapability}
+		}
+		targets[database.JobsStorePath] = renderTarget{TemplatePath: database.JobsStoreTemplate, Owner: jobsCapability}
+		targets["internal/platform/migrate/migrations/000200_background_jobs.sql"] = renderTarget{
+			TemplatePath: database.JobsMigrationTemplate,
+			Owner:        jobsCapability,
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -365,6 +410,7 @@ type templateData struct {
 	Admin          bool
 	Tenancy        bool
 	TenancyMembers bool
+	Jobs           bool
 }
 
 type databaseData struct {

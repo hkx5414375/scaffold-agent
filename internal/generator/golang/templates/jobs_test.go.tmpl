@@ -1,0 +1,82 @@
+package jobs
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestEnqueueIsTenantAwareAndIdempotent(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	input := EnqueueInput{Type: "system.noop", Payload: json.RawMessage(`{"ok":true}`), IdempotencyKey: "request-1"}
+	first, err := service.Enqueue(context.Background(), {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}}, input)
+	if err != nil {
+		t.Fatalf("Enqueue(first) error = %v", err)
+	}
+	second, err := service.Enqueue(context.Background(), {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}}, input)
+	if err != nil {
+		t.Fatalf("Enqueue(second) error = %v", err)
+	}
+	if first.ID != second.ID || first.DedupeKey != "key:request-1" || first.ScopeKey != {{if .Tenancy}}"organization-1"{{else}}"global"{{end}} {
+		t.Fatalf("Enqueue() = %#v then %#v", first, second)
+	}
+}
+
+func TestFailUsesBoundedRetryAndDeadLetterPolicy(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	job := Job{ID: "job-1", Attempts: 2, MaxAttempts: 3}
+	if err := service.Fail(context.Background(), job, "worker-1", errors.New("temporary")); err != nil {
+		t.Fatalf("Fail(retry) error = %v", err)
+	}
+	if store.dead || store.retryAt.Sub(service.now()) != 10*time.Second {
+		t.Fatalf("Fail(retry) dead = %v, retry = %s", store.dead, store.retryAt.Sub(service.now()))
+	}
+	job.Attempts = 3
+	if err := service.Fail(context.Background(), job, "worker-1", errors.New("permanent")); err != nil {
+		t.Fatalf("Fail(dead) error = %v", err)
+	}
+	if !store.dead {
+		t.Fatal("Fail(dead) did not dead-letter exhausted job")
+	}
+}
+
+type memoryStore struct {
+	jobs    map[string]Job
+	retryAt time.Time
+	dead    bool
+}
+
+func (store *memoryStore) Enqueue(_ context.Context, job Job) (Job, error) {
+	if store.jobs == nil {
+		store.jobs = make(map[string]Job)
+	}
+	key := job.ScopeKey + ":" + job.Type + ":" + job.DedupeKey
+	if existing, found := store.jobs[key]; found {
+		return existing, nil
+	}
+	store.jobs[key] = job
+	return job, nil
+}
+func (store *memoryStore) LeaseNext(context.Context, string, time.Time, time.Time) (Job, error) {
+	return Job{}, ErrNotFound
+}
+func (store *memoryStore) ExtendLease(context.Context, string, string, time.Time, time.Time) error {
+	return nil
+}
+func (store *memoryStore) Complete(context.Context, string, string, time.Time) error { return nil }
+func (store *memoryStore) Fail(_ context.Context, _ string, _ string, _ string, retryAt time.Time, dead bool, _ time.Time) error {
+	store.retryAt, store.dead = retryAt, dead
+	return nil
+}
+
+var _ Store = (*memoryStore)(nil)

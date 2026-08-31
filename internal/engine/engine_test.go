@@ -131,6 +131,22 @@ func TestGoTenantMembersMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancySelectionV2, "0.2.0", 61, false)
 }
 
+func TestGoTenantJobsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyJobsSelection, "0.2.0", 68, false)
+}
+
+func TestGoTenantJobsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyJobsSelection, "0.2.0", 69, false)
+}
+
+func TestGoJobsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", jobsSelection, "", 55, false)
+}
+
+func TestGoJobsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", jobsSelection, "", 56, false)
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0
@@ -139,6 +155,18 @@ const tenancySelectionV1 = `  capabilities:
 const tenancySelectionV2 = `  capabilities:
     - name: organization-tenancy
       version: 0.2.0
+`
+
+const tenancyJobsSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.2.0
+    - name: background-jobs
+      version: 0.1.0
+`
+
+const jobsSelection = `  capabilities:
+    - name: background-jobs
+      version: 0.1.0
 `
 
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
@@ -192,8 +220,11 @@ CAPABILITIES
 	if adminUI == "element-plus" && plannedData.CapabilityLock["vue-admin"] != "0.1.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
-	if capabilities != "" && plannedData.CapabilityLock["organization-tenancy"] != expectedTenancyVersion {
+	if strings.Contains(capabilities, "organization-tenancy") && plannedData.CapabilityLock["organization-tenancy"] != expectedTenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "background-jobs") && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+		t.Fatalf("Plan() background jobs lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

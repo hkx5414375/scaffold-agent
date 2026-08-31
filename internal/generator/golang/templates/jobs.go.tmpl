@@ -1,0 +1,196 @@
+// Package jobs owns durable background-job enqueue and lease semantics.
+package jobs
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
+
+const (
+	StatusQueued    = "queued"
+	StatusRunning   = "running"
+	StatusSucceeded = "succeeded"
+	StatusRetry     = "retry"
+	StatusDead      = "dead"
+
+	defaultMaxAttempts = 8
+	maximumPayloadBytes = 1 << 20
+	maximumRetryDelay   = 15 * time.Minute
+)
+
+var (
+	ErrInvalid   = errors.New("background job input is invalid")
+	ErrNotFound  = errors.New("background job not found")
+	ErrLeaseLost = errors.New("background job lease was lost")
+	jobTypePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
+)
+
+// Job is one durable unit of background work.
+type Job struct {
+	ID             string          `json:"id"`
+	OrganizationID string          `json:"organization_id,omitempty"`
+	Type           string          `json:"type"`
+	Payload        json.RawMessage `json:"payload"`
+	Status         string          `json:"status"`
+	Priority       int             `json:"priority"`
+	Attempts       int             `json:"attempts"`
+	MaxAttempts    int             `json:"max_attempts"`
+	AvailableAt    time.Time       `json:"available_at"`
+	LeaseOwner     string          `json:"lease_owner,omitempty"`
+	LeaseUntil     *time.Time      `json:"lease_until,omitempty"`
+	LastError      string          `json:"last_error,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	ScopeKey       string          `json:"-"`
+	DedupeKey      string          `json:"-"`
+}
+
+// EnqueueInput describes a new background job.
+type EnqueueInput struct {
+	Type           string
+	Payload        json.RawMessage
+	IdempotencyKey string
+	Priority       int
+	MaxAttempts    int
+}
+
+// Store is the durable queue boundary implemented by each database adapter.
+type Store interface {
+	Enqueue(context.Context, Job) (Job, error)
+	LeaseNext(context.Context, string, time.Time, time.Time) (Job, error)
+	ExtendLease(context.Context, string, string, time.Time, time.Time) error
+	Complete(context.Context, string, string, time.Time) error
+	Fail(context.Context, string, string, string, time.Time, bool, time.Time) error
+}
+
+// Service validates enqueue requests and owns retry policy independently from the worker loop.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns a durable background-job service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Enqueue creates one job or returns the existing job for the same idempotency key.
+func (service *Service) Enqueue(ctx context.Context, organizationID string, input EnqueueInput) (Job, error) {
+	organizationID = strings.TrimSpace(organizationID)
+{{- if .Tenancy}}
+	if organizationID == "" {
+		return Job{}, ErrInvalid
+	}
+{{- else}}
+	organizationID = ""
+{{- end}}
+	input.Type = strings.TrimSpace(input.Type)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if !jobTypePattern.MatchString(input.Type) ||
+		len(input.Payload) == 0 || len(input.Payload) > maximumPayloadBytes || !json.Valid(input.Payload) ||
+		len(input.IdempotencyKey) > 128 || input.Priority < -100 || input.Priority > 100 {
+		return Job{}, ErrInvalid
+	}
+	if input.MaxAttempts == 0 {
+		input.MaxAttempts = defaultMaxAttempts
+	}
+	if input.MaxAttempts < 1 || input.MaxAttempts > 100 {
+		return Job{}, ErrInvalid
+	}
+	now := service.now().UTC()
+	job := Job{
+		ID: rand.Text(), OrganizationID: organizationID, Type: input.Type,
+		Payload: append(json.RawMessage(nil), input.Payload...), Status: StatusQueued,
+		Priority: input.Priority, MaxAttempts: input.MaxAttempts,
+		AvailableAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	job.ScopeKey = "global"
+	if organizationID != "" {
+		job.ScopeKey = organizationID
+	}
+	job.DedupeKey = "job:" + job.ID
+	if input.IdempotencyKey != "" {
+		job.DedupeKey = "key:" + input.IdempotencyKey
+	}
+	stored, err := service.store.Enqueue(ctx, job)
+	if err != nil {
+		return Job{}, fmt.Errorf("enqueue background job: %w", err)
+	}
+	return stored, nil
+}
+
+// LeaseNext atomically claims the next available job for one worker.
+func (service *Service) LeaseNext(ctx context.Context, workerID string, leaseDuration time.Duration) (Job, error) {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" || len(workerID) > 128 || leaseDuration < time.Second || leaseDuration > time.Hour {
+		return Job{}, ErrInvalid
+	}
+	now := service.now().UTC()
+	job, err := service.store.LeaseNext(ctx, workerID, now, now.Add(leaseDuration))
+	if err != nil {
+		return Job{}, fmt.Errorf("lease background job: %w", err)
+	}
+	return job, nil
+}
+
+// ExtendLease keeps a running handler owned by one worker from being reclaimed.
+func (service *Service) ExtendLease(ctx context.Context, jobID, workerID string, leaseDuration time.Duration) error {
+	if jobID == "" || workerID == "" || leaseDuration < time.Second || leaseDuration > time.Hour {
+		return ErrInvalid
+	}
+	now := service.now().UTC()
+	if err := service.store.ExtendLease(ctx, jobID, workerID, now, now.Add(leaseDuration)); err != nil {
+		return fmt.Errorf("extend background job lease: %w", err)
+	}
+	return nil
+}
+
+// Complete marks a leased job successful.
+func (service *Service) Complete(ctx context.Context, jobID, workerID string) error {
+	if jobID == "" || workerID == "" {
+		return ErrInvalid
+	}
+	if err := service.store.Complete(ctx, jobID, workerID, service.now().UTC()); err != nil {
+		return fmt.Errorf("complete background job: %w", err)
+	}
+	return nil
+}
+
+// Fail schedules retry with bounded exponential backoff or moves the job to dead state.
+func (service *Service) Fail(ctx context.Context, job Job, workerID string, cause error) error {
+	if job.ID == "" || workerID == "" || cause == nil {
+		return ErrInvalid
+	}
+	now := service.now().UTC()
+	dead := job.Attempts >= job.MaxAttempts
+	retryAt := now.Add(retryDelay(job.Attempts))
+	message := cause.Error()
+	if len(message) > 2_000 {
+		message = message[:2_000]
+	}
+	if err := service.store.Fail(ctx, job.ID, workerID, message, retryAt, dead, now); err != nil {
+		return fmt.Errorf("fail background job: %w", err)
+	}
+	return nil
+}
+
+func retryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 5 * time.Second
+	for range attempt - 1 {
+		if delay >= maximumRetryDelay/2 {
+			return maximumRetryDelay
+		}
+		delay *= 2
+	}
+	return min(delay, maximumRetryDelay)
+}

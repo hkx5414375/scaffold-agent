@@ -1,0 +1,163 @@
+package jobs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+)
+
+const (
+	defaultPollInterval = time.Second
+	defaultLeaseDuration = 30 * time.Second
+)
+
+// Handler executes one leased job. It must honor context cancellation and must not log payload secrets.
+type Handler func(context.Context, Job) error
+
+var handlerRegistry = struct {
+	sync.RWMutex
+	handlers map[string]Handler
+}{handlers: map[string]Handler{
+	"system.noop": func(context.Context, Job) error { return nil },
+}}
+
+// Register adds a handler from a user-owned file or another generated capability.
+func Register(jobType string, handler Handler) error {
+	if !jobTypePattern.MatchString(jobType) || handler == nil {
+		return ErrInvalid
+	}
+	handlerRegistry.Lock()
+	defer handlerRegistry.Unlock()
+	if _, exists := handlerRegistry.handlers[jobType]; exists {
+		return fmt.Errorf("background job handler %q is already registered", jobType)
+	}
+	handlerRegistry.handlers[jobType] = handler
+	return nil
+}
+
+// MustRegister registers a handler during package initialization or panics on invalid duplication.
+func MustRegister(jobType string, handler Handler) {
+	if err := Register(jobType, handler); err != nil {
+		panic(err)
+	}
+}
+
+// Worker leases durable jobs and dispatches them to registered handlers.
+type Worker struct {
+	service       *Service
+	handlers      map[string]Handler
+	workerID      string
+	pollInterval  time.Duration
+	leaseDuration time.Duration
+}
+
+// NewWorker validates and returns a background worker.
+func NewWorker(service *Service, workerID string, handlers map[string]Handler) (*Worker, error) {
+	if service == nil || workerID == "" || len(workerID) > 128 || len(handlers) == 0 {
+		return nil, ErrInvalid
+	}
+	cloned := make(map[string]Handler, len(handlers))
+	for jobType, handler := range handlers {
+		if !jobTypePattern.MatchString(jobType) || handler == nil {
+			return nil, ErrInvalid
+		}
+		cloned[jobType] = handler
+	}
+	return &Worker{
+		service: service, handlers: cloned, workerID: workerID,
+		pollInterval: defaultPollInterval, leaseDuration: defaultLeaseDuration,
+	}, nil
+}
+
+// Run polls until cancellation. Transient queue errors are logged without terminating the process.
+func (worker *Worker) Run(ctx context.Context) error {
+	for {
+		err := worker.RunOnce(ctx)
+		if err == nil {
+			continue
+		}
+		if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, context.Canceled) {
+			slog.Error("background job iteration", "worker_id", worker.workerID, "error", err)
+		}
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			return ctx.Err()
+		}
+		timer := time.NewTimer(worker.pollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// RunOnce leases and executes at most one job.
+func (worker *Worker) RunOnce(ctx context.Context) error {
+	job, err := worker.service.LeaseNext(ctx, worker.workerID, worker.leaseDuration)
+	if err != nil {
+		return err
+	}
+	handler, found := worker.handlers[job.Type]
+	if !found {
+		return worker.service.Fail(ctx, job, worker.workerID, fmt.Errorf("no handler registered for job type %q", job.Type))
+	}
+	handlerErr, err := worker.executeWithHeartbeat(ctx, job, handler)
+	if err != nil {
+		return err
+	}
+	if handlerErr != nil {
+		return worker.service.Fail(ctx, job, worker.workerID, handlerErr)
+	}
+	return worker.service.Complete(ctx, job.ID, worker.workerID)
+}
+
+func (worker *Worker) executeWithHeartbeat(ctx context.Context, job Job, handler Handler) (error, error) {
+	handlerContext, cancelHandler := context.WithCancel(ctx)
+	defer cancelHandler()
+	result := make(chan error, 1)
+	go func() {
+		result <- invokeHandler(handlerContext, handler, job)
+	}()
+	heartbeat := time.NewTicker(worker.leaseDuration / 3)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case handlerErr := <-result:
+			return handlerErr, nil
+		case <-heartbeat.C:
+			if err := worker.service.ExtendLease(ctx, job.ID, worker.workerID, worker.leaseDuration); err != nil {
+				cancelHandler()
+				return nil, err
+			}
+		case <-ctx.Done():
+			cancelHandler()
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func invokeHandler(ctx context.Context, handler Handler, job Job) (returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			returnErr = fmt.Errorf("job handler panicked: %v", recovered)
+		}
+	}()
+	return handler(ctx, job)
+}
+
+// DefaultHandlers returns a snapshot containing built-in, user-owned, and capability handlers.
+func DefaultHandlers() map[string]Handler {
+	handlerRegistry.RLock()
+	defer handlerRegistry.RUnlock()
+	handlers := make(map[string]Handler, len(handlerRegistry.handlers))
+	for jobType, handler := range handlerRegistry.handlers {
+		handlers[jobType] = handler
+	}
+	return handlers
+}

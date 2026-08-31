@@ -1,0 +1,187 @@
+// Package mysql persists durable background jobs in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"{{.ModulePath}}/internal/jobs"
+)
+
+// Store is the MySQL durable job queue.
+type Store struct {
+	database *sql.DB
+}
+
+// New returns a MySQL job store.
+func New(database *sql.DB) *Store {
+	return &Store{database: database}
+}
+
+func (store *Store) Enqueue(ctx context.Context, job jobs.Job) (jobs.Job, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("begin background job enqueue: %w", err)
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		insert into background_jobs (
+			id, organization_id, scope_key, type, payload, dedupe_key, status, priority,
+			attempts, max_attempts, available_at, created_at, updated_at
+		) values (?, nullif(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		on duplicate key update dedupe_key = values(dedupe_key)`,
+		job.ID, job.OrganizationID, job.ScopeKey, job.Type, []byte(job.Payload), job.DedupeKey,
+		job.Status, job.Priority, job.Attempts, job.MaxAttempts, job.AvailableAt, job.CreatedAt, job.CreatedAt,
+	); err != nil {
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("insert background job: %w", err))
+	}
+	stored, err := scanJob(transaction.QueryRowContext(ctx, selectJob+`
+		where scope_key = ? and type = ? and dedupe_key = ?`, job.ScopeKey, job.Type, job.DedupeKey))
+	if err != nil {
+		return jobs.Job{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("commit background job enqueue: %w", err)
+	}
+	return stored, nil
+}
+
+func (store *Store) LeaseNext(ctx context.Context, workerID string, now, leaseUntil time.Time) (jobs.Job, error) {
+	transaction, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("begin background job lease: %w", err)
+	}
+	var jobID string
+	if err := transaction.QueryRowContext(ctx, `
+		select id from background_jobs
+		where ((status in ('queued', 'retry') and available_at <= ?)
+			or (status = 'running' and lease_until <= ?))
+		order by priority desc, available_at, created_at, id
+		limit 1 for update skip locked`, now, now).Scan(&jobID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return jobs.Job{}, rollback(transaction, jobs.ErrNotFound)
+		}
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("select background job lease candidate: %w", err))
+	}
+	if _, err := transaction.ExecContext(ctx, `
+		update background_jobs
+		set status = 'running', attempts = attempts + 1, lease_owner = ?,
+			lease_until = ?, updated_at = ?, completed_at = null
+		where id = ?`, workerID, leaseUntil, now, jobID); err != nil {
+		return jobs.Job{}, rollback(transaction, fmt.Errorf("lease background job: %w", err))
+	}
+	job, err := scanJob(transaction.QueryRowContext(ctx, selectJob+` where id = ?`, jobID))
+	if err != nil {
+		return jobs.Job{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("commit background job lease: %w", err)
+	}
+	return job, nil
+}
+
+func (store *Store) ExtendLease(ctx context.Context, jobID, workerID string, now, leaseUntil time.Time) error {
+	result, err := store.database.ExecContext(ctx, `
+		update background_jobs set lease_until = ?, updated_at = ?
+		where id = ? and status = 'running' and lease_owner = ? and lease_until > ?`,
+		leaseUntil, now, jobID, workerID, now)
+	return leaseResult("extend lease", result, err)
+}
+
+func (store *Store) Complete(ctx context.Context, jobID, workerID string, now time.Time) error {
+	result, err := store.database.ExecContext(ctx, `
+		update background_jobs
+		set status = 'succeeded', lease_owner = null, lease_until = null,
+			last_error = null, completed_at = ?, updated_at = ?
+		where id = ? and status = 'running' and lease_owner = ? and lease_until > ?`,
+		now, now, jobID, workerID, now)
+	return leaseResult("complete job", result, err)
+}
+
+func (store *Store) Fail(ctx context.Context, jobID, workerID, message string, retryAt time.Time, dead bool, now time.Time) error {
+	status := jobs.StatusRetry
+	var completedAt *time.Time
+	if dead {
+		status, completedAt = jobs.StatusDead, &now
+	}
+	result, err := store.database.ExecContext(ctx, `
+		update background_jobs
+		set status = ?, available_at = ?, lease_owner = null, lease_until = null,
+			last_error = ?, completed_at = ?, updated_at = ?
+		where id = ? and status = 'running' and lease_owner = ? and lease_until > ?`,
+		status, retryAt, message, completedAt, now, jobID, workerID, now)
+	return leaseResult("fail job", result, err)
+}
+
+const selectJob = `
+	select id, organization_id, scope_key, type, payload, dedupe_key, status, priority,
+		attempts, max_attempts, available_at, lease_owner, lease_until, last_error,
+		created_at, updated_at, completed_at
+	from background_jobs`
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanJob(row rowScanner) (jobs.Job, error) {
+	var job jobs.Job
+	var payload []byte
+	var organizationID, leaseOwner, lastError sql.NullString
+	var leaseUntil, completedAt sql.NullTime
+	if err := row.Scan(
+		&job.ID, &organizationID, &job.ScopeKey, &job.Type, &payload, &job.DedupeKey,
+		&job.Status, &job.Priority, &job.Attempts, &job.MaxAttempts, &job.AvailableAt,
+		&leaseOwner, &leaseUntil, &lastError, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return jobs.Job{}, jobs.ErrNotFound
+		}
+		return jobs.Job{}, fmt.Errorf("scan background job: %w", err)
+	}
+	if !json.Valid(payload) {
+		return jobs.Job{}, errors.New("scan background job: stored payload is invalid JSON")
+	}
+	job.Payload = append(json.RawMessage(nil), payload...)
+	if organizationID.Valid {
+		job.OrganizationID = organizationID.String
+	}
+	if leaseOwner.Valid {
+		job.LeaseOwner = leaseOwner.String
+	}
+	if leaseUntil.Valid {
+		job.LeaseUntil = &leaseUntil.Time
+	}
+	if lastError.Valid {
+		job.LastError = lastError.String
+	}
+	if completedAt.Valid {
+		job.CompletedAt = &completedAt.Time
+	}
+	return job, nil
+}
+
+func leaseResult(operation string, result sql.Result, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s rows affected: %w", operation, err)
+	}
+	if affected != 1 {
+		return jobs.ErrLeaseLost
+	}
+	return nil
+}
+
+func rollback(transaction *sql.Tx, cause error) error {
+	if err := transaction.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return errors.Join(cause, fmt.Errorf("roll back background job transaction: %w", err))
+	}
+	return cause
+}
+
+var _ jobs.Store = (*Store)(nil)

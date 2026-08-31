@@ -34,8 +34,9 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Shared Blueprint, domain, HTTP, OpenAPI, and Vue contracts across PostgreSQL and MySQL.
 - [x] Organization creation, discovery, membership-scoped authorization, tenant-aware administration, and cross-tenant data isolation.
 - [x] Email-bound invitations, member administration, role changes, removals, and concurrent last-administrator protection.
-- [ ] Organization lifecycle, ownership transfer, and tenant-aware background work.
-- [ ] Files, notifications, jobs, cache, import/export, and observability.
+- [x] Tenant-aware durable jobs, idempotent enqueue, leased workers, heartbeat, retry, and dead-letter state.
+- [ ] Organization lifecycle and ownership transfer.
+- [ ] Files, notifications, cache, import/export, job administration, and observability.
 - [ ] Portable approval workflows.
 
 ## M6 — Language parity

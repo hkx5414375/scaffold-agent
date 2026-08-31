@@ -1,0 +1,28 @@
+create table background_jobs (
+    id text primary key,
+    organization_id text{{if .Tenancy}} not null references organizations (id) on delete cascade{{end}},
+    scope_key text not null,
+    type text not null,
+    payload jsonb not null,
+    dedupe_key text not null,
+    status text not null check (status in ('queued', 'running', 'succeeded', 'retry', 'dead')),
+    priority integer not null,
+    attempts integer not null check (attempts >= 0),
+    max_attempts integer not null check (max_attempts > 0),
+    available_at timestamptz not null,
+    lease_owner text,
+    lease_until timestamptz,
+    last_error text,
+    created_at timestamptz not null,
+    updated_at timestamptz not null,
+    completed_at timestamptz,
+    unique (scope_key, type, dedupe_key)
+);
+
+create index background_jobs_claim_idx on background_jobs (priority desc, available_at, created_at, id)
+where status in ('queued', 'retry', 'running');
+create index background_jobs_expired_lease_idx on background_jobs (lease_until)
+where status = 'running';
+{{if .Tenancy}}
+create index background_jobs_organization_idx on background_jobs (organization_id, created_at desc);
+{{end}}

@@ -1,0 +1,143 @@
+// Package postgres persists durable background jobs in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/jobs"
+)
+
+// Store is the PostgreSQL durable job queue.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL job store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+func (store *Store) Enqueue(ctx context.Context, job jobs.Job) (jobs.Job, error) {
+	return scanJob(store.pool.QueryRow(ctx, `
+		insert into background_jobs (
+			id, organization_id, scope_key, type, payload, dedupe_key, status, priority,
+			attempts, max_attempts, available_at, created_at, updated_at
+		) values ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
+		on conflict (scope_key, type, dedupe_key)
+		do update set dedupe_key = background_jobs.dedupe_key
+		returning id, organization_id, scope_key, type, payload, dedupe_key, status, priority,
+			attempts, max_attempts, available_at, lease_owner, lease_until, last_error,
+			created_at, updated_at, completed_at`,
+		job.ID, job.OrganizationID, job.ScopeKey, job.Type, []byte(job.Payload), job.DedupeKey,
+		job.Status, job.Priority, job.Attempts, job.MaxAttempts, job.AvailableAt, job.CreatedAt,
+	))
+}
+
+func (store *Store) LeaseNext(ctx context.Context, workerID string, now, leaseUntil time.Time) (jobs.Job, error) {
+	return scanJob(store.pool.QueryRow(ctx, `
+		with candidate as (
+			select id from background_jobs
+			where ((status in ('queued', 'retry') and available_at <= $1)
+				or (status = 'running' and lease_until <= $1))
+			order by priority desc, available_at, created_at, id
+			for update skip locked
+			limit 1
+		)
+		update background_jobs jobs
+		set status = 'running', attempts = attempts + 1, lease_owner = $2,
+			lease_until = $3, updated_at = $1, completed_at = null
+		from candidate
+		where jobs.id = candidate.id
+		returning jobs.id, jobs.organization_id, jobs.scope_key, jobs.type, jobs.payload,
+			jobs.dedupe_key, jobs.status, jobs.priority, jobs.attempts, jobs.max_attempts,
+			jobs.available_at, jobs.lease_owner, jobs.lease_until, jobs.last_error,
+			jobs.created_at, jobs.updated_at, jobs.completed_at`, now, workerID, leaseUntil))
+}
+
+func (store *Store) ExtendLease(ctx context.Context, jobID, workerID string, now, leaseUntil time.Time) error {
+	command, err := store.pool.Exec(ctx, `
+		update background_jobs set lease_until = $1, updated_at = $2
+		where id = $3 and status = 'running' and lease_owner = $4 and lease_until > $2`,
+		leaseUntil, now, jobID, workerID)
+	return leaseResult("extend lease", command.RowsAffected(), err)
+}
+
+func (store *Store) Complete(ctx context.Context, jobID, workerID string, now time.Time) error {
+	command, err := store.pool.Exec(ctx, `
+		update background_jobs
+		set status = 'succeeded', lease_owner = null, lease_until = null,
+			last_error = null, completed_at = $1, updated_at = $1
+		where id = $2 and status = 'running' and lease_owner = $3 and lease_until > $1`,
+		now, jobID, workerID)
+	return leaseResult("complete job", command.RowsAffected(), err)
+}
+
+func (store *Store) Fail(ctx context.Context, jobID, workerID, message string, retryAt time.Time, dead bool, now time.Time) error {
+	status := jobs.StatusRetry
+	var completedAt *time.Time
+	if dead {
+		status, completedAt = jobs.StatusDead, &now
+	}
+	command, err := store.pool.Exec(ctx, `
+		update background_jobs
+		set status = $1, available_at = $2, lease_owner = null, lease_until = null,
+			last_error = $3, completed_at = $4, updated_at = $5
+		where id = $6 and status = 'running' and lease_owner = $7 and lease_until > $5`,
+		status, retryAt, message, completedAt, now, jobID, workerID)
+	return leaseResult("fail job", command.RowsAffected(), err)
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanJob(row rowScanner) (jobs.Job, error) {
+	var job jobs.Job
+	var payload []byte
+	var organizationID, leaseOwner, lastError *string
+	var leaseUntil, completedAt *time.Time
+	if err := row.Scan(
+		&job.ID, &organizationID, &job.ScopeKey, &job.Type, &payload, &job.DedupeKey,
+		&job.Status, &job.Priority, &job.Attempts, &job.MaxAttempts, &job.AvailableAt,
+		&leaseOwner, &leaseUntil, &lastError, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return jobs.Job{}, jobs.ErrNotFound
+		}
+		return jobs.Job{}, fmt.Errorf("scan background job: %w", err)
+	}
+	if !json.Valid(payload) {
+		return jobs.Job{}, errors.New("scan background job: stored payload is invalid JSON")
+	}
+	job.Payload = append(json.RawMessage(nil), payload...)
+	if organizationID != nil {
+		job.OrganizationID = *organizationID
+	}
+	if leaseOwner != nil {
+		job.LeaseOwner = *leaseOwner
+	}
+	if lastError != nil {
+		job.LastError = *lastError
+	}
+	job.LeaseUntil, job.CompletedAt = leaseUntil, completedAt
+	return job, nil
+}
+
+func leaseResult(operation string, affected int64, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	if affected != 1 {
+		return jobs.ErrLeaseLost
+	}
+	return nil
+}
+
+var _ jobs.Store = (*Store)(nil)

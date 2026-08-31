@@ -300,6 +300,57 @@ func TestOrganizationMemberUpgradePreservesBaseMigration(t *testing.T) {
 	}
 }
 
+func TestGenerateBackgroundJobsCapability(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyMembersVersion},
+		{Name: jobsCapability, Version: jobsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[jobsCapability] != jobsVersion {
+		t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+	}
+	wantPaths := map[string]bool{
+		"cmd/worker/main.go":                                              false,
+		"internal/jobhandlers/registry.go":                                false,
+		"internal/jobs/jobs.go":                                           false,
+		"internal/jobs/worker.go":                                         false,
+		"internal/jobs/postgres/store.go":                                 false,
+		"internal/platform/migrate/migrations/000200_background_jobs.sql": false,
+	}
+	for _, output := range generated.Outputs {
+		if _, exists := wantPaths[output.Path]; exists {
+			wantPaths[output.Path] = true
+		}
+	}
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("Generate() did not produce %s", path)
+		}
+	}
+}
+
+func TestGenerateBackgroundJobsWithoutTenancy(t *testing.T) {
+	t.Parallel()
+
+	project := businessProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{Name: jobsCapability, Version: jobsVersion}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000200_background_jobs.sql"))
+	jobService := string(outputContent(generated, "internal/jobs/jobs.go"))
+	if strings.Contains(migration, "references organizations") || !strings.Contains(jobService, `organizationID = ""`) {
+		t.Fatal("Generate() did not use an explicit global background-job scope")
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

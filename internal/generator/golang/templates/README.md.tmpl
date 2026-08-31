@@ -10,6 +10,10 @@ pagination, optimistic locking, transactional audit events, and explicit RBAC.
 It also contains the `organization-tenancy` capability. Protected business data
 is scoped by organization membership and the `X-Organization-ID` request header.
 {{end}}
+{{if .Jobs}}
+It also contains the `background-jobs` capability with idempotent enqueue,
+database leases, heartbeat renewal, bounded retry, and dead-letter state.
+{{end}}
 
 ## Requirements
 
@@ -38,6 +42,22 @@ go run ./cmd/server
 The bootstrap account is created once; omit both bootstrap variables after that.
 Embedded migrations run automatically under a {{.Database.DisplayName}} database lock.
 The machine-readable HTTP contract is `api/openapi.yaml`.
+{{if .Jobs}}
+
+Run the independent background worker with the same database:
+
+```bash
+export DATABASE_URL='replace-me'
+export WORKER_ID='worker-1'
+go run ./cmd/worker
+```
+
+Feature code enqueues work through `internal/jobs.Service`. Use a stable
+idempotency key for external requests. Add custom handlers in an unowned file such
+as `internal/jobhandlers/email.go` and call `jobs.MustRegister` from `init`; the
+managed worker imports that package and reads the registry snapshot at startup.
+Handlers must honor context cancellation and must never log job payloads.
+{{end}}
 
 ## HTTP API
 

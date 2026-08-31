@@ -1,0 +1,91 @@
+package jobs
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestWorkerCompletesAndRetriesHandlers(t *testing.T) {
+	t.Parallel()
+
+	store := &workerStore{jobs: []Job{
+		{ID: "success", Type: "system.noop", Attempts: 1, MaxAttempts: 3},
+		{ID: "failure", Type: "system.fail", Attempts: 1, MaxAttempts: 3},
+	}}
+	service := NewService(store)
+	worker, err := NewWorker(service, "worker-1", map[string]Handler{
+		"system.noop": func(context.Context, Job) error { return nil },
+		"system.fail": func(context.Context, Job) error { return errors.New("expected") },
+	})
+	if err != nil {
+		t.Fatalf("NewWorker() error = %v", err)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(success) error = %v", err)
+	}
+	if store.completed != "success" {
+		t.Fatalf("RunOnce(success) completed = %q", store.completed)
+	}
+	if err := worker.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(failure) error = %v", err)
+	}
+	if store.failed != "failure" {
+		t.Fatalf("RunOnce(failure) failed = %q", store.failed)
+	}
+}
+
+func TestInvokeHandlerConvertsPanicToFailure(t *testing.T) {
+	t.Parallel()
+
+	err := invokeHandler(context.Background(), func(context.Context, Job) error {
+		panic("boom")
+	}, Job{})
+	if err == nil || err.Error() != "job handler panicked: boom" {
+		t.Fatalf("invokeHandler() error = %v", err)
+	}
+}
+
+func TestRegisterAddsHandlerToDefaultSnapshot(t *testing.T) {
+	jobType := "test.custom-handler"
+	if err := Register(jobType, func(context.Context, Job) error { return nil }); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	handlers := DefaultHandlers()
+	if handlers[jobType] == nil {
+		t.Fatalf("DefaultHandlers()[%q] is nil", jobType)
+	}
+	delete(handlers, jobType)
+	if DefaultHandlers()[jobType] == nil {
+		t.Fatal("mutating a handler snapshot changed the registry")
+	}
+}
+
+type workerStore struct {
+	jobs      []Job
+	completed string
+	failed    string
+}
+
+func (store *workerStore) Enqueue(context.Context, Job) (Job, error) { return Job{}, nil }
+func (store *workerStore) LeaseNext(_ context.Context, workerID string, _ time.Time, leaseUntil time.Time) (Job, error) {
+	if len(store.jobs) == 0 {
+		return Job{}, ErrNotFound
+	}
+	job := store.jobs[0]
+	store.jobs = store.jobs[1:]
+	job.LeaseOwner, job.LeaseUntil = workerID, &leaseUntil
+	return job, nil
+}
+func (store *workerStore) ExtendLease(context.Context, string, string, time.Time, time.Time) error {
+	return nil
+}
+func (store *workerStore) Complete(_ context.Context, jobID, _ string, _ time.Time) error {
+	store.completed = jobID
+	return nil
+}
+func (store *workerStore) Fail(_ context.Context, jobID, _ string, _ string, _ time.Time, _ bool, _ time.Time) error {
+	store.failed = jobID
+	return nil
+}
