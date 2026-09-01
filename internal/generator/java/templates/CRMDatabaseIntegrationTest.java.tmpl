@@ -1,0 +1,200 @@
+package {{.PackageName}}.crm;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class CRMDatabaseIntegrationTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    @Timeout(45)
+    void enforcesScopeAssociationsVersionsPipelineAndAtomicAudit() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String namespace = "scaffold_java_crm_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + namespace);
+        applicationUrl =
+                adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + namespace;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + namespace + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, namespace);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("crm@example.com", "correct horse battery staple");
+            Principal actor =
+                    identity.login(
+                                    "crm@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("CRM", actor);
+            actor = scoped(actor, organization.id());
+{{- end}}
+            Principal scopedActor = actor;
+            CRMService crm =
+                    new CRMService(
+                            new JdbcCRMRepository(jdbc, transactions),
+                            Clock.fixed(NOW, ZoneOffset.UTC));
+            CRMAccount account =
+                    crm.createAccount(new CRMService.AccountWrite("Acme"), scopedActor);
+            CRMContact contact =
+                    crm.createContact(
+                            new CRMService.ContactWrite(
+                                    account.id(), "Ada", "ada@example.com", "+1 555 0100"),
+                            scopedActor);
+            CRMActivity activity =
+                    crm.createActivity(
+                            new CRMService.ActivityWrite(
+                                    "contact", contact.id(), "call", "Discovery", NOW),
+                            scopedActor);
+            CRMOpportunity opportunity =
+                    crm.createOpportunity(
+                            new CRMService.OpportunityWrite(
+                                    account.id(), "Expansion", "12500", "USD"),
+                            scopedActor);
+
+            assertThat(activity.subjectId()).isEqualTo(contact.id());
+            assertThat(crm.listAccounts("active", "", 20, scopedActor).items())
+                    .extracting(CRMAccount::id)
+                    .containsExactly(account.id());
+            CRMOpportunity qualified =
+                    crm.advanceOpportunity(
+                            opportunity.id(),
+                            new CRMService.StageInput(CRMService.QUALIFIED, 1L),
+                            scopedActor);
+            assertThat(qualified.version()).isEqualTo(2L);
+            assertKind(
+                    () ->
+                            crm.updateOpportunity(
+                                    opportunity.id(),
+                                    new CRMService.OpportunityUpdate(
+                                            account.id(), "Stale", "1", "USD", 1L),
+                                    scopedActor),
+                    CRMException.Kind.CONFLICT);
+
+            int auditsBeforeConflict = auditCount(jdbc);
+            assertKind(
+                    () ->
+                            crm.createContact(
+                                    new CRMService.ContactWrite(
+                                            account.id(), "Duplicate", "ada@example.com", ""),
+                                    scopedActor),
+                    CRMException.Kind.CONFLICT);
+            assertThat(auditCount(jdbc)).isEqualTo(auditsBeforeConflict);
+{{- if .Tenancy}}
+            jdbc.update(
+                    "update organizations set status = 'inactive', deactivated_at = ? where id = ?",
+                    Timestamp.from(NOW),
+                    organization.id());
+            assertThat(crm.listAccounts("", "", 20, scopedActor).items()).isEmpty();
+            assertKind(
+                    () -> crm.createAccount(new CRMService.AccountWrite("Hidden"), scopedActor),
+                    CRMException.Kind.NOT_FOUND);
+{{- end}}
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + namespace + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + namespace + "`");
+{{- end}}
+        }
+    }
+
+    private static int auditCount(JdbcTemplate jdbc) {
+        Integer count =
+                jdbc.queryForObject(
+                        "select count(*) from audit_events where action like 'crm:%'",
+                        Integer.class);
+        return count == null ? 0 : count;
+    }
+
+    private static void assertKind(Runnable operation, CRMException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CRMException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+{{- if .Tenancy}}
+    private static Principal scoped(Principal actor, String organizationId) {
+        return new Principal(
+                actor.userId(), actor.email(), actor.role(), actor.method(), organizationId);
+    }
+
+{{- end}}
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

@@ -1,0 +1,542 @@
+package {{.PackageName}}.crm;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class CRMService {
+
+    public static final String ACTIVE = "active";
+    public static final String ARCHIVED = "archived";
+    public static final String LEAD = "lead";
+    public static final String QUALIFIED = "qualified";
+    public static final String PROPOSAL = "proposal";
+    public static final String WON = "won";
+    public static final String LOST = "lost";
+
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final Set<String> STATUSES = Set.of(ACTIVE, ARCHIVED);
+    private static final Set<String> STAGES = Set.of(LEAD, QUALIFIED, PROPOSAL, WON, LOST);
+    private static final Set<String> ACTIVITY_TYPES = Set.of("note", "call", "email", "meeting");
+    private static final Set<String> SUBJECT_TYPES = Set.of("account", "contact", "opportunity");
+    private static final Pattern EMAIL_PATTERN =
+            Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+    private static final Pattern CURRENCY_PATTERN = Pattern.compile("^[A-Z]{3}$");
+    private static final Pattern AMOUNT_PATTERN = Pattern.compile("^(0|[1-9][0-9]*)$");
+
+    private final CRMRepository repository;
+    private final Clock clock;
+
+    public CRMService(CRMRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    CRMService(CRMRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public CRMAccount createAccount(AccountWrite input, Principal actor) {
+        String scope = actorScope(actor);
+        String name = required(input == null ? null : input.name(), 160);
+        Instant now = clock.instant();
+        CRMAccount value =
+                new CRMAccount(newId(), emptyToNull(scope), name, ACTIVE, 1L, now, now);
+        repository.createAccount(value, audit(actor, "crm:accounts:create", value.id(), now));
+        return value;
+    }
+
+    public CRMAccount getAccount(String id, Principal actor) {
+        return repository
+                .getAccount(actorScope(actor), identifier(id))
+                .orElseThrow(CRMService::notFound);
+    }
+
+    public AccountPage listAccounts(String status, String cursor, int limit, Principal actor) {
+        String filter = text(status);
+        validatePage(cursor, limit);
+        if (!filter.isEmpty() && !STATUSES.contains(filter)) {
+            throw invalid();
+        }
+        CRMRepository.PageResult<CRMAccount> result =
+                repository.listAccounts(actorScope(actor), filter, text(cursor), limit);
+        return new AccountPage(result.items(), result.nextCursor());
+    }
+
+    public CRMAccount updateAccount(String id, AccountUpdate input, Principal actor) {
+        if (input == null || invalidVersion(input.version())) {
+            throw invalid();
+        }
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.updateAccount(
+                actorScope(actor),
+                normalizedId,
+                required(input.name(), 160),
+                input.version(),
+                now,
+                audit(actor, "crm:accounts:update", normalizedId, now));
+    }
+
+    public CRMAccount archiveAccount(String id, TransitionInput input, Principal actor) {
+        return transitionAccount(id, input, ACTIVE, ARCHIVED, "crm:accounts:archive", actor);
+    }
+
+    public CRMAccount reactivateAccount(String id, TransitionInput input, Principal actor) {
+        return transitionAccount(id, input, ARCHIVED, ACTIVE, "crm:accounts:reactivate", actor);
+    }
+
+    private CRMAccount transitionAccount(
+            String id,
+            TransitionInput input,
+            String from,
+            String to,
+            String action,
+            Principal actor) {
+        long version = requireVersion(input);
+        String normalizedId = identifier(id);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        return repository.transitionAccount(
+                new CRMRepository.Transition(scope, normalizedId, version, from, to, now),
+                audit(actor, action, normalizedId, now));
+    }
+
+    public CRMContact createContact(ContactWrite input, Principal actor) {
+        ContactWrite normalized = normalizeContact(input);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        CRMContact value =
+                new CRMContact(
+                        newId(),
+                        emptyToNull(scope),
+                        emptyToNull(normalized.accountId()),
+                        normalized.name(),
+                        emptyToNull(normalized.email()),
+                        emptyToNull(normalized.phone()),
+                        ACTIVE,
+                        1L,
+                        now,
+                        now);
+        repository.createContact(value, audit(actor, "crm:contacts:create", value.id(), now));
+        return value;
+    }
+
+    public CRMContact getContact(String id, Principal actor) {
+        return repository
+                .getContact(actorScope(actor), identifier(id))
+                .orElseThrow(CRMService::notFound);
+    }
+
+    public ContactPage listContacts(String status, String cursor, int limit, Principal actor) {
+        String filter = text(status);
+        validatePage(cursor, limit);
+        if (!filter.isEmpty() && !STATUSES.contains(filter)) {
+            throw invalid();
+        }
+        CRMRepository.PageResult<CRMContact> result =
+                repository.listContacts(actorScope(actor), filter, text(cursor), limit);
+        return new ContactPage(result.items(), result.nextCursor());
+    }
+
+    public CRMContact updateContact(String id, ContactUpdate input, Principal actor) {
+        if (input == null || invalidVersion(input.version())) {
+            throw invalid();
+        }
+        ContactWrite normalized =
+                normalizeContact(
+                        new ContactWrite(
+                                input.accountId(), input.name(), input.email(), input.phone()));
+        String normalizedId = identifier(id);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        CRMContact value =
+                new CRMContact(
+                        normalizedId,
+                        emptyToNull(scope),
+                        emptyToNull(normalized.accountId()),
+                        normalized.name(),
+                        emptyToNull(normalized.email()),
+                        emptyToNull(normalized.phone()),
+                        "",
+                        0L,
+                        now,
+                        now);
+        return repository.updateContact(
+                scope,
+                value,
+                input.version(),
+                now,
+                audit(actor, "crm:contacts:update", normalizedId, now));
+    }
+
+    public CRMContact archiveContact(String id, TransitionInput input, Principal actor) {
+        return transitionContact(id, input, ACTIVE, ARCHIVED, "crm:contacts:archive", actor);
+    }
+
+    public CRMContact reactivateContact(String id, TransitionInput input, Principal actor) {
+        return transitionContact(id, input, ARCHIVED, ACTIVE, "crm:contacts:reactivate", actor);
+    }
+
+    private CRMContact transitionContact(
+            String id,
+            TransitionInput input,
+            String from,
+            String to,
+            String action,
+            Principal actor) {
+        long version = requireVersion(input);
+        String normalizedId = identifier(id);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        return repository.transitionContact(
+                new CRMRepository.Transition(scope, normalizedId, version, from, to, now),
+                audit(actor, action, normalizedId, now));
+    }
+
+    public CRMActivity createActivity(ActivityWrite input, Principal actor) {
+        if (input == null
+                || !SUBJECT_TYPES.contains(text(input.subjectType()))
+                || !ACTIVITY_TYPES.contains(text(input.type()))
+                || input.occurredAt() == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        CRMActivity value =
+                new CRMActivity(
+                        newId(),
+                        emptyToNull(scope),
+                        text(input.subjectType()),
+                        identifier(input.subjectId()),
+                        text(input.type()),
+                        required(input.summary(), 4000),
+                        input.occurredAt(),
+                        actor.userId(),
+                        now);
+        repository.createActivity(value, audit(actor, "crm:activities:create", value.id(), now));
+        return value;
+    }
+
+    public ActivityPage listActivities(
+            String subjectType,
+            String subjectId,
+            String cursor,
+            int limit,
+            Principal actor) {
+        String normalizedType = text(subjectType);
+        String normalizedId = text(subjectId);
+        validatePage(cursor, limit);
+        if ((normalizedType.isEmpty() != normalizedId.isEmpty())
+                || (!normalizedType.isEmpty() && !SUBJECT_TYPES.contains(normalizedType))) {
+            throw invalid();
+        }
+        if (!normalizedId.isEmpty()) {
+            normalizedId = identifier(normalizedId);
+        }
+        CRMRepository.PageResult<CRMActivity> result =
+                repository.listActivities(
+                        actorScope(actor), normalizedType, normalizedId, text(cursor), limit);
+        return new ActivityPage(result.items(), result.nextCursor());
+    }
+
+    public CRMOpportunity createOpportunity(OpportunityWrite input, Principal actor) {
+        OpportunityValue normalized = normalizeOpportunity(input);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        CRMOpportunity value =
+                new CRMOpportunity(
+                        newId(),
+                        emptyToNull(scope),
+                        normalized.accountId(),
+                        normalized.name(),
+                        normalized.amountMinor(),
+                        normalized.currency(),
+                        LEAD,
+                        1L,
+                        now,
+                        now);
+        repository.createOpportunity(
+                value, audit(actor, "crm:opportunities:create", value.id(), now));
+        return value;
+    }
+
+    public CRMOpportunity getOpportunity(String id, Principal actor) {
+        return repository
+                .getOpportunity(actorScope(actor), identifier(id))
+                .orElseThrow(CRMService::notFound);
+    }
+
+    public OpportunityPage listOpportunities(
+            String stage, String cursor, int limit, Principal actor) {
+        String filter = text(stage);
+        validatePage(cursor, limit);
+        if (!filter.isEmpty() && !STAGES.contains(filter)) {
+            throw invalid();
+        }
+        CRMRepository.PageResult<CRMOpportunity> result =
+                repository.listOpportunities(actorScope(actor), filter, text(cursor), limit);
+        return new OpportunityPage(result.items(), result.nextCursor());
+    }
+
+    public CRMOpportunity updateOpportunity(
+            String id, OpportunityUpdate input, Principal actor) {
+        if (input == null || invalidVersion(input.version())) {
+            throw invalid();
+        }
+        OpportunityValue normalized =
+                normalizeOpportunity(
+                        new OpportunityWrite(
+                                input.accountId(),
+                                input.name(),
+                                input.amountMinor(),
+                                input.currency()));
+        String normalizedId = identifier(id);
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        CRMOpportunity value =
+                new CRMOpportunity(
+                        normalizedId,
+                        emptyToNull(scope),
+                        normalized.accountId(),
+                        normalized.name(),
+                        normalized.amountMinor(),
+                        normalized.currency(),
+                        "",
+                        0L,
+                        now,
+                        now);
+        return repository.updateOpportunity(
+                scope,
+                value,
+                input.version(),
+                now,
+                audit(actor, "crm:opportunities:update", normalizedId, now));
+    }
+
+    public CRMOpportunity advanceOpportunity(String id, StageInput input, Principal actor) {
+        if (input == null || invalidVersion(input.version())) {
+            throw invalid();
+        }
+        String normalizedId = identifier(id);
+        String scope = actorScope(actor);
+        CRMOpportunity current =
+                repository
+                        .getOpportunity(scope, normalizedId)
+                        .orElseThrow(CRMService::notFound);
+        String target = text(input.stage());
+        if (!validTransition(current.stage(), target)) {
+            throw conflict();
+        }
+        Instant now = clock.instant();
+        return repository.advanceOpportunity(
+                new CRMRepository.StageTransition(
+                        scope,
+                        normalizedId,
+                        input.version(),
+                        current.stage(),
+                        target,
+                        now),
+                audit(actor, "crm:opportunities:advance", normalizedId, now));
+    }
+
+    private static ContactWrite normalizeContact(ContactWrite input) {
+        if (input == null) {
+            throw invalid();
+        }
+        String accountId = text(input.accountId());
+        if (!accountId.isEmpty()) {
+            accountId = identifier(accountId);
+        }
+        String email = text(input.email()).toLowerCase(Locale.ROOT);
+        String phone = text(input.phone());
+        if ((!email.isEmpty()
+                        && (email.length() > 254
+                                || !EMAIL_PATTERN.matcher(email).matches()
+                                || !safe(email)))
+                || phone.codePointCount(0, phone.length()) > 64
+                || !safe(phone)) {
+            throw invalid();
+        }
+        return new ContactWrite(accountId, required(input.name(), 160), email, phone);
+    }
+
+    private static OpportunityValue normalizeOpportunity(OpportunityWrite input) {
+        if (input == null) {
+            throw invalid();
+        }
+        String amount = text(input.amountMinor());
+        String currency = text(input.currency()).toUpperCase(Locale.ROOT);
+        if (!AMOUNT_PATTERN.matcher(amount).matches()
+                || !CURRENCY_PATTERN.matcher(currency).matches()) {
+            throw invalid();
+        }
+        try {
+            return new OpportunityValue(
+                    identifier(input.accountId()),
+                    required(input.name(), 160),
+                    Long.parseLong(amount),
+                    currency);
+        } catch (NumberFormatException exception) {
+            throw invalid();
+        }
+    }
+
+    private static boolean validTransition(String from, String to) {
+        return (LOST.equals(to) && Set.of(LEAD, QUALIFIED, PROPOSAL).contains(from))
+                || (LEAD.equals(from) && QUALIFIED.equals(to))
+                || (QUALIFIED.equals(from) && PROPOSAL.equals(to))
+                || (PROPOSAL.equals(from) && WON.equals(to));
+    }
+
+    private static void validatePage(String cursor, int limit) {
+        String normalized = text(cursor);
+        if (limit < 1
+                || limit > 100
+                || normalized.length() > MAXIMUM_IDENTIFIER_LENGTH
+                || !safe(normalized)) {
+            throw invalid();
+        }
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || !validRequired(text(actor.userId()), MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        String organizationId = text(actor.organizationId());
+        if (!validRequired(organizationId, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return organizationId;
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static String identifier(String value) {
+        String normalized = text(value);
+        if (!validRequired(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String required(String value, int maximum) {
+        String normalized = text(value);
+        if (!validRequired(normalized, maximum)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static boolean validRequired(String value, int maximum) {
+        return !value.isEmpty()
+                && value.codePointCount(0, value.length()) <= maximum
+                && safe(value);
+    }
+
+    private static boolean safe(String value) {
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static boolean invalidVersion(Long value) {
+        return value == null || value < 1L;
+    }
+
+    private static long requireVersion(TransitionInput input) {
+        if (input == null || invalidVersion(input.version())) {
+            throw invalid();
+        }
+        return input.version();
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static CRMException invalid() {
+        return new CRMException(CRMException.Kind.INVALID, "CRM data is invalid");
+    }
+
+    private static CRMException notFound() {
+        return new CRMException(CRMException.Kind.NOT_FOUND, "CRM record was not found");
+    }
+
+    private static CRMException conflict() {
+        return new CRMException(
+                CRMException.Kind.CONFLICT,
+                "CRM record changed or conflicts with current state");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record AccountWrite(String name) {}
+
+    public record AccountUpdate(String name, Long version) {}
+
+    public record ContactWrite(String accountId, String name, String email, String phone) {}
+
+    public record ContactUpdate(
+            String accountId, String name, String email, String phone, Long version) {}
+
+    public record ActivityWrite(
+            String subjectType,
+            String subjectId,
+            String type,
+            String summary,
+            Instant occurredAt) {}
+
+    public record OpportunityWrite(
+            String accountId, String name, String amountMinor, String currency) {}
+
+    public record OpportunityUpdate(
+            String accountId, String name, String amountMinor, String currency, Long version) {}
+
+    public record TransitionInput(Long version) {}
+
+    public record StageInput(String stage, Long version) {}
+
+    private record OpportunityValue(
+            String accountId, String name, long amountMinor, String currency) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record AccountPage(List<CRMAccount> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record ContactPage(List<CRMContact> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record ActivityPage(List<CRMActivity> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record OpportunityPage(List<CRMOpportunity> items, String nextCursor) {}
+}

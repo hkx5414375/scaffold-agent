@@ -1,0 +1,650 @@
+package {{.PackageName}}.crm;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcCRMRepository implements CRMRepository {
+
+    private static final String ACCOUNT_COLUMNS =
+            "value.id, value.organization_id, value.name, value.status, value.version, "
+                    + "value.created_at, value.updated_at";
+    private static final String CONTACT_COLUMNS =
+            "value.id, value.organization_id, value.account_id, value.name, value.email, "
+                    + "value.phone, value.status, value.version, value.created_at, value.updated_at";
+    private static final String ACTIVITY_COLUMNS =
+            "value.id, value.organization_id, value.subject_type, value.subject_id, "
+                    + "value.activity_type, value.summary, value.occurred_at, "
+                    + "value.created_by, value.created_at";
+    private static final String OPPORTUNITY_COLUMNS =
+            "value.id, value.organization_id, value.account_id, value.name, value.amount_minor, "
+                    + "value.currency, value.stage, value.version, value.created_at, value.updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcCRMRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public void createAccount(CRMAccount value, AuditEvent audit) {
+        runCreate(
+                scope(value.organizationId()),
+                () ->
+                        jdbcTemplate.update(
+                                "insert into crm_accounts "
+                                        + "(id, organization_id, name, status, version, created_at, updated_at) "
+                                        + "values (?, ?, ?, ?, ?, ?, ?)",
+                                value.id(),
+                                value.organizationId(),
+                                value.name(),
+                                value.status(),
+                                value.version(),
+                                Timestamp.from(value.createdAt()),
+                                Timestamp.from(value.updatedAt())),
+                audit);
+    }
+
+    @Override
+    public Optional<CRMAccount> getAccount(String organizationId, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(ACCOUNT_COLUMNS, "crm_accounts")
+                                + " where value.id = ? and coalesce(value.organization_id, '') = ?"
+                                + activeScope("value"),
+                        JdbcCRMRepository::mapAccount,
+                        id,
+                        organizationId));
+    }
+
+    @Override
+    public PageResult<CRMAccount> listAccounts(
+            String organizationId, String status, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(ACCOUNT_COLUMNS, "crm_accounts")
+                                + " where coalesce(value.organization_id, '') = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcCRMRepository::mapAccount,
+                        organizationId,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                CRMAccount::id);
+    }
+
+    @Override
+    public CRMAccount updateAccount(
+            String organizationId,
+            String id,
+            String name,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit) {
+        return mutate(
+                organizationId,
+                () ->
+                        jdbcTemplate.update(
+                                "update crm_accounts set name = ?, version = version + 1, "
+                                        + "updated_at = ? where id = ? "
+                                        + "and coalesce(organization_id, '') = ? "
+                                        + "and version = ? and status = 'active'",
+                                name,
+                                Timestamp.from(updatedAt),
+                                id,
+                                organizationId,
+                                version),
+                audit,
+                () -> getAccount(organizationId, id).orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    @Override
+    public CRMAccount transitionAccount(Transition value, AuditEvent audit) {
+        return mutate(
+                value.organizationId(),
+                () ->
+                        jdbcTemplate.update(
+                                "update crm_accounts set status = ?, version = version + 1, "
+                                        + "updated_at = ? where id = ? "
+                                        + "and coalesce(organization_id, '') = ? "
+                                        + "and version = ? and status = ?",
+                                value.toStatus(),
+                                Timestamp.from(value.updatedAt()),
+                                value.id(),
+                                value.organizationId(),
+                                value.version(),
+                                value.fromStatus()),
+                audit,
+                () ->
+                        getAccount(value.organizationId(), value.id())
+                                .orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    @Override
+    public void createContact(CRMContact value, AuditEvent audit) {
+        runCreate(
+                scope(value.organizationId()),
+                () -> {
+                    requireAccount(scope(value.organizationId()), value.accountId());
+                    return jdbcTemplate.update(
+                            "insert into crm_contacts "
+                                    + "(id, organization_id, account_id, name, email, phone, "
+                                    + "status, version, created_at, updated_at) "
+                                    + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            value.id(),
+                            value.organizationId(),
+                            value.accountId(),
+                            value.name(),
+                            value.email(),
+                            value.phone(),
+                            value.status(),
+                            value.version(),
+                            Timestamp.from(value.createdAt()),
+                            Timestamp.from(value.updatedAt()));
+                },
+                audit);
+    }
+
+    @Override
+    public Optional<CRMContact> getContact(String organizationId, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(CONTACT_COLUMNS, "crm_contacts")
+                                + " where value.id = ? and coalesce(value.organization_id, '') = ?"
+                                + activeScope("value"),
+                        JdbcCRMRepository::mapContact,
+                        id,
+                        organizationId));
+    }
+
+    @Override
+    public PageResult<CRMContact> listContacts(
+            String organizationId, String status, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(CONTACT_COLUMNS, "crm_contacts")
+                                + " where coalesce(value.organization_id, '') = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcCRMRepository::mapContact,
+                        organizationId,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                CRMContact::id);
+    }
+
+    @Override
+    public CRMContact updateContact(
+            String organizationId,
+            CRMContact value,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit) {
+        return mutate(
+                organizationId,
+                () -> {
+                    requireAccount(organizationId, value.accountId());
+                    return jdbcTemplate.update(
+                            "update crm_contacts set account_id = ?, name = ?, email = ?, phone = ?, "
+                                    + "version = version + 1, updated_at = ? where id = ? "
+                                    + "and coalesce(organization_id, '') = ? "
+                                    + "and version = ? and status = 'active'",
+                            value.accountId(),
+                            value.name(),
+                            value.email(),
+                            value.phone(),
+                            Timestamp.from(updatedAt),
+                            value.id(),
+                            organizationId,
+                            version);
+                },
+                audit,
+                () ->
+                        getContact(organizationId, value.id())
+                                .orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    @Override
+    public CRMContact transitionContact(Transition value, AuditEvent audit) {
+        return mutate(
+                value.organizationId(),
+                () ->
+                        jdbcTemplate.update(
+                                "update crm_contacts set status = ?, version = version + 1, "
+                                        + "updated_at = ? where id = ? "
+                                        + "and coalesce(organization_id, '') = ? "
+                                        + "and version = ? and status = ?",
+                                value.toStatus(),
+                                Timestamp.from(value.updatedAt()),
+                                value.id(),
+                                value.organizationId(),
+                                value.version(),
+                                value.fromStatus()),
+                audit,
+                () ->
+                        getContact(value.organizationId(), value.id())
+                                .orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    @Override
+    public void createActivity(CRMActivity value, AuditEvent audit) {
+        runCreate(
+                scope(value.organizationId()),
+                () -> {
+                    requireSubject(
+                            scope(value.organizationId()), value.subjectType(), value.subjectId());
+                    return jdbcTemplate.update(
+                            "insert into crm_activities "
+                                    + "(id, organization_id, subject_type, subject_id, activity_type, "
+                                    + "summary, occurred_at, created_by, created_at) "
+                                    + "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            value.id(),
+                            value.organizationId(),
+                            value.subjectType(),
+                            value.subjectId(),
+                            value.type(),
+                            value.summary(),
+                            Timestamp.from(value.occurredAt()),
+                            value.createdBy(),
+                            Timestamp.from(value.createdAt()));
+                },
+                audit);
+    }
+
+    @Override
+    public PageResult<CRMActivity> listActivities(
+            String organizationId,
+            String subjectType,
+            String subjectId,
+            String cursor,
+            int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(ACTIVITY_COLUMNS, "crm_activities")
+                                + " where coalesce(value.organization_id, '') = ? "
+                                + "and (? = '' or value.subject_type = ?) "
+                                + "and (? = '' or value.subject_id = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcCRMRepository::mapActivity,
+                        organizationId,
+                        subjectType,
+                        subjectType,
+                        subjectId,
+                        subjectId,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                CRMActivity::id);
+    }
+
+    @Override
+    public void createOpportunity(CRMOpportunity value, AuditEvent audit) {
+        runCreate(
+                scope(value.organizationId()),
+                () -> {
+                    requireAccount(scope(value.organizationId()), value.accountId());
+                    return jdbcTemplate.update(
+                            "insert into crm_opportunities "
+                                    + "(id, organization_id, account_id, name, amount_minor, currency, "
+                                    + "stage, version, created_at, updated_at) "
+                                    + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            value.id(),
+                            value.organizationId(),
+                            value.accountId(),
+                            value.name(),
+                            value.amountMinor(),
+                            value.currency(),
+                            value.stage(),
+                            value.version(),
+                            Timestamp.from(value.createdAt()),
+                            Timestamp.from(value.updatedAt()));
+                },
+                audit);
+    }
+
+    @Override
+    public Optional<CRMOpportunity> getOpportunity(String organizationId, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(OPPORTUNITY_COLUMNS, "crm_opportunities")
+                                + " where value.id = ? and coalesce(value.organization_id, '') = ?"
+                                + activeScope("value"),
+                        JdbcCRMRepository::mapOpportunity,
+                        id,
+                        organizationId));
+    }
+
+    @Override
+    public PageResult<CRMOpportunity> listOpportunities(
+            String organizationId, String stage, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(OPPORTUNITY_COLUMNS, "crm_opportunities")
+                                + " where coalesce(value.organization_id, '') = ? "
+                                + "and (? = '' or value.stage = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcCRMRepository::mapOpportunity,
+                        organizationId,
+                        stage,
+                        stage,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                CRMOpportunity::id);
+    }
+
+    @Override
+    public CRMOpportunity updateOpportunity(
+            String organizationId,
+            CRMOpportunity value,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit) {
+        return mutate(
+                organizationId,
+                () -> {
+                    requireAccount(organizationId, value.accountId());
+                    return jdbcTemplate.update(
+                            "update crm_opportunities set account_id = ?, name = ?, amount_minor = ?, "
+                                    + "currency = ?, version = version + 1, updated_at = ? where id = ? "
+                                    + "and coalesce(organization_id, '') = ? and version = ? "
+                                    + "and stage not in ('won', 'lost')",
+                            value.accountId(),
+                            value.name(),
+                            value.amountMinor(),
+                            value.currency(),
+                            Timestamp.from(updatedAt),
+                            value.id(),
+                            organizationId,
+                            version);
+                },
+                audit,
+                () ->
+                        getOpportunity(organizationId, value.id())
+                                .orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    @Override
+    public CRMOpportunity advanceOpportunity(StageTransition value, AuditEvent audit) {
+        return mutate(
+                value.organizationId(),
+                () ->
+                        jdbcTemplate.update(
+                                "update crm_opportunities set stage = ?, version = version + 1, "
+                                        + "updated_at = ? where id = ? "
+                                        + "and coalesce(organization_id, '') = ? "
+                                        + "and version = ? and stage = ?",
+                                value.toStage(),
+                                Timestamp.from(value.updatedAt()),
+                                value.id(),
+                                value.organizationId(),
+                                value.version(),
+                                value.fromStage()),
+                audit,
+                () ->
+                        getOpportunity(value.organizationId(), value.id())
+                                .orElseThrow(JdbcCRMRepository::notFound));
+    }
+
+    private void runCreate(String organizationId, Mutation mutation, AuditEvent audit) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        lockScope(organizationId);
+                        requireMutation(mutation.run());
+                        appendAudit(audit);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private <T> T mutate(
+            String organizationId, Mutation mutation, AuditEvent audit, Result<T> result) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                lockScope(organizationId);
+                                requireMutation(mutation.run());
+                                appendAudit(audit);
+                                return result.get();
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private void lockScope(String organizationId) {
+{{- if .Tenancy}}
+        List<String> values =
+                jdbcTemplate.query(
+                        "select id from organizations where id = ? and status = 'active' for update",
+                        (resultSet, rowNumber) -> resultSet.getString(1),
+                        organizationId);
+        if (values.isEmpty()) {
+            throw notFound();
+        }
+{{- end}}
+    }
+
+    private void requireAccount(String organizationId, String accountId) {
+        if (accountId == null || accountId.isEmpty()) {
+            return;
+        }
+        List<String> values =
+                jdbcTemplate.query(
+                        "select id from crm_accounts where id = ? "
+                                + "and coalesce(organization_id, '') = ? "
+                                + "and status = 'active' for update",
+                        (resultSet, rowNumber) -> resultSet.getString(1),
+                        accountId,
+                        organizationId);
+        if (values.isEmpty()) {
+            throw notFound();
+        }
+    }
+
+    private void requireSubject(String organizationId, String subjectType, String subjectId) {
+        String table =
+                switch (subjectType) {
+                    case "account" -> "crm_accounts";
+                    case "contact" -> "crm_contacts";
+                    case "opportunity" -> "crm_opportunities";
+                    default -> throw notFound();
+                };
+        List<String> values =
+                jdbcTemplate.query(
+                        "select id from "
+                                + table
+                                + " where id = ? and coalesce(organization_id, '') = ? for update",
+                        (resultSet, rowNumber) -> resultSet.getString(1),
+                        subjectId,
+                        organizationId);
+        if (values.isEmpty()) {
+            throw notFound();
+        }
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static String select(String columns, String table) {
+        return "select " + columns + " from " + table + " value";
+    }
+
+    private static String activeScope(String alias) {
+{{- if .Tenancy}}
+        return " and exists (select 1 from organizations organization where organization.id = "
+                + alias
+                + ".organization_id and organization.status = 'active')";
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static CRMAccount mapAccount(ResultSet value, int rowNumber) throws SQLException {
+        return new CRMAccount(
+                value.getString("id"),
+                value.getString("organization_id"),
+                value.getString("name"),
+                value.getString("status"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static CRMContact mapContact(ResultSet value, int rowNumber) throws SQLException {
+        return new CRMContact(
+                value.getString("id"),
+                value.getString("organization_id"),
+                value.getString("account_id"),
+                value.getString("name"),
+                value.getString("email"),
+                value.getString("phone"),
+                value.getString("status"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static CRMActivity mapActivity(ResultSet value, int rowNumber) throws SQLException {
+        return new CRMActivity(
+                value.getString("id"),
+                value.getString("organization_id"),
+                value.getString("subject_type"),
+                value.getString("subject_id"),
+                value.getString("activity_type"),
+                value.getString("summary"),
+                instant(value.getTimestamp("occurred_at")),
+                value.getString("created_by"),
+                instant(value.getTimestamp("created_at")));
+    }
+
+    private static CRMOpportunity mapOpportunity(ResultSet value, int rowNumber)
+            throws SQLException {
+        return new CRMOpportunity(
+                value.getString("id"),
+                value.getString("organization_id"),
+                value.getString("account_id"),
+                value.getString("name"),
+                value.getLong("amount_minor"),
+                value.getString("currency"),
+                value.getString("stage"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static <T> Optional<T> first(List<T> values) {
+        return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
+    }
+
+    private static <T> PageResult<T> page(
+            List<T> source, int limit, Identifier<T> identifier) {
+        List<T> values = new ArrayList<>(source);
+        String nextCursor = "";
+        if (values.size() > limit) {
+            nextCursor = identifier.get(values.get(limit - 1));
+            values = new ArrayList<>(values.subList(0, limit));
+        }
+        return new PageResult<>(List.copyOf(values), nextCursor);
+    }
+
+    private static void requireMutation(int changed) {
+        if (changed != 1) {
+            throw conflict(null);
+        }
+    }
+
+    private static Instant instant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static String scope(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static CRMException notFound() {
+        return new CRMException(CRMException.Kind.NOT_FOUND, "CRM record was not found");
+    }
+
+    private static CRMException conflict(Throwable cause) {
+        CRMException exception =
+                new CRMException(
+                        CRMException.Kind.CONFLICT,
+                        "CRM record changed or conflicts with current state");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+
+    @FunctionalInterface
+    private interface Mutation {
+        int run();
+    }
+
+    @FunctionalInterface
+    private interface Result<T> {
+        T get();
+    }
+
+    @FunctionalInterface
+    private interface Identifier<T> {
+        String get(T value);
+    }
+}

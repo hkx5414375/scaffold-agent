@@ -1,0 +1,16 @@
+package {{.PackageName}}.crm;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record CRMAccount(
+        String id,
+        String organizationId,
+        String name,
+        String status,
+        @JsonSerialize(using = ToStringSerializer.class) long version,
+        Instant createdAt,
+        Instant updatedAt) {}

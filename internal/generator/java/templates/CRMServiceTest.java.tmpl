@@ -1,0 +1,311 @@
+package {{.PackageName}}.crm;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class CRMServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void supportsCoreRecordsAndForwardOnlyPipeline() {
+        FakeRepository repository = new FakeRepository();
+        CRMService service = new CRMService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+        Principal actor = actor();
+
+        CRMAccount account =
+                service.createAccount(new CRMService.AccountWrite(" Example Account "), actor);
+        CRMContact contact =
+                service.createContact(
+                        new CRMService.ContactWrite(
+                                account.id(), " Ada ", "ADA@EXAMPLE.COM", "+1 555 0100"),
+                        actor);
+        CRMActivity activity =
+                service.createActivity(
+                        new CRMService.ActivityWrite(
+                                "contact", contact.id(), "call", " Discovery call ", NOW),
+                        actor);
+        CRMOpportunity opportunity =
+                service.createOpportunity(
+                        new CRMService.OpportunityWrite(
+                                account.id(), " Expansion ", "12500", "usd"),
+                        actor);
+
+        assertThat(account.name()).isEqualTo("Example Account");
+        assertThat(contact.email()).isEqualTo("ada@example.com");
+        assertThat(activity.summary()).isEqualTo("Discovery call");
+        assertThat(opportunity.amountMinor()).isEqualTo(12500L);
+        CRMOpportunity qualified =
+                service.advanceOpportunity(
+                        opportunity.id(),
+                        new CRMService.StageInput(CRMService.QUALIFIED, 1L),
+                        actor);
+        assertThat(qualified.stage()).isEqualTo(CRMService.QUALIFIED);
+        assertKind(
+                () ->
+                        service.advanceOpportunity(
+                                opportunity.id(),
+                                new CRMService.StageInput(CRMService.WON, 2L),
+                                actor),
+                CRMException.Kind.CONFLICT);
+        assertThat(repository.audits).hasSize(5);
+    }
+
+    @Test
+    void rejectsInvalidPortableInput() {
+        CRMService service =
+                new CRMService(new FakeRepository(), Clock.fixed(NOW, ZoneOffset.UTC));
+        assertKind(
+                () -> service.createAccount(new CRMService.AccountWrite(" "), actor()),
+                CRMException.Kind.INVALID);
+        assertKind(
+                () ->
+                        service.createOpportunity(
+                                new CRMService.OpportunityWrite("account", "Deal", "01", "USD"),
+                                actor()),
+                CRMException.Kind.INVALID);
+        assertKind(
+                () -> service.listActivities("contact", "", "", 20, actor()),
+                CRMException.Kind.INVALID);
+    }
+
+    private static void assertKind(Runnable operation, CRMException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CRMException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+    private static Principal actor() {
+        return new Principal("user-1", "admin@example.com", "admin", "token"{{if .Tenancy}}, "org-1"{{end}});
+    }
+
+    private static final class FakeRepository implements CRMRepository {
+
+        private final Map<String, CRMAccount> accounts = new LinkedHashMap<>();
+        private final Map<String, CRMContact> contacts = new LinkedHashMap<>();
+        private final Map<String, CRMActivity> activities = new LinkedHashMap<>();
+        private final Map<String, CRMOpportunity> opportunities = new LinkedHashMap<>();
+        private final List<AuditEvent> audits = new ArrayList<>();
+
+        @Override
+        public void createAccount(CRMAccount value, AuditEvent audit) {
+            accounts.put(value.id(), value);
+            audits.add(audit);
+        }
+
+        @Override
+        public Optional<CRMAccount> getAccount(String organizationId, String id) {
+            return Optional.ofNullable(accounts.get(id));
+        }
+
+        @Override
+        public PageResult<CRMAccount> listAccounts(
+                String organizationId, String status, String cursor, int limit) {
+            return new PageResult<>(List.copyOf(accounts.values()), "");
+        }
+
+        @Override
+        public CRMAccount updateAccount(
+                String organizationId,
+                String id,
+                String name,
+                long version,
+                Instant updatedAt,
+                AuditEvent audit) {
+            CRMAccount current = accounts.get(id);
+            requireVersion(current.version(), version);
+            CRMAccount value =
+                    new CRMAccount(
+                            id,
+                            current.organizationId(),
+                            name,
+                            current.status(),
+                            version + 1,
+                            current.createdAt(),
+                            updatedAt);
+            accounts.put(id, value);
+            audits.add(audit);
+            return value;
+        }
+
+        @Override
+        public CRMAccount transitionAccount(Transition value, AuditEvent audit) {
+            CRMAccount current = accounts.get(value.id());
+            requireVersion(current.version(), value.version());
+            CRMAccount result =
+                    new CRMAccount(
+                            current.id(),
+                            current.organizationId(),
+                            current.name(),
+                            value.toStatus(),
+                            value.version() + 1,
+                            current.createdAt(),
+                            value.updatedAt());
+            accounts.put(result.id(), result);
+            audits.add(audit);
+            return result;
+        }
+
+        @Override
+        public void createContact(CRMContact value, AuditEvent audit) {
+            contacts.put(value.id(), value);
+            audits.add(audit);
+        }
+
+        @Override
+        public Optional<CRMContact> getContact(String organizationId, String id) {
+            return Optional.ofNullable(contacts.get(id));
+        }
+
+        @Override
+        public PageResult<CRMContact> listContacts(
+                String organizationId, String status, String cursor, int limit) {
+            return new PageResult<>(List.copyOf(contacts.values()), "");
+        }
+
+        @Override
+        public CRMContact updateContact(
+                String organizationId,
+                CRMContact value,
+                long version,
+                Instant updatedAt,
+                AuditEvent audit) {
+            CRMContact current = contacts.get(value.id());
+            requireVersion(current.version(), version);
+            CRMContact result =
+                    new CRMContact(
+                            value.id(),
+                            current.organizationId(),
+                            value.accountId(),
+                            value.name(),
+                            value.email(),
+                            value.phone(),
+                            current.status(),
+                            version + 1,
+                            current.createdAt(),
+                            updatedAt);
+            contacts.put(result.id(), result);
+            audits.add(audit);
+            return result;
+        }
+
+        @Override
+        public CRMContact transitionContact(Transition value, AuditEvent audit) {
+            CRMContact current = contacts.get(value.id());
+            requireVersion(current.version(), value.version());
+            CRMContact result =
+                    new CRMContact(
+                            current.id(),
+                            current.organizationId(),
+                            current.accountId(),
+                            current.name(),
+                            current.email(),
+                            current.phone(),
+                            value.toStatus(),
+                            value.version() + 1,
+                            current.createdAt(),
+                            value.updatedAt());
+            contacts.put(result.id(), result);
+            audits.add(audit);
+            return result;
+        }
+
+        @Override
+        public void createActivity(CRMActivity value, AuditEvent audit) {
+            activities.put(value.id(), value);
+            audits.add(audit);
+        }
+
+        @Override
+        public PageResult<CRMActivity> listActivities(
+                String organizationId,
+                String subjectType,
+                String subjectId,
+                String cursor,
+                int limit) {
+            return new PageResult<>(List.copyOf(activities.values()), "");
+        }
+
+        @Override
+        public void createOpportunity(CRMOpportunity value, AuditEvent audit) {
+            opportunities.put(value.id(), value);
+            audits.add(audit);
+        }
+
+        @Override
+        public Optional<CRMOpportunity> getOpportunity(String organizationId, String id) {
+            return Optional.ofNullable(opportunities.get(id));
+        }
+
+        @Override
+        public PageResult<CRMOpportunity> listOpportunities(
+                String organizationId, String stage, String cursor, int limit) {
+            return new PageResult<>(List.copyOf(opportunities.values()), "");
+        }
+
+        @Override
+        public CRMOpportunity updateOpportunity(
+                String organizationId,
+                CRMOpportunity value,
+                long version,
+                Instant updatedAt,
+                AuditEvent audit) {
+            CRMOpportunity current = opportunities.get(value.id());
+            requireVersion(current.version(), version);
+            CRMOpportunity result =
+                    new CRMOpportunity(
+                            value.id(),
+                            current.organizationId(),
+                            value.accountId(),
+                            value.name(),
+                            value.amountMinor(),
+                            value.currency(),
+                            current.stage(),
+                            version + 1,
+                            current.createdAt(),
+                            updatedAt);
+            opportunities.put(result.id(), result);
+            audits.add(audit);
+            return result;
+        }
+
+        @Override
+        public CRMOpportunity advanceOpportunity(StageTransition value, AuditEvent audit) {
+            CRMOpportunity current = opportunities.get(value.id());
+            requireVersion(current.version(), value.version());
+            CRMOpportunity result =
+                    new CRMOpportunity(
+                            current.id(),
+                            current.organizationId(),
+                            current.accountId(),
+                            current.name(),
+                            current.amountMinor(),
+                            current.currency(),
+                            value.toStage(),
+                            value.version() + 1,
+                            current.createdAt(),
+                            value.updatedAt());
+            opportunities.put(result.id(), result);
+            audits.add(audit);
+            return result;
+        }
+
+        private static void requireVersion(long current, long expected) {
+            if (current != expected) {
+                throw new CRMException(CRMException.Kind.CONFLICT, "version conflict");
+            }
+        }
+    }
+}

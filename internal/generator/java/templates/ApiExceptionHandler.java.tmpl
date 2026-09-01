@@ -1,6 +1,9 @@
 package {{.PackageName}}.http;
 
 import {{.PackageName}}.identity.IdentityException;
+{{- if .CRM}}
+import {{.PackageName}}.crm.CRMException;
+{{- end}}
 {{- if .CustomerAccounts}}
 import {{.PackageName}}.customeraccounts.CustomerAccountException;
 {{- end}}
@@ -41,6 +44,17 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 public final class ApiExceptionHandler {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+{{- if .CRM}}
+    @ExceptionHandler(CRMException.class)
+    public ResponseEntity<ApiError> crm(CRMException exception) {
+        return switch (exception.kind()) {
+            case INVALID -> response(HttpStatus.BAD_REQUEST, "crm.invalid", exception.getMessage());
+            case NOT_FOUND -> response(HttpStatus.NOT_FOUND, "crm.not_found", exception.getMessage());
+            case CONFLICT -> response(HttpStatus.CONFLICT, "crm.conflict", exception.getMessage());
+        };
+    }
+{{- end}}
 
 {{- if .CustomerAccounts}}
     @ExceptionHandler(CustomerAccountException.class)

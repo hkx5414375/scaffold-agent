@@ -203,6 +203,21 @@ or password mutations use decimal-string optimistic versions and commit audit ev
 in the same transaction. Tenant storefront requests require the server-provided
 `X-Organization-ID`; do not expose tenant selection to browser input.
 {{end}}
+{{if .CRM}}
+
+## CRM core
+
+The CRM capability provides business accounts, contacts, immutable activities,
+and forward-only sales opportunities under `/api/v1/crm`. Business accounts are
+not tenancy organizations, and contacts are not staff or storefront identities.
+Amounts and optimistic versions cross JSON as decimal strings.
+
+Use `crm:read` and `crm:write` for ordinary records, and reserve
+`crm:pipeline:manage` for stage changes. Opportunities advance through `lead`,
+`qualified`, `proposal`, and `won`; any nonterminal stage may become `lost`.
+Every mutation commits its audit event in the same transaction. Tenant projects
+hide all CRM records and reject writes while the selected organization is inactive.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

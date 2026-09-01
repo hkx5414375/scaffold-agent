@@ -1,0 +1,21 @@
+package {{.PackageName}}.crm;
+
+public final class CRMException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        CONFLICT
+    }
+
+    private final Kind kind;
+
+    public CRMException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

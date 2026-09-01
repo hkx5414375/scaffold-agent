@@ -1,0 +1,16 @@
+package {{.PackageName}}.crm;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record CRMActivity(
+        String id,
+        String organizationId,
+        String subjectType,
+        String subjectId,
+        String type,
+        String summary,
+        Instant occurredAt,
+        String createdBy,
+        Instant createdAt) {}

@@ -1,0 +1,89 @@
+package {{.PackageName}}.crm;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface CRMRepository {
+
+    void createAccount(CRMAccount value, AuditEvent audit);
+
+    Optional<CRMAccount> getAccount(String organizationId, String id);
+
+    PageResult<CRMAccount> listAccounts(
+            String organizationId, String status, String cursor, int limit);
+
+    CRMAccount updateAccount(
+            String organizationId,
+            String id,
+            String name,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit);
+
+    CRMAccount transitionAccount(Transition value, AuditEvent audit);
+
+    void createContact(CRMContact value, AuditEvent audit);
+
+    Optional<CRMContact> getContact(String organizationId, String id);
+
+    PageResult<CRMContact> listContacts(
+            String organizationId, String status, String cursor, int limit);
+
+    CRMContact updateContact(
+            String organizationId,
+            CRMContact value,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit);
+
+    CRMContact transitionContact(Transition value, AuditEvent audit);
+
+    void createActivity(CRMActivity value, AuditEvent audit);
+
+    PageResult<CRMActivity> listActivities(
+            String organizationId,
+            String subjectType,
+            String subjectId,
+            String cursor,
+            int limit);
+
+    void createOpportunity(CRMOpportunity value, AuditEvent audit);
+
+    Optional<CRMOpportunity> getOpportunity(String organizationId, String id);
+
+    PageResult<CRMOpportunity> listOpportunities(
+            String organizationId, String stage, String cursor, int limit);
+
+    CRMOpportunity updateOpportunity(
+            String organizationId,
+            CRMOpportunity value,
+            long version,
+            Instant updatedAt,
+            AuditEvent audit);
+
+    CRMOpportunity advanceOpportunity(StageTransition value, AuditEvent audit);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult<T>(List<T> items, String nextCursor) {}
+
+    record Transition(
+            String organizationId,
+            String id,
+            long version,
+            String fromStatus,
+            String toStatus,
+            Instant updatedAt) {}
+
+    record StageTransition(
+            String organizationId,
+            String id,
+            long version,
+            String fromStage,
+            String toStage,
+            Instant updatedAt) {}
+}

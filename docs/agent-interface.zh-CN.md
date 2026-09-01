@@ -52,7 +52,7 @@ Go、Java 或 Python 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须�
 
 Go、Java 或 Python 适配器选择 `customer-accounts` `0.1.0` 后，会生成与后台员工 RBAC 完全分离的商城顾客主体、最长 30 天的顾客专用浏览器会话、PostgreSQL/MySQL 存储、OpenAPI、后台管理接口和公开/自助账户接口。顾客不会写入后台角色，不复用 `scaffold_session` Cookie。邮箱按组织转为小写并保持唯一；改密、停用、恢复和关闭账户都携带乐观版本，撤销顾客会话，并在同一事务写入审计。租户项目必须使用 `organization-tenancy` `0.3.0`。同时选择 `storefront: nuxt` 时，会生成注册、登录、资料、改密和销户页，但 `SCAFFOLD_ORGANIZATION_ID` 与后端地址仍只存在于服务端。AI 不得在没有通知依赖能力时虚构邮箱验证或密码找回，也不得把顾客身份并入员工角色、员工 Token 或员工 Cookie。
 
-Go 适配器选择 `crm-core` `0.1.0` 后，会为 PostgreSQL 或 MySQL 生成业务企业、联系人、不可变跟进记录、销售机会、OpenAPI、权限路由和共用 Vue 管理端。业务企业不是租户组织；联系人也不会自动变成员工或商城顾客。金额使用最小货币单位并在 JSON 中表示为十进制字符串，销售阶段只能按 `lead`、`qualified`、`proposal`、`won` 向前推进，任一非终态可以转为 `lost`。租户项目必须同时选择 `organization-tenancy` `0.3.0`，停用组织不能读写 CRM。AI 应直接复用 `crm:read`、`crm:write`、`crm:pipeline:manage` 三个权限和现有 HTTP 契约，不得修改历史活动、跳过销售阶段或把业务企业表当作权限组织表。Java 与 Python 适配器在对齐完成前会明确拒绝该能力，而不是生成不完整项目。
+Go 或 Java 适配器选择 `crm-core` `0.1.0` 后，会为 PostgreSQL 或 MySQL 生成业务企业、联系人、不可变跟进记录、销售机会、OpenAPI、权限路由和共用 Vue 管理端。业务企业不是租户组织；联系人也不会自动变成员工或商城顾客。金额使用最小货币单位并在 JSON 中表示为十进制字符串，销售阶段只能按 `lead`、`qualified`、`proposal`、`won` 向前推进，任一非终态可以转为 `lost`。租户项目必须同时选择 `organization-tenancy` `0.3.0`，停用组织不能读写 CRM。AI 应直接复用 `crm:read`、`crm:write`、`crm:pipeline:manage` 三个权限和现有 HTTP 契约，不得修改历史活动、跳过销售阶段或把业务企业表当作权限组织表。Python 适配器在对齐完成前会明确拒绝该能力，而不是生成不完整项目。完整选择见 `examples/crm-service-go/scaffold.yaml` 和 `examples/crm-service-java/scaffold.yaml`。
 
 ## STDIO 协议
 

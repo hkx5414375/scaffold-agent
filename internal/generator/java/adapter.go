@@ -54,6 +54,8 @@ const (
 	catalogVersion          = "0.1.0"
 	customerOwner           = "customer-accounts"
 	customerVersion         = "0.1.0"
+	crmOwner                = "crm-core"
+	crmVersion              = "0.1.0"
 )
 
 //go:embed all:templates
@@ -89,6 +91,7 @@ type databaseData struct {
 	ApprovalsMigrationTemplate        string
 	CatalogMigrationTemplate          string
 	CustomerMigrationTemplate         string
+	CRMMigrationTemplate              string
 }
 
 var databases = map[string]databaseData{
@@ -112,6 +115,7 @@ var databases = map[string]databaseData{
 		ApprovalsMigrationTemplate:        "templates/approvals_postgresql.sql.tmpl",
 		CatalogMigrationTemplate:          "templates/catalog_postgresql.sql.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_postgresql.sql.tmpl",
+		CRMMigrationTemplate:              "templates/crm_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -133,6 +137,7 @@ var databases = map[string]databaseData{
 		ApprovalsMigrationTemplate:        "templates/approvals_mysql.sql.tmpl",
 		CatalogMigrationTemplate:          "templates/catalog_mysql.sql.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_mysql.sql.tmpl",
+		CRMMigrationTemplate:              "templates/crm_mysql.sql.tmpl",
 	},
 }
 
@@ -269,6 +274,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: crmOwner, Version: crmVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable accounts, contacts, activities, and sales opportunities.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 type templateData struct {
@@ -397,6 +412,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	approvalsEnabled := false
 	catalogEnabled := false
 	customerEnabled := false
+	crmEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -436,6 +452,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == customerOwner {
 			customerEnabled = true
 		}
+		if pack.Metadata.Name == crmOwner {
+			crmEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -445,6 +464,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if customerEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"customer-accounts with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"crm-core with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine, approvalsEnabled)
@@ -495,6 +519,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if customerEnabled {
 		migrationCount++
 	}
+	if crmEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -517,6 +544,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Approvals:        approvalsEnabled,
 		Catalog:          catalogEnabled,
 		CustomerAccounts: customerEnabled,
+		CRM:              crmEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+len(storefrontui.BaseTemplates)+20)
@@ -537,6 +565,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	approvalsPaths := make(map[string]struct{}, 11)
 	catalogPaths := make(map[string]struct{}, 12)
 	customerPaths := make(map[string]struct{}, 16)
+	crmPaths := make(map[string]struct{}, 16)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -632,6 +661,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		storefrontPaths[path] = struct{}{}
 		customerPaths[path] = struct{}{}
+	}
+	addCRMTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		crmPaths[path] = struct{}{}
+	}
+	addCRMUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
+		crmPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -969,6 +1007,28 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[customerOwner] = customerVersion
 	}
+	if crmEnabled {
+		for path, templatePath := range map[string]string{
+			mainRoot + "/crm/CRMAccount.java":                       "templates/CRMAccount.java.tmpl",
+			mainRoot + "/crm/CRMContact.java":                       "templates/CRMContact.java.tmpl",
+			mainRoot + "/crm/CRMActivity.java":                      "templates/CRMActivity.java.tmpl",
+			mainRoot + "/crm/CRMOpportunity.java":                   "templates/CRMOpportunity.java.tmpl",
+			mainRoot + "/crm/CRMException.java":                     "templates/CRMException.java.tmpl",
+			mainRoot + "/crm/CRMRepository.java":                    "templates/CRMRepository.java.tmpl",
+			mainRoot + "/crm/JdbcCRMRepository.java":                "templates/JdbcCRMRepository.java.tmpl",
+			mainRoot + "/crm/CRMService.java":                       "templates/CRMService.java.tmpl",
+			mainRoot + "/crm/CRMController.java":                    "templates/CRMController.java.tmpl",
+			testRoot + "/crm/CRMServiceTest.java":                   "templates/CRMServiceTest.java.tmpl",
+			testRoot + "/crm/CRMDatabaseIntegrationTest.java":       "templates/CRMDatabaseIntegrationTest.java.tmpl",
+			"src/main/resources/db/migration/V000280__crm_core.sql": database.CRMMigrationTemplate,
+		} {
+			addCRMTarget(path, templatePath)
+		}
+		if adminEnabled {
+			addCRMUI("web/admin/src/views/CRMView.vue", "templates/src/views/CRMView.vue.tmpl")
+		}
+		capabilityLock[crmOwner] = crmVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -1070,6 +1130,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isCustomerPath := customerPaths[path]; isCustomerPath {
 			owner = customerOwner
+		}
+		if _, isCRMPath := crmPaths[path]; isCRMPath {
+			owner = crmOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

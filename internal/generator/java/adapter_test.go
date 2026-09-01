@@ -236,6 +236,74 @@ func TestCustomerAccountsRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateCRMCoreAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: crmOwner, Version: crmVersion},
+			}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if result.CapabilityLock[crmOwner] != crmVersion ||
+				result.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				result.CapabilityLock[adminOwner] != adminVersion {
+				t.Fatalf("Generate() capability lock = %#v", result.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/crm/CRMService.java",
+				"src/main/java/com/scaffold/generated/demoservice/crm/JdbcCRMRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/crm/CRMController.java",
+				"src/test/java/com/scaffold/generated/demoservice/crm/CRMServiceTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/crm/CRMDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000280__crm_core.sql",
+				"web/admin/src/views/CRMView.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != crmOwner {
+					t.Errorf("CRM output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated CRM OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/crm/accounts:") ||
+				!strings.Contains(string(openAPI), "/api/v1/crm/opportunities/{id}/advance:") ||
+				!strings.Contains(string(openAPI), "crm:pipeline:manage") ||
+				!strings.Contains(string(openAPI), "CRMActivityWrite:") ||
+				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")), "CRMView") {
+				t.Fatal("generated Java CRM lacks contract or administration wiring")
+			}
+		})
+	}
+}
+
+func TestCRMCoreRequiresLifecycleTenancy(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: crmOwner, Version: crmVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 	t.Parallel()
 

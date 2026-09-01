@@ -263,6 +263,17 @@ customer sessions. Closed accounts are retained as terminal principals for
 future order references. This version intentionally does not generate email
 verification or password recovery without a notification-dependent capability.
 {{end}}
+{{if .CRM}}
+
+Business accounts, contacts, immutable activities, and forward-only sales
+opportunities are available under `/api/v1/crm`. Business accounts are not
+tenancy organizations, and contacts are not staff or storefront identities.
+Amounts and optimistic versions cross JSON as decimal strings. Use `crm:read`
+and `crm:write` for ordinary records, and reserve `crm:pipeline:manage` for stage
+changes. Opportunities advance through `lead`, `qualified`, `proposal`, and
+`won`; any nonterminal stage may become `lost`. Every mutation commits its audit
+event atomically, and inactive tenant organizations cannot read or write CRM.
+{{end}}
 {{if .Admin}}
 ## Administration UI
 

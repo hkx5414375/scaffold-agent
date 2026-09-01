@@ -1,0 +1,203 @@
+package {{.PackageName}}.crm;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class CRMController {
+
+    private static final String ACCOUNTS = "/api/v1/crm/accounts";
+    private static final String CONTACTS = "/api/v1/crm/contacts";
+    private static final String ACTIVITIES = "/api/v1/crm/activities";
+    private static final String OPPORTUNITIES = "/api/v1/crm/opportunities";
+
+    private final CRMService service;
+
+    public CRMController(CRMService service) {
+        this.service = service;
+    }
+
+    @PostMapping(ACCOUNTS)
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<CRMAccount> createAccount(
+            @RequestBody CRMService.AccountWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createAccount(input, actor));
+    }
+
+    @GetMapping(ACCOUNTS)
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMService.AccountPage listAccounts(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listAccounts(status, cursor, limit, actor);
+    }
+
+    @GetMapping(ACCOUNTS + "/{id}")
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMAccount getAccount(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getAccount(id, actor);
+    }
+
+    @PutMapping(ACCOUNTS + "/{id}")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMAccount updateAccount(
+            @PathVariable String id,
+            @RequestBody CRMService.AccountUpdate input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.updateAccount(id, input, actor);
+    }
+
+    @PostMapping(ACCOUNTS + "/{id}/archive")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMAccount archiveAccount(
+            @PathVariable String id,
+            @RequestBody CRMService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archiveAccount(id, input, actor);
+    }
+
+    @PostMapping(ACCOUNTS + "/{id}/reactivate")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMAccount reactivateAccount(
+            @PathVariable String id,
+            @RequestBody CRMService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivateAccount(id, input, actor);
+    }
+
+    @PostMapping(CONTACTS)
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<CRMContact> createContact(
+            @RequestBody CRMService.ContactWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createContact(input, actor));
+    }
+
+    @GetMapping(CONTACTS)
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMService.ContactPage listContacts(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listContacts(status, cursor, limit, actor);
+    }
+
+    @GetMapping(CONTACTS + "/{id}")
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMContact getContact(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getContact(id, actor);
+    }
+
+    @PutMapping(CONTACTS + "/{id}")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMContact updateContact(
+            @PathVariable String id,
+            @RequestBody CRMService.ContactUpdate input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.updateContact(id, input, actor);
+    }
+
+    @PostMapping(CONTACTS + "/{id}/archive")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMContact archiveContact(
+            @PathVariable String id,
+            @RequestBody CRMService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archiveContact(id, input, actor);
+    }
+
+    @PostMapping(CONTACTS + "/{id}/reactivate")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMContact reactivateContact(
+            @PathVariable String id,
+            @RequestBody CRMService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivateContact(id, input, actor);
+    }
+
+    @PostMapping(ACTIVITIES)
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<CRMActivity> createActivity(
+            @RequestBody CRMService.ActivityWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createActivity(input, actor));
+    }
+
+    @GetMapping(ACTIVITIES)
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMService.ActivityPage listActivities(
+            @RequestParam(name = "subject_type", defaultValue = "") String subjectType,
+            @RequestParam(name = "subject_id", defaultValue = "") String subjectId,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listActivities(subjectType, subjectId, cursor, limit, actor);
+    }
+
+    @PostMapping(OPPORTUNITIES)
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<CRMOpportunity> createOpportunity(
+            @RequestBody CRMService.OpportunityWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createOpportunity(input, actor));
+    }
+
+    @GetMapping(OPPORTUNITIES)
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMService.OpportunityPage listOpportunities(
+            @RequestParam(defaultValue = "") String stage,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listOpportunities(stage, cursor, limit, actor);
+    }
+
+    @GetMapping(OPPORTUNITIES + "/{id}")
+    @RequirePermission(value = "crm:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMOpportunity getOpportunity(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getOpportunity(id, actor);
+    }
+
+    @PutMapping(OPPORTUNITIES + "/{id}")
+    @RequirePermission(value = "crm:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMOpportunity updateOpportunity(
+            @PathVariable String id,
+            @RequestBody CRMService.OpportunityUpdate input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.updateOpportunity(id, input, actor);
+    }
+
+    @PostMapping(OPPORTUNITIES + "/{id}/advance")
+    @RequirePermission(value = "crm:pipeline:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CRMOpportunity advanceOpportunity(
+            @PathVariable String id,
+            @RequestBody CRMService.StageInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.advanceOpportunity(id, input, actor);
+    }
+}
