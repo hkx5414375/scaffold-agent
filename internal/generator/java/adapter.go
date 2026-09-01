@@ -56,6 +56,8 @@ const (
 	customerVersion         = "0.1.0"
 	crmOwner                = "crm-core"
 	crmVersion              = "0.1.0"
+	inventoryOwner          = "erp-inventory"
+	inventoryVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -92,6 +94,7 @@ type databaseData struct {
 	CatalogMigrationTemplate          string
 	CustomerMigrationTemplate         string
 	CRMMigrationTemplate              string
+	InventoryMigrationTemplate        string
 }
 
 var databases = map[string]databaseData{
@@ -116,6 +119,7 @@ var databases = map[string]databaseData{
 		CatalogMigrationTemplate:          "templates/catalog_postgresql.sql.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_postgresql.sql.tmpl",
 		CRMMigrationTemplate:              "templates/crm_postgresql.sql.tmpl",
+		InventoryMigrationTemplate:        "templates/inventory_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -138,6 +142,7 @@ var databases = map[string]databaseData{
 		CatalogMigrationTemplate:          "templates/catalog_mysql.sql.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_mysql.sql.tmpl",
 		CRMMigrationTemplate:              "templates/crm_mysql.sql.tmpl",
+		InventoryMigrationTemplate:        "templates/inventory_mysql.sql.tmpl",
 	},
 }
 
@@ -284,6 +289,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: inventoryOwner, Version: inventoryVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable inventory, reservations, movements, and procurement.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 type templateData struct {
@@ -414,6 +429,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	catalogEnabled := false
 	customerEnabled := false
 	crmEnabled := false
+	inventoryEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -456,6 +472,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == crmOwner {
 			crmEnabled = true
 		}
+		if pack.Metadata.Name == inventoryOwner {
+			inventoryEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -470,6 +489,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"crm-core with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"erp-inventory with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine, approvalsEnabled)
@@ -523,6 +547,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if crmEnabled {
 		migrationCount++
 	}
+	if inventoryEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -546,6 +573,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Catalog:          catalogEnabled,
 		CustomerAccounts: customerEnabled,
 		CRM:              crmEnabled,
+		Inventory:        inventoryEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+len(storefrontui.BaseTemplates)+20)
@@ -567,6 +595,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	catalogPaths := make(map[string]struct{}, 12)
 	customerPaths := make(map[string]struct{}, 16)
 	crmPaths := make(map[string]struct{}, 16)
+	inventoryPaths := make(map[string]struct{}, 14)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -671,6 +700,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		adminPaths[path] = struct{}{}
 		crmPaths[path] = struct{}{}
+	}
+	addInventoryTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		inventoryPaths[path] = struct{}{}
+	}
+	addInventoryUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
+		inventoryPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -1030,6 +1068,28 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[crmOwner] = crmVersion
 	}
+	if inventoryEnabled {
+		for path, templatePath := range map[string]string{
+			mainRoot + "/inventory/InventoryModels.java":                  "templates/InventoryModels.java.tmpl",
+			mainRoot + "/inventory/InventoryException.java":               "templates/InventoryException.java.tmpl",
+			mainRoot + "/inventory/InventoryRepository.java":              "templates/InventoryRepository.java.tmpl",
+			mainRoot + "/inventory/JdbcInventoryRepository.java":          "templates/JdbcInventoryRepository.java.tmpl",
+			mainRoot + "/inventory/InventoryService.java":                 "templates/InventoryService.java.tmpl",
+			mainRoot + "/inventory/InventoryController.java":              "templates/InventoryController.java.tmpl",
+			testRoot + "/inventory/InventoryServiceTest.java":             "templates/InventoryServiceTest.java.tmpl",
+			testRoot + "/inventory/InventoryDatabaseIntegrationTest.java": "templates/InventoryDatabaseIntegrationTest.java.tmpl",
+			"src/main/resources/db/migration/V000290__erp_inventory.sql":  database.InventoryMigrationTemplate,
+		} {
+			addInventoryTarget(path, templatePath)
+		}
+		if adminEnabled {
+			addInventoryUI(
+				"web/admin/src/views/InventoryView.vue",
+				"templates/src/views/InventoryView.vue.tmpl",
+			)
+		}
+		capabilityLock[inventoryOwner] = inventoryVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -1134,6 +1194,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isCRMPath := crmPaths[path]; isCRMPath {
 			owner = crmOwner
+		}
+		if _, isInventoryPath := inventoryPaths[path]; isInventoryPath {
+			owner = inventoryOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

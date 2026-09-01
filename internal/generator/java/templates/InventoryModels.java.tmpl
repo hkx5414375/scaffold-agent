@@ -1,0 +1,104 @@
+package {{.PackageName}}.inventory;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+import java.util.List;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+public final class InventoryModels {
+
+    private InventoryModels() {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Item(
+            String id,
+            String organizationId,
+            String sku,
+            String name,
+            String unit,
+            String status,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Warehouse(
+            String id,
+            String organizationId,
+            String code,
+            String name,
+            String status,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {}
+
+    public record Balance(
+            String itemId,
+            String warehouseId,
+            @JsonSerialize(using = ToStringSerializer.class) long onHand,
+            @JsonSerialize(using = ToStringSerializer.class) long reserved,
+            @JsonSerialize(using = ToStringSerializer.class) long available,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant updatedAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Movement(
+            String id,
+            String organizationId,
+            String itemId,
+            String warehouseId,
+            String kind,
+            @JsonSerialize(using = ToStringSerializer.class) long quantityDelta,
+            @JsonSerialize(using = ToStringSerializer.class) long reservedDelta,
+            String referenceType,
+            String referenceId,
+            String reason,
+            String idempotencyKey,
+            String createdBy,
+            Instant createdAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Reservation(
+            String id,
+            String organizationId,
+            String externalReference,
+            String itemId,
+            String warehouseId,
+            @JsonSerialize(using = ToStringSerializer.class) long quantity,
+            String status,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {}
+
+    public record PurchaseOrderLine(
+            String id,
+            String itemId,
+            @JsonSerialize(using = ToStringSerializer.class) long orderedQuantity,
+            @JsonSerialize(using = ToStringSerializer.class) long receivedQuantity) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PurchaseOrder(
+            String id,
+            String organizationId,
+            String number,
+            String supplierName,
+            String status,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            List<PurchaseOrderLine> lines,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        public PurchaseOrder {
+            lines = List.copyOf(lines);
+        }
+    }
+
+    public record StockResult(Balance balance, Movement movement) {}
+
+    public record ReservationResult(
+            Reservation reservation, Balance balance, Movement movement) {}
+
+    public record ReceiptResult(
+            PurchaseOrder purchaseOrder, Balance balance, Movement movement) {}
+}

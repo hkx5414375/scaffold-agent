@@ -1,0 +1,116 @@
+package {{.PackageName}}.inventory;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.inventory.InventoryModels.Balance;
+import {{.PackageName}}.inventory.InventoryModels.Item;
+import {{.PackageName}}.inventory.InventoryModels.Movement;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrder;
+import {{.PackageName}}.inventory.InventoryModels.ReceiptResult;
+import {{.PackageName}}.inventory.InventoryModels.Reservation;
+import {{.PackageName}}.inventory.InventoryModels.ReservationResult;
+import {{.PackageName}}.inventory.InventoryModels.StockResult;
+import {{.PackageName}}.inventory.InventoryModels.Warehouse;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface InventoryRepository {
+
+    void createItem(Item value, AuditEvent audit);
+
+    Optional<Item> getItem(String scope, String id);
+
+    PageResult<Item> listItems(String scope, String status, String cursor, int limit);
+
+    Item updateItem(String scope, Item value, long version, AuditEvent audit);
+
+    Item transitionItem(
+            String scope, String id, long version, String target, Instant now, AuditEvent audit);
+
+    void createWarehouse(Warehouse value, AuditEvent audit);
+
+    Optional<Warehouse> getWarehouse(String scope, String id);
+
+    PageResult<Warehouse> listWarehouses(String scope, String status, String cursor, int limit);
+
+    Warehouse updateWarehouse(String scope, Warehouse value, long version, AuditEvent audit);
+
+    Warehouse transitionWarehouse(
+            String scope, String id, long version, String target, Instant now, AuditEvent audit);
+
+    PageResult<Balance> listBalances(
+            String scope, String itemId, String cursor, int limit);
+
+    StockResult applyStock(StockCommand command);
+
+    ReservationResult createReservation(ReservationCommand command);
+
+    Optional<Reservation> getReservation(String scope, String id);
+
+    PageResult<Reservation> listReservations(
+            String scope, String status, String cursor, int limit);
+
+    ReservationResult transitionReservation(ReservationTransitionCommand command);
+
+    void createPurchaseOrder(PurchaseOrder value, AuditEvent audit);
+
+    Optional<PurchaseOrder> getPurchaseOrder(String scope, String id);
+
+    PageResult<PurchaseOrder> listPurchaseOrders(
+            String scope, String status, String cursor, int limit);
+
+    PurchaseOrder transitionPurchaseOrder(
+            String scope, String id, long version, String target, Instant now, AuditEvent audit);
+
+    ReceiptResult receivePurchaseOrder(ReceiptCommand command);
+
+    PageResult<Movement> listMovements(
+            String scope, String itemId, String warehouseId, String cursor, int limit);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult<T>(List<T> items, String nextCursor) {}
+
+    record StockCommand(
+            String scope,
+            String idempotencyKey,
+            String fingerprint,
+            Movement movement,
+            AuditEvent audit) {}
+
+    record ReservationCommand(
+            String scope,
+            String idempotencyKey,
+            String fingerprint,
+            Reservation reservation,
+            Movement movement,
+            AuditEvent audit) {}
+
+    record ReservationTransitionCommand(
+            String scope,
+            String reservationId,
+            String idempotencyKey,
+            String fingerprint,
+            long version,
+            String target,
+            String movementId,
+            String actorId,
+            Instant occurredAt,
+            AuditEvent audit) {}
+
+    record ReceiptCommand(
+            String scope,
+            String purchaseOrderId,
+            String lineId,
+            String warehouseId,
+            String idempotencyKey,
+            String fingerprint,
+            long quantity,
+            long version,
+            String movementId,
+            String actorId,
+            Instant occurredAt,
+            AuditEvent audit) {}
+}

@@ -218,6 +218,24 @@ Use `crm:read` and `crm:write` for ordinary records, and reserve
 Every mutation commits its audit event in the same transaction. Tenant projects
 hide all CRM records and reject writes while the selected organization is inactive.
 {{end}}
+{{if .Inventory}}
+
+## ERP inventory
+
+The inventory capability provides items, warehouses, integer balances, an
+append-only movement ledger, idempotent reservations, and purchase receiving
+under `/api/v1/inventory`. Quantities and optimistic versions cross JSON as
+decimal strings; do not introduce floating-point stock.
+
+Every stock adjustment, reservation transition, and receipt requires an
+idempotency key. Replaying the same command returns its original result, while
+reusing the key for different input is a conflict. Mutations atomically preserve
+`on_hand >= 0`, `reserved >= 0`, `reserved <= on_hand`, and
+`available = on_hand - reserved`, and commit movement and audit evidence together.
+Use the four generated `inventory:*` permissions and do not automatically bind
+inventory items to commerce products. Tenant projects reject all inventory access
+while the selected organization is inactive.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

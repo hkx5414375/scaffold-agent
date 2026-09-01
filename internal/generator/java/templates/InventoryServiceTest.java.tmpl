@@ -1,0 +1,99 @@
+package {{.PackageName}}.inventory;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.inventory.InventoryModels.Balance;
+import {{.PackageName}}.inventory.InventoryModels.StockResult;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class InventoryServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-02T00:00:00Z");
+
+    @Test
+    void normalizesCatalogAndBuildsCanonicalStockCommand() {
+        InventoryRepository repository = mock(InventoryRepository.class);
+        InventoryService service =
+                new InventoryService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+        Principal actor = actor();
+
+        doAnswer(invocation -> null)
+                .when(repository)
+                .createItem(any(), any());
+        InventoryModels.Item item =
+                service.createItem(new InventoryService.ItemWrite(" sku-1 ", " Widget ", " ea "), actor);
+        assertThat(item.sku()).isEqualTo("SKU-1");
+        assertThat(item.unit()).isEqualTo("EA");
+
+        doAnswer(
+                        invocation -> {
+                            InventoryRepository.StockCommand command = invocation.getArgument(0);
+                            Balance balance =
+                                    new Balance(
+                                            command.movement().itemId(),
+                                            command.movement().warehouseId(),
+                                            10L,
+                                            0L,
+                                            10L,
+                                            2L,
+                                            NOW);
+                            return new StockResult(balance, command.movement());
+                        })
+                .when(repository)
+                .applyStock(any());
+        StockResult result =
+                service.adjustStock(
+                        new InventoryService.AdjustmentInput(
+                                "item-1", "warehouse-1", "10", " Initial stock ", "adjust-1"),
+                        actor);
+        assertThat(result.balance().available()).isEqualTo(10L);
+        assertThat(result.movement().reason()).isEqualTo("Initial stock");
+    }
+
+    @Test
+    void rejectsNonCanonicalQuantitiesAndDuplicatePurchaseLines() {
+        InventoryService service =
+                new InventoryService(
+                        mock(InventoryRepository.class), Clock.fixed(NOW, ZoneOffset.UTC));
+        assertKind(
+                () ->
+                        service.adjustStock(
+                                new InventoryService.AdjustmentInput(
+                                        "item", "warehouse", "01", "stock", "key"),
+                                actor()),
+                InventoryException.Kind.INVALID);
+        assertKind(
+                () ->
+                        service.createPurchaseOrder(
+                                new InventoryService.PurchaseOrderWrite(
+                                        "PO-1",
+                                        "Supplier",
+                                        List.of(
+                                                new InventoryService.PurchaseOrderLineWrite(
+                                                        "item", "1"),
+                                                new InventoryService.PurchaseOrderLineWrite(
+                                                        "item", "2"))),
+                                actor()),
+                InventoryException.Kind.INVALID);
+    }
+
+    private static void assertKind(Runnable operation, InventoryException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(InventoryException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+    private static Principal actor() {
+        return new Principal(
+                "user-1", "admin@example.com", "admin", "token"{{if .Tenancy}}, "org-1"{{end}});
+    }
+}

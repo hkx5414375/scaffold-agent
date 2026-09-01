@@ -304,6 +304,75 @@ func TestCRMCoreRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateERPInventoryAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: inventoryOwner, Version: inventoryVersion},
+			}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if result.CapabilityLock[inventoryOwner] != inventoryVersion ||
+				result.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				result.CapabilityLock[adminOwner] != adminVersion {
+				t.Fatalf("Generate() capability lock = %#v", result.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/inventory/InventoryModels.java",
+				"src/main/java/com/scaffold/generated/demoservice/inventory/InventoryService.java",
+				"src/main/java/com/scaffold/generated/demoservice/inventory/JdbcInventoryRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/inventory/InventoryController.java",
+				"src/test/java/com/scaffold/generated/demoservice/inventory/InventoryServiceTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/inventory/InventoryDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000290__erp_inventory.sql",
+				"web/admin/src/views/InventoryView.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != inventoryOwner {
+					t.Errorf("inventory output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated inventory OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/inventory/items:") ||
+				!strings.Contains(string(openAPI), "/api/v1/inventory/purchase-orders/{id}/receive:") ||
+				!strings.Contains(string(openAPI), "inventory:stock:manage") ||
+				!strings.Contains(string(openAPI), "InventoryReservationResult:") ||
+				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")), "InventoryView") {
+				t.Fatal("generated Java inventory lacks contract or administration wiring")
+			}
+		})
+	}
+}
+
+func TestERPInventoryRequiresLifecycleTenancy(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: inventoryOwner, Version: inventoryVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 	t.Parallel()
 

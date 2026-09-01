@@ -1,0 +1,735 @@
+package {{.PackageName}}.inventory;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.inventory.InventoryModels.Balance;
+import {{.PackageName}}.inventory.InventoryModels.Item;
+import {{.PackageName}}.inventory.InventoryModels.Movement;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrder;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrderLine;
+import {{.PackageName}}.inventory.InventoryModels.ReceiptResult;
+import {{.PackageName}}.inventory.InventoryModels.Reservation;
+import {{.PackageName}}.inventory.InventoryModels.ReservationResult;
+import {{.PackageName}}.inventory.InventoryModels.StockResult;
+import {{.PackageName}}.inventory.InventoryModels.Warehouse;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class InventoryService {
+
+    public static final String ACTIVE = "active";
+    public static final String ARCHIVED = "archived";
+    public static final String RESERVATION_ACTIVE = "active";
+    public static final String RELEASED = "released";
+    public static final String CONSUMED = "consumed";
+    public static final String DRAFT = "draft";
+    public static final String SUBMITTED = "submitted";
+    public static final String PARTIALLY_RECEIVED = "partially_received";
+    public static final String RECEIVED = "received";
+    public static final String CANCELLED = "cancelled";
+
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final Pattern CODE_PATTERN = Pattern.compile("^[A-Z0-9._-]{1,64}$");
+    private static final Set<String> RECORD_STATUSES = Set.of(ACTIVE, ARCHIVED);
+    private static final Set<String> RESERVATION_STATUSES =
+            Set.of(RESERVATION_ACTIVE, RELEASED, CONSUMED);
+    private static final Set<String> PURCHASE_STATUSES =
+            Set.of(DRAFT, SUBMITTED, PARTIALLY_RECEIVED, RECEIVED, CANCELLED);
+
+    private final InventoryRepository repository;
+    private final Clock clock;
+
+    public InventoryService(InventoryRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    InventoryService(InventoryRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public Item createItem(ItemWrite input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        Item value =
+                new Item(
+                        newId(),
+                        emptyToNull(scope),
+                        code(input.sku()),
+                        required(input.name(), 160),
+                        unit(input.unit()),
+                        ACTIVE,
+                        1L,
+                        now,
+                        now);
+        repository.createItem(value, audit(actor, "inventory:item:create", value.id(), now));
+        return value;
+    }
+
+    public Item getItem(String id, Principal actor) {
+        return repository.getItem(actorScope(actor), identifier(id)).orElseThrow(InventoryService::notFound);
+    }
+
+    public ItemPage listItems(String status, String cursor, int limit, Principal actor) {
+        String filter = filter(status, RECORD_STATUSES);
+        validatePage(cursor, limit);
+        InventoryRepository.PageResult<Item> result =
+                repository.listItems(actorScope(actor), filter, text(cursor), limit);
+        return new ItemPage(result.items(), result.nextCursor());
+    }
+
+    public Item updateItem(String id, ItemUpdate input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        Item value =
+                new Item(
+                        normalizedId,
+                        emptyToNull(scope),
+                        code(input.sku()),
+                        required(input.name(), 160),
+                        unit(input.unit()),
+                        ACTIVE,
+                        0L,
+                        now,
+                        now);
+        return repository.updateItem(
+                scope,
+                value,
+                positive(input.version()),
+                audit(actor, "inventory:item:update", normalizedId, now));
+    }
+
+    public Item archiveItem(String id, TransitionInput input, Principal actor) {
+        return transitionItem(id, input, ARCHIVED, actor);
+    }
+
+    public Item reactivateItem(String id, TransitionInput input, Principal actor) {
+        return transitionItem(id, input, ACTIVE, actor);
+    }
+
+    private Item transitionItem(String id, TransitionInput input, String target, Principal actor) {
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.transitionItem(
+                scope,
+                normalizedId,
+                version(input),
+                target,
+                now,
+                audit(actor, "inventory:item:" + target, normalizedId, now));
+    }
+
+    public Warehouse createWarehouse(WarehouseWrite input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        Warehouse value =
+                new Warehouse(
+                        newId(),
+                        emptyToNull(scope),
+                        code(input.code()),
+                        required(input.name(), 160),
+                        ACTIVE,
+                        1L,
+                        now,
+                        now);
+        repository.createWarehouse(
+                value, audit(actor, "inventory:warehouse:create", value.id(), now));
+        return value;
+    }
+
+    public Warehouse getWarehouse(String id, Principal actor) {
+        return repository
+                .getWarehouse(actorScope(actor), identifier(id))
+                .orElseThrow(InventoryService::notFound);
+    }
+
+    public WarehousePage listWarehouses(
+            String status, String cursor, int limit, Principal actor) {
+        String filter = filter(status, RECORD_STATUSES);
+        validatePage(cursor, limit);
+        InventoryRepository.PageResult<Warehouse> result =
+                repository.listWarehouses(actorScope(actor), filter, text(cursor), limit);
+        return new WarehousePage(result.items(), result.nextCursor());
+    }
+
+    public Warehouse updateWarehouse(String id, WarehouseUpdate input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        Warehouse value =
+                new Warehouse(
+                        normalizedId,
+                        emptyToNull(scope),
+                        code(input.code()),
+                        required(input.name(), 160),
+                        ACTIVE,
+                        0L,
+                        now,
+                        now);
+        return repository.updateWarehouse(
+                scope,
+                value,
+                positive(input.version()),
+                audit(actor, "inventory:warehouse:update", normalizedId, now));
+    }
+
+    public Warehouse archiveWarehouse(String id, TransitionInput input, Principal actor) {
+        return transitionWarehouse(id, input, ARCHIVED, actor);
+    }
+
+    public Warehouse reactivateWarehouse(String id, TransitionInput input, Principal actor) {
+        return transitionWarehouse(id, input, ACTIVE, actor);
+    }
+
+    private Warehouse transitionWarehouse(
+            String id, TransitionInput input, String target, Principal actor) {
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.transitionWarehouse(
+                scope,
+                normalizedId,
+                version(input),
+                target,
+                now,
+                audit(actor, "inventory:warehouse:" + target, normalizedId, now));
+    }
+
+    public BalancePage listBalances(String itemId, String cursor, int limit, Principal actor) {
+        validatePage(cursor, limit);
+        String normalizedItemId = text(itemId);
+        if (!normalizedItemId.isEmpty()) {
+            normalizedItemId = identifier(normalizedItemId);
+        }
+        InventoryRepository.PageResult<Balance> result =
+                repository.listBalances(
+                        actorScope(actor), normalizedItemId, text(cursor), limit);
+        return new BalancePage(result.items(), result.nextCursor());
+    }
+
+    public StockResult adjustStock(AdjustmentInput input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String itemId = identifier(input.itemId());
+        String warehouseId = identifier(input.warehouseId());
+        long quantity = signedNonZero(input.quantityDelta());
+        String reason = required(input.reason(), 500);
+        String key = identifier(input.idempotencyKey());
+        Instant now = clock.instant();
+        Movement movement =
+                new Movement(
+                        newId(),
+                        emptyToNull(scope),
+                        itemId,
+                        warehouseId,
+                        "adjustment",
+                        quantity,
+                        0L,
+                        "adjustment",
+                        key,
+                        reason,
+                        key,
+                        actor.userId(),
+                        now);
+        return repository.applyStock(
+                new InventoryRepository.StockCommand(
+                        scope,
+                        key,
+                        fingerprint(
+                                "adjust",
+                                itemId,
+                                warehouseId,
+                                Long.toString(quantity),
+                                reason),
+                        movement,
+                        audit(actor, "inventory:stock:adjust", movement.id(), now)));
+    }
+
+    public ReservationResult createReservation(ReservationWrite input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String reference = identifier(input.externalReference());
+        String itemId = identifier(input.itemId());
+        String warehouseId = identifier(input.warehouseId());
+        long quantity = positive(input.quantity());
+        String key = identifier(input.idempotencyKey());
+        Instant now = clock.instant();
+        Reservation reservation =
+                new Reservation(
+                        newId(),
+                        emptyToNull(scope),
+                        reference,
+                        itemId,
+                        warehouseId,
+                        quantity,
+                        RESERVATION_ACTIVE,
+                        1L,
+                        now,
+                        now);
+        Movement movement =
+                new Movement(
+                        newId(),
+                        emptyToNull(scope),
+                        itemId,
+                        warehouseId,
+                        "reservation_created",
+                        0L,
+                        quantity,
+                        "reservation",
+                        reservation.id(),
+                        "stock reserved",
+                        key,
+                        actor.userId(),
+                        now);
+        return repository.createReservation(
+                new InventoryRepository.ReservationCommand(
+                        scope,
+                        key,
+                        fingerprint(
+                                "reserve",
+                                reference,
+                                itemId,
+                                warehouseId,
+                                Long.toString(quantity)),
+                        reservation,
+                        movement,
+                        audit(actor, "inventory:reservation:create", reservation.id(), now)));
+    }
+
+    public Reservation getReservation(String id, Principal actor) {
+        return repository
+                .getReservation(actorScope(actor), identifier(id))
+                .orElseThrow(InventoryService::notFound);
+    }
+
+    public ReservationPage listReservations(
+            String status, String cursor, int limit, Principal actor) {
+        String filter = filter(status, RESERVATION_STATUSES);
+        validatePage(cursor, limit);
+        InventoryRepository.PageResult<Reservation> result =
+                repository.listReservations(actorScope(actor), filter, text(cursor), limit);
+        return new ReservationPage(result.items(), result.nextCursor());
+    }
+
+    public ReservationResult releaseReservation(
+            String id, ReservationTransition input, Principal actor) {
+        return transitionReservation(id, input, RELEASED, actor);
+    }
+
+    public ReservationResult consumeReservation(
+            String id, ReservationTransition input, Principal actor) {
+        return transitionReservation(id, input, CONSUMED, actor);
+    }
+
+    private ReservationResult transitionReservation(
+            String id, ReservationTransition input, String target, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        long currentVersion = positive(input.version());
+        String key = identifier(input.idempotencyKey());
+        Instant now = clock.instant();
+        return repository.transitionReservation(
+                new InventoryRepository.ReservationTransitionCommand(
+                        scope,
+                        normalizedId,
+                        key,
+                        fingerprint(
+                                "reservation",
+                                normalizedId,
+                                target,
+                                Long.toString(currentVersion)),
+                        currentVersion,
+                        target,
+                        newId(),
+                        actor.userId(),
+                        now,
+                        audit(actor, "inventory:reservation:" + target, normalizedId, now)));
+    }
+
+    public PurchaseOrder createPurchaseOrder(PurchaseOrderWrite input, Principal actor) {
+        if (input == null || input.lines() == null || input.lines().isEmpty() || input.lines().size() > 100) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Set<String> itemIds = new HashSet<>();
+        List<PurchaseOrderLine> lines = new ArrayList<>(input.lines().size());
+        for (PurchaseOrderLineWrite inputLine : input.lines()) {
+            if (inputLine == null) {
+                throw invalid();
+            }
+            String itemId = identifier(inputLine.itemId());
+            if (!itemIds.add(itemId)) {
+                throw invalid();
+            }
+            lines.add(new PurchaseOrderLine(newId(), itemId, positive(inputLine.orderedQuantity()), 0L));
+        }
+        Instant now = clock.instant();
+        PurchaseOrder value =
+                new PurchaseOrder(
+                        newId(),
+                        emptyToNull(scope),
+                        code(input.number()),
+                        required(input.supplierName(), 160),
+                        DRAFT,
+                        1L,
+                        lines,
+                        now,
+                        now);
+        repository.createPurchaseOrder(
+                value, audit(actor, "inventory:purchase:create", value.id(), now));
+        return value;
+    }
+
+    public PurchaseOrder getPurchaseOrder(String id, Principal actor) {
+        return repository
+                .getPurchaseOrder(actorScope(actor), identifier(id))
+                .orElseThrow(InventoryService::notFound);
+    }
+
+    public PurchaseOrderPage listPurchaseOrders(
+            String status, String cursor, int limit, Principal actor) {
+        String filter = filter(status, PURCHASE_STATUSES);
+        validatePage(cursor, limit);
+        InventoryRepository.PageResult<PurchaseOrder> result =
+                repository.listPurchaseOrders(actorScope(actor), filter, text(cursor), limit);
+        return new PurchaseOrderPage(result.items(), result.nextCursor());
+    }
+
+    public PurchaseOrder submitPurchaseOrder(String id, TransitionInput input, Principal actor) {
+        return transitionPurchaseOrder(id, input, SUBMITTED, actor);
+    }
+
+    public PurchaseOrder cancelPurchaseOrder(String id, TransitionInput input, Principal actor) {
+        return transitionPurchaseOrder(id, input, CANCELLED, actor);
+    }
+
+    private PurchaseOrder transitionPurchaseOrder(
+            String id, TransitionInput input, String target, Principal actor) {
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.transitionPurchaseOrder(
+                scope,
+                normalizedId,
+                version(input),
+                target,
+                now,
+                audit(actor, "inventory:purchase:" + target, normalizedId, now));
+    }
+
+    public ReceiptResult receivePurchaseOrder(String id, ReceiptInput input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String purchaseId = identifier(id);
+        String lineId = identifier(input.lineId());
+        String warehouseId = identifier(input.warehouseId());
+        long quantity = positive(input.quantity());
+        long currentVersion = positive(input.version());
+        String key = identifier(input.idempotencyKey());
+        Instant now = clock.instant();
+        return repository.receivePurchaseOrder(
+                new InventoryRepository.ReceiptCommand(
+                        scope,
+                        purchaseId,
+                        lineId,
+                        warehouseId,
+                        key,
+                        fingerprint(
+                                "receive",
+                                purchaseId,
+                                lineId,
+                                warehouseId,
+                                Long.toString(quantity),
+                                Long.toString(currentVersion)),
+                        quantity,
+                        currentVersion,
+                        newId(),
+                        actor.userId(),
+                        now,
+                        audit(actor, "inventory:purchase:receive", purchaseId, now)));
+    }
+
+    public MovementPage listMovements(
+            String itemId,
+            String warehouseId,
+            String cursor,
+            int limit,
+            Principal actor) {
+        validatePage(cursor, limit);
+        String normalizedItem = optionalIdentifier(itemId);
+        String normalizedWarehouse = optionalIdentifier(warehouseId);
+        InventoryRepository.PageResult<Movement> result =
+                repository.listMovements(
+                        actorScope(actor),
+                        normalizedItem,
+                        normalizedWarehouse,
+                        text(cursor),
+                        limit);
+        return new MovementPage(result.items(), result.nextCursor());
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || !validRequired(text(actor.userId()), MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        String organizationId = text(actor.organizationId());
+        if (!validRequired(organizationId, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return organizationId;
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static String identifier(String value) {
+        String normalized = text(value);
+        if (!validRequired(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String optionalIdentifier(String value) {
+        String normalized = text(value);
+        return normalized.isEmpty() ? "" : identifier(normalized);
+    }
+
+    private static String code(String value) {
+        String normalized = text(value).toUpperCase(Locale.ROOT);
+        if (!CODE_PATTERN.matcher(normalized).matches()) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String unit(String value) {
+        String normalized = text(value).toUpperCase(Locale.ROOT);
+        if (!validRequired(normalized, 32)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String required(String value, int maximum) {
+        String normalized = text(value);
+        if (!validRequired(normalized, maximum)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static long positive(String value) {
+        long parsed = canonical(value);
+        if (parsed < 1L) {
+            throw invalid();
+        }
+        return parsed;
+    }
+
+    private static long signedNonZero(String value) {
+        long parsed = canonical(value);
+        if (parsed == 0L) {
+            throw invalid();
+        }
+        return parsed;
+    }
+
+    private static long canonical(String value) {
+        String normalized = text(value);
+        try {
+            long parsed = Long.parseLong(normalized);
+            if (!Long.toString(parsed).equals(normalized)) {
+                throw invalid();
+            }
+            return parsed;
+        } catch (NumberFormatException exception) {
+            throw invalid();
+        }
+    }
+
+    private static long version(TransitionInput input) {
+        if (input == null) {
+            throw invalid();
+        }
+        return positive(input.version());
+    }
+
+    private static String filter(String value, Set<String> allowed) {
+        String normalized = text(value);
+        if (!normalized.isEmpty() && !allowed.contains(normalized)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static void validatePage(String cursor, int limit) {
+        String normalized = text(cursor);
+        if (limit < 1
+                || limit > 100
+                || normalized.length() > MAXIMUM_IDENTIFIER_LENGTH
+                || !safe(normalized)) {
+            throw invalid();
+        }
+    }
+
+    private static boolean validRequired(String value, int maximum) {
+        return !value.isEmpty()
+                && value.codePointCount(0, value.length()) <= maximum
+                && safe(value);
+    }
+
+    private static boolean safe(String value) {
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static String fingerprint(String... values) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            for (int index = 0; index < values.length; index++) {
+                if (index > 0) {
+                    digest.update((byte) 0);
+                }
+                digest.update(values[index].getBytes(StandardCharsets.UTF_8));
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    private static InventoryException invalid() {
+        return new InventoryException(InventoryException.Kind.INVALID, "inventory data is invalid");
+    }
+
+    private static InventoryException notFound() {
+        return new InventoryException(
+                InventoryException.Kind.NOT_FOUND, "inventory record was not found");
+    }
+
+    public record ItemWrite(String sku, String name, String unit) {}
+
+    public record ItemUpdate(String sku, String name, String unit, String version) {}
+
+    public record WarehouseWrite(String code, String name) {}
+
+    public record WarehouseUpdate(String code, String name, String version) {}
+
+    public record TransitionInput(String version) {}
+
+    public record AdjustmentInput(
+            String itemId,
+            String warehouseId,
+            String quantityDelta,
+            String reason,
+            String idempotencyKey) {}
+
+    public record ReservationWrite(
+            String externalReference,
+            String itemId,
+            String warehouseId,
+            String quantity,
+            String idempotencyKey) {}
+
+    public record ReservationTransition(String version, String idempotencyKey) {}
+
+    public record PurchaseOrderLineWrite(String itemId, String orderedQuantity) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Request lines are validated and copied before persistence")
+    public record PurchaseOrderWrite(
+            String number, String supplierName, List<PurchaseOrderLineWrite> lines) {}
+
+    public record ReceiptInput(
+            String lineId,
+            String warehouseId,
+            String quantity,
+            String idempotencyKey,
+            String version) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record ItemPage(List<Item> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record WarehousePage(List<Warehouse> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record BalancePage(List<Balance> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record ReservationPage(List<Reservation> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record PurchaseOrderPage(List<PurchaseOrder> items, String nextCursor) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record MovementPage(List<Movement> items, String nextCursor) {}
+}

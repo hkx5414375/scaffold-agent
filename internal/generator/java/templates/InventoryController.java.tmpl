@@ -1,0 +1,272 @@
+package {{.PackageName}}.inventory;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import {{.PackageName}}.inventory.InventoryModels.Item;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrder;
+import {{.PackageName}}.inventory.InventoryModels.ReceiptResult;
+import {{.PackageName}}.inventory.InventoryModels.Reservation;
+import {{.PackageName}}.inventory.InventoryModels.ReservationResult;
+import {{.PackageName}}.inventory.InventoryModels.StockResult;
+import {{.PackageName}}.inventory.InventoryModels.Warehouse;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class InventoryController {
+
+    private static final String ITEMS = "/api/v1/inventory/items";
+    private static final String WAREHOUSES = "/api/v1/inventory/warehouses";
+    private static final String RESERVATIONS = "/api/v1/inventory/reservations";
+    private static final String PURCHASE_ORDERS = "/api/v1/inventory/purchase-orders";
+
+    private final InventoryService service;
+
+    public InventoryController(InventoryService service) {
+        this.service = service;
+    }
+
+    @PostMapping(ITEMS)
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<Item> createItem(
+            @RequestBody InventoryService.ItemWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.createItem(input, actor));
+    }
+
+    @GetMapping(ITEMS)
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.ItemPage listItems(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listItems(status, cursor, limit, actor);
+    }
+
+    @GetMapping(ITEMS + "/{id}")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Item getItem(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getItem(id, actor);
+    }
+
+    @PutMapping(ITEMS + "/{id}")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Item updateItem(
+            @PathVariable String id,
+            @RequestBody InventoryService.ItemUpdate input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.updateItem(id, input, actor);
+    }
+
+    @PostMapping(ITEMS + "/{id}/archive")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Item archiveItem(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archiveItem(id, input, actor);
+    }
+
+    @PostMapping(ITEMS + "/{id}/reactivate")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Item reactivateItem(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivateItem(id, input, actor);
+    }
+
+    @PostMapping(WAREHOUSES)
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<Warehouse> createWarehouse(
+            @RequestBody InventoryService.WarehouseWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createWarehouse(input, actor));
+    }
+
+    @GetMapping(WAREHOUSES)
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.WarehousePage listWarehouses(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listWarehouses(status, cursor, limit, actor);
+    }
+
+    @GetMapping(WAREHOUSES + "/{id}")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Warehouse getWarehouse(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getWarehouse(id, actor);
+    }
+
+    @PutMapping(WAREHOUSES + "/{id}")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Warehouse updateWarehouse(
+            @PathVariable String id,
+            @RequestBody InventoryService.WarehouseUpdate input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.updateWarehouse(id, input, actor);
+    }
+
+    @PostMapping(WAREHOUSES + "/{id}/archive")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Warehouse archiveWarehouse(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archiveWarehouse(id, input, actor);
+    }
+
+    @PostMapping(WAREHOUSES + "/{id}/reactivate")
+    @RequirePermission(value = "inventory:catalog:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Warehouse reactivateWarehouse(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivateWarehouse(id, input, actor);
+    }
+
+    @GetMapping("/api/v1/inventory/balances")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.BalancePage listBalances(
+            @RequestParam(name = "item_id", defaultValue = "") String itemId,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listBalances(itemId, cursor, limit, actor);
+    }
+
+    @PostMapping("/api/v1/inventory/adjustments")
+    @RequirePermission(value = "inventory:stock:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public StockResult adjustStock(
+            @RequestBody InventoryService.AdjustmentInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.adjustStock(input, actor);
+    }
+
+    @PostMapping(RESERVATIONS)
+    @RequirePermission(value = "inventory:stock:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<ReservationResult> createReservation(
+            @RequestBody InventoryService.ReservationWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createReservation(input, actor));
+    }
+
+    @GetMapping(RESERVATIONS)
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.ReservationPage listReservations(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listReservations(status, cursor, limit, actor);
+    }
+
+    @GetMapping(RESERVATIONS + "/{id}")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Reservation getReservation(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getReservation(id, actor);
+    }
+
+    @PostMapping(RESERVATIONS + "/{id}/release")
+    @RequirePermission(value = "inventory:stock:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ReservationResult releaseReservation(
+            @PathVariable String id,
+            @RequestBody InventoryService.ReservationTransition input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.releaseReservation(id, input, actor);
+    }
+
+    @PostMapping(RESERVATIONS + "/{id}/consume")
+    @RequirePermission(value = "inventory:stock:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ReservationResult consumeReservation(
+            @PathVariable String id,
+            @RequestBody InventoryService.ReservationTransition input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.consumeReservation(id, input, actor);
+    }
+
+    @PostMapping(PURCHASE_ORDERS)
+    @RequirePermission(value = "inventory:procurement:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<PurchaseOrder> createPurchaseOrder(
+            @RequestBody InventoryService.PurchaseOrderWrite input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createPurchaseOrder(input, actor));
+    }
+
+    @GetMapping(PURCHASE_ORDERS)
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.PurchaseOrderPage listPurchaseOrders(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listPurchaseOrders(status, cursor, limit, actor);
+    }
+
+    @GetMapping(PURCHASE_ORDERS + "/{id}")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public PurchaseOrder getPurchaseOrder(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.getPurchaseOrder(id, actor);
+    }
+
+    @PostMapping(PURCHASE_ORDERS + "/{id}/submit")
+    @RequirePermission(value = "inventory:procurement:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public PurchaseOrder submitPurchaseOrder(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.submitPurchaseOrder(id, input, actor);
+    }
+
+    @PostMapping(PURCHASE_ORDERS + "/{id}/cancel")
+    @RequirePermission(value = "inventory:procurement:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public PurchaseOrder cancelPurchaseOrder(
+            @PathVariable String id,
+            @RequestBody InventoryService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.cancelPurchaseOrder(id, input, actor);
+    }
+
+    @PostMapping(PURCHASE_ORDERS + "/{id}/receive")
+    @RequirePermission(value = "inventory:procurement:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ReceiptResult receivePurchaseOrder(
+            @PathVariable String id,
+            @RequestBody InventoryService.ReceiptInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.receivePurchaseOrder(id, input, actor);
+    }
+
+    @GetMapping("/api/v1/inventory/movements")
+    @RequirePermission(value = "inventory:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public InventoryService.MovementPage listMovements(
+            @RequestParam(name = "item_id", defaultValue = "") String itemId,
+            @RequestParam(name = "warehouse_id", defaultValue = "") String warehouseId,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listMovements(itemId, warehouseId, cursor, limit, actor);
+    }
+}

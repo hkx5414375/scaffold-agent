@@ -1,0 +1,1356 @@
+package {{.PackageName}}.inventory;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.inventory.InventoryModels.Balance;
+import {{.PackageName}}.inventory.InventoryModels.Item;
+import {{.PackageName}}.inventory.InventoryModels.Movement;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrder;
+import {{.PackageName}}.inventory.InventoryModels.PurchaseOrderLine;
+import {{.PackageName}}.inventory.InventoryModels.ReceiptResult;
+import {{.PackageName}}.inventory.InventoryModels.Reservation;
+import {{.PackageName}}.inventory.InventoryModels.ReservationResult;
+import {{.PackageName}}.inventory.InventoryModels.StockResult;
+import {{.PackageName}}.inventory.InventoryModels.Warehouse;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+import tools.jackson.databind.ObjectMapper;
+
+@Repository
+public final class JdbcInventoryRepository implements InventoryRepository {
+
+    private static final String ITEM_COLUMNS =
+            "value.id, value.organization_id, value.sku, value.name, value.unit, "
+                    + "value.status, value.version, value.created_at, value.updated_at";
+    private static final String WAREHOUSE_COLUMNS =
+            "value.id, value.organization_id, value.code, value.name, value.status, "
+                    + "value.version, value.created_at, value.updated_at";
+    private static final String BALANCE_COLUMNS =
+            "value.item_id, value.warehouse_id, value.on_hand, value.reserved, "
+                    + "value.version, value.updated_at";
+    private static final String RESERVATION_COLUMNS =
+            "value.id, value.organization_id, value.external_reference, value.item_id, "
+                    + "value.warehouse_id, value.quantity, value.status, value.version, "
+                    + "value.created_at, value.updated_at";
+    private static final String PURCHASE_COLUMNS =
+            "value.id, value.organization_id, value.order_number, value.supplier_name, "
+                    + "value.status, value.version, value.created_at, value.updated_at";
+    private static final String MOVEMENT_COLUMNS =
+            "value.id, value.organization_id, value.item_id, value.warehouse_id, value.movement_kind, "
+                    + "value.quantity_delta, value.reserved_delta, value.reference_type, "
+                    + "value.reference_id, value.reason, value.idempotency_key, value.created_by, "
+                    + "value.created_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+    private final ObjectMapper objectMapper;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC and Jackson collaborators are process-scoped infrastructure dependencies")
+    public JdbcInventoryRepository(
+            JdbcTemplate jdbcTemplate,
+            TransactionTemplate transactionTemplate,
+            ObjectMapper objectMapper) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    public void createItem(Item value, AuditEvent audit) {
+        transact(
+                scope(value.organizationId()),
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "insert into inventory_items "
+                                            + "(id, organization_id, sku, name, unit, status, "
+                                            + "version, created_at, updated_at) "
+                                            + "values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    value.id(),
+                                    scope(value.organizationId()),
+                                    value.sku(),
+                                    value.name(),
+                                    value.unit(),
+                                    value.status(),
+                                    value.version(),
+                                    Timestamp.from(value.createdAt()),
+                                    Timestamp.from(value.updatedAt())));
+                    appendAudit(audit);
+                    return Boolean.TRUE;
+                });
+    }
+
+    @Override
+    public Optional<Item> getItem(String scope, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(ITEM_COLUMNS, "inventory_items")
+                                + " where value.id = ? and value.organization_id = ?"
+                                + activeScope("value"),
+                        JdbcInventoryRepository::mapItem,
+                        id,
+                        scope));
+    }
+
+    @Override
+    public PageResult<Item> listItems(String scope, String status, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(ITEM_COLUMNS, "inventory_items")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcInventoryRepository::mapItem,
+                        scope,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                Item::id);
+    }
+
+    @Override
+    public Item updateItem(String scope, Item value, long version, AuditEvent audit) {
+        return transact(
+                scope,
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_items set sku = ?, name = ?, unit = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? "
+                                            + "and version = ? and status = 'active'",
+                                    value.sku(),
+                                    value.name(),
+                                    value.unit(),
+                                    Timestamp.from(value.updatedAt()),
+                                    value.id(),
+                                    scope,
+                                    version));
+                    appendAudit(audit);
+                    return getItemInside(scope, value.id());
+                });
+    }
+
+    @Override
+    public Item transitionItem(
+            String scope,
+            String id,
+            long version,
+            String target,
+            Instant now,
+            AuditEvent audit) {
+        return transact(
+                scope,
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_items set status = ?, version = version + 1, "
+                                            + "updated_at = ? where id = ? and organization_id = ? "
+                                            + "and version = ? and status <> ?",
+                                    target,
+                                    Timestamp.from(now),
+                                    id,
+                                    scope,
+                                    version,
+                                    target));
+                    appendAudit(audit);
+                    return getItemInside(scope, id);
+                });
+    }
+
+    @Override
+    public void createWarehouse(Warehouse value, AuditEvent audit) {
+        transact(
+                scope(value.organizationId()),
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "insert into inventory_warehouses "
+                                            + "(id, organization_id, code, name, status, version, "
+                                            + "created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    value.id(),
+                                    scope(value.organizationId()),
+                                    value.code(),
+                                    value.name(),
+                                    value.status(),
+                                    value.version(),
+                                    Timestamp.from(value.createdAt()),
+                                    Timestamp.from(value.updatedAt())));
+                    appendAudit(audit);
+                    return Boolean.TRUE;
+                });
+    }
+
+    @Override
+    public Optional<Warehouse> getWarehouse(String scope, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(WAREHOUSE_COLUMNS, "inventory_warehouses")
+                                + " where value.id = ? and value.organization_id = ?"
+                                + activeScope("value"),
+                        JdbcInventoryRepository::mapWarehouse,
+                        id,
+                        scope));
+    }
+
+    @Override
+    public PageResult<Warehouse> listWarehouses(
+            String scope, String status, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(WAREHOUSE_COLUMNS, "inventory_warehouses")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcInventoryRepository::mapWarehouse,
+                        scope,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                Warehouse::id);
+    }
+
+    @Override
+    public Warehouse updateWarehouse(
+            String scope, Warehouse value, long version, AuditEvent audit) {
+        return transact(
+                scope,
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_warehouses set code = ?, name = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? "
+                                            + "and version = ? and status = 'active'",
+                                    value.code(),
+                                    value.name(),
+                                    Timestamp.from(value.updatedAt()),
+                                    value.id(),
+                                    scope,
+                                    version));
+                    appendAudit(audit);
+                    return getWarehouseInside(scope, value.id());
+                });
+    }
+
+    @Override
+    public Warehouse transitionWarehouse(
+            String scope,
+            String id,
+            long version,
+            String target,
+            Instant now,
+            AuditEvent audit) {
+        return transact(
+                scope,
+                () -> {
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_warehouses set status = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? "
+                                            + "and version = ? and status <> ?",
+                                    target,
+                                    Timestamp.from(now),
+                                    id,
+                                    scope,
+                                    version,
+                                    target));
+                    appendAudit(audit);
+                    return getWarehouseInside(scope, id);
+                });
+    }
+
+    @Override
+    public PageResult<Balance> listBalances(
+            String scope, String itemId, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(BALANCE_COLUMNS, "inventory_balances")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.item_id = ?) "
+                                + "and (? = '' or concat(value.item_id, ':', value.warehouse_id) > ?)"
+                                + activeScope("value")
+                                + " order by value.item_id, value.warehouse_id limit ?",
+                        JdbcInventoryRepository::mapBalance,
+                        scope,
+                        itemId,
+                        itemId,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                value -> value.itemId() + ":" + value.warehouseId());
+    }
+
+    @Override
+    public StockResult applyStock(StockCommand command) {
+        return transact(
+                command.scope(),
+                () -> {
+                    Optional<StockResult> replay =
+                            claim(command, "stock", StockResult.class, command.movement().createdAt());
+                    if (replay.isPresent()) {
+                        return replay.get();
+                    }
+                    requireActiveStock(
+                            command.scope(),
+                            command.movement().itemId(),
+                            command.movement().warehouseId());
+                    Balance balance =
+                            lockBalance(
+                                    command.scope(),
+                                    command.movement().itemId(),
+                                    command.movement().warehouseId(),
+                                    command.movement().createdAt());
+                    long onHand = add(balance.onHand(), command.movement().quantityDelta());
+                    long reserved = add(balance.reserved(), command.movement().reservedDelta());
+                    validateBalance(onHand, reserved);
+                    Balance updated =
+                            updateBalance(
+                                    command.scope(),
+                                    balance,
+                                    onHand,
+                                    reserved,
+                                    command.movement().createdAt());
+                    insertMovement(command.scope(), command.movement());
+                    StockResult result = new StockResult(updated, command.movement());
+                    completeClaim(
+                            command.scope(),
+                            command.idempotencyKey(),
+                            command.movement().referenceId(),
+                            command.movement().id(),
+                            result);
+                    appendAudit(command.audit());
+                    return result;
+                });
+    }
+
+    @Override
+    public ReservationResult createReservation(ReservationCommand command) {
+        return transact(
+                command.scope(),
+                () -> {
+                    Optional<ReservationResult> replay =
+                            claim(
+                                    command,
+                                    "reservation",
+                                    ReservationResult.class,
+                                    command.reservation().createdAt());
+                    if (replay.isPresent()) {
+                        return replay.get();
+                    }
+                    Reservation value = command.reservation();
+                    requireActiveStock(command.scope(), value.itemId(), value.warehouseId());
+                    Balance balance =
+                            lockBalance(
+                                    command.scope(),
+                                    value.itemId(),
+                                    value.warehouseId(),
+                                    value.createdAt());
+                    long reserved = add(balance.reserved(), value.quantity());
+                    validateBalance(balance.onHand(), reserved);
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "insert into inventory_reservations "
+                                            + "(id, organization_id, external_reference, item_id, "
+                                            + "warehouse_id, quantity, status, version, created_at, "
+                                            + "updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                    value.id(),
+                                    command.scope(),
+                                    value.externalReference(),
+                                    value.itemId(),
+                                    value.warehouseId(),
+                                    value.quantity(),
+                                    value.status(),
+                                    value.version(),
+                                    Timestamp.from(value.createdAt()),
+                                    Timestamp.from(value.updatedAt())));
+                    Balance updated =
+                            updateBalance(
+                                    command.scope(),
+                                    balance,
+                                    balance.onHand(),
+                                    reserved,
+                                    value.updatedAt());
+                    insertMovement(command.scope(), command.movement());
+                    ReservationResult result =
+                            new ReservationResult(value, updated, command.movement());
+                    completeClaim(
+                            command.scope(),
+                            command.idempotencyKey(),
+                            value.id(),
+                            command.movement().id(),
+                            result);
+                    appendAudit(command.audit());
+                    return result;
+                });
+    }
+
+    @Override
+    public Optional<Reservation> getReservation(String scope, String id) {
+        return first(
+                jdbcTemplate.query(
+                        select(RESERVATION_COLUMNS, "inventory_reservations")
+                                + " where value.id = ? and value.organization_id = ?"
+                                + activeScope("value"),
+                        JdbcInventoryRepository::mapReservation,
+                        id,
+                        scope));
+    }
+
+    @Override
+    public PageResult<Reservation> listReservations(
+            String scope, String status, String cursor, int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(RESERVATION_COLUMNS, "inventory_reservations")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcInventoryRepository::mapReservation,
+                        scope,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                Reservation::id);
+    }
+
+    @Override
+    public ReservationResult transitionReservation(ReservationTransitionCommand command) {
+        return transact(
+                command.scope(),
+                () -> {
+                    Optional<ReservationResult> replay =
+                            claim(
+                                    command,
+                                    "reservation",
+                                    ReservationResult.class,
+                                    command.occurredAt());
+                    if (replay.isPresent()) {
+                        return replay.get();
+                    }
+                    Reservation current = lockReservation(command.scope(), command.reservationId());
+                    if (!InventoryService.RESERVATION_ACTIVE.equals(current.status())
+                            || current.version() != command.version()) {
+                        throw conflict(null);
+                    }
+                    Balance balance =
+                            lockBalance(
+                                    command.scope(),
+                                    current.itemId(),
+                                    current.warehouseId(),
+                                    command.occurredAt());
+                    long quantityDelta = 0L;
+                    String kind = "reservation_released";
+                    String reason = "stock reservation released";
+                    if (InventoryService.CONSUMED.equals(command.target())) {
+                        quantityDelta = Math.negateExact(current.quantity());
+                        kind = "reservation_consumed";
+                        reason = "stock reservation consumed";
+                    }
+                    long onHand = add(balance.onHand(), quantityDelta);
+                    long reserved = add(balance.reserved(), Math.negateExact(current.quantity()));
+                    validateBalance(onHand, reserved);
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_reservations set status = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? "
+                                            + "and version = ? and status = 'active'",
+                                    command.target(),
+                                    Timestamp.from(command.occurredAt()),
+                                    current.id(),
+                                    command.scope(),
+                                    command.version()));
+                    Reservation updatedReservation =
+                            getReservationInside(command.scope(), current.id());
+                    Balance updatedBalance =
+                            updateBalance(
+                                    command.scope(),
+                                    balance,
+                                    onHand,
+                                    reserved,
+                                    command.occurredAt());
+                    Movement movement =
+                            new Movement(
+                                    command.movementId(),
+                                    emptyToNull(command.scope()),
+                                    current.itemId(),
+                                    current.warehouseId(),
+                                    kind,
+                                    quantityDelta,
+                                    Math.negateExact(current.quantity()),
+                                    "reservation",
+                                    current.id(),
+                                    reason,
+                                    command.idempotencyKey(),
+                                    command.actorId(),
+                                    command.occurredAt());
+                    insertMovement(command.scope(), movement);
+                    ReservationResult result =
+                            new ReservationResult(updatedReservation, updatedBalance, movement);
+                    completeClaim(
+                            command.scope(),
+                            command.idempotencyKey(),
+                            current.id(),
+                            movement.id(),
+                            result);
+                    appendAudit(command.audit());
+                    return result;
+                });
+    }
+
+    @Override
+    public void createPurchaseOrder(PurchaseOrder value, AuditEvent audit) {
+        transact(
+                scope(value.organizationId()),
+                () -> {
+                    String organizationId = scope(value.organizationId());
+                    for (PurchaseOrderLine line : value.lines()) {
+                        requireActiveItem(organizationId, line.itemId());
+                    }
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "insert into inventory_purchase_orders "
+                                            + "(id, organization_id, order_number, supplier_name, "
+                                            + "status, version, created_at, updated_at) "
+                                            + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    value.id(),
+                                    organizationId,
+                                    value.number(),
+                                    value.supplierName(),
+                                    value.status(),
+                                    value.version(),
+                                    Timestamp.from(value.createdAt()),
+                                    Timestamp.from(value.updatedAt())));
+                    for (PurchaseOrderLine line : value.lines()) {
+                        requireOne(
+                                jdbcTemplate.update(
+                                        "insert into inventory_purchase_order_lines "
+                                                + "(id, purchase_order_id, item_id, ordered_quantity, "
+                                                + "received_quantity) values (?, ?, ?, ?, ?)",
+                                        line.id(),
+                                        value.id(),
+                                        line.itemId(),
+                                        line.orderedQuantity(),
+                                        line.receivedQuantity()));
+                    }
+                    appendAudit(audit);
+                    return Boolean.TRUE;
+                });
+    }
+
+    @Override
+    public Optional<PurchaseOrder> getPurchaseOrder(String scope, String id) {
+        Optional<PurchaseOrder> value =
+                first(
+                        jdbcTemplate.query(
+                                select(PURCHASE_COLUMNS, "inventory_purchase_orders")
+                                        + " where value.id = ? and value.organization_id = ?"
+                                        + activeScope("value"),
+                                JdbcInventoryRepository::mapPurchase,
+                                id,
+                                scope));
+        return value.map(purchase -> withLines(purchase, purchaseLines(id)));
+    }
+
+    @Override
+    public PageResult<PurchaseOrder> listPurchaseOrders(
+            String scope, String status, String cursor, int limit) {
+        List<PurchaseOrder> values =
+                jdbcTemplate.query(
+                        select(PURCHASE_COLUMNS, "inventory_purchase_orders")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.status = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcInventoryRepository::mapPurchase,
+                        scope,
+                        status,
+                        status,
+                        cursor,
+                        cursor,
+                        limit + 1);
+        List<PurchaseOrder> complete = new ArrayList<>(values.size());
+        for (PurchaseOrder value : values) {
+            complete.add(withLines(value, purchaseLines(value.id())));
+        }
+        return page(complete, limit, PurchaseOrder::id);
+    }
+
+    @Override
+    public PurchaseOrder transitionPurchaseOrder(
+            String scope,
+            String id,
+            long version,
+            String target,
+            Instant now,
+            AuditEvent audit) {
+        return transact(
+                scope,
+                () -> {
+                    String condition = "status = 'draft'";
+                    if (InventoryService.CANCELLED.equals(target)) {
+                        condition =
+                                "status in ('draft', 'submitted') and not exists (select 1 from "
+                                        + "inventory_purchase_order_lines line where "
+                                        + "line.purchase_order_id = inventory_purchase_orders.id "
+                                        + "and line.received_quantity > 0)";
+                    }
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_purchase_orders set status = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? and version = ? and "
+                                            + condition,
+                                    target,
+                                    Timestamp.from(now),
+                                    id,
+                                    scope,
+                                    version));
+                    appendAudit(audit);
+                    return getPurchaseOrderInside(scope, id);
+                });
+    }
+
+    @Override
+    public ReceiptResult receivePurchaseOrder(ReceiptCommand command) {
+        return transact(
+                command.scope(),
+                () -> {
+                    Optional<ReceiptResult> replay =
+                            claim(command, "receipt", ReceiptResult.class, command.occurredAt());
+                    if (replay.isPresent()) {
+                        return replay.get();
+                    }
+                    PurchaseOrder purchase =
+                            lockPurchaseOrder(command.scope(), command.purchaseOrderId());
+                    if (purchase.version() != command.version()
+                            || (!InventoryService.SUBMITTED.equals(purchase.status())
+                                    && !InventoryService.PARTIALLY_RECEIVED.equals(
+                                            purchase.status()))) {
+                        throw conflict(null);
+                    }
+                    PurchaseOrderLine line = lockPurchaseLine(purchase.id(), command.lineId());
+                    long received = add(line.receivedQuantity(), command.quantity());
+                    if (received > line.orderedQuantity()) {
+                        throw conflict(null);
+                    }
+                    requireActiveStock(command.scope(), line.itemId(), command.warehouseId());
+                    Balance balance =
+                            lockBalance(
+                                    command.scope(),
+                                    line.itemId(),
+                                    command.warehouseId(),
+                                    command.occurredAt());
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_purchase_order_lines "
+                                            + "set received_quantity = ? where id = ?",
+                                    received,
+                                    line.id()));
+                    Integer remaining =
+                            jdbcTemplate.queryForObject(
+                                    "select count(*) from inventory_purchase_order_lines "
+                                            + "where purchase_order_id = ? "
+                                            + "and received_quantity < ordered_quantity",
+                                    Integer.class,
+                                    purchase.id());
+                    String target =
+                            remaining != null && remaining > 0
+                                    ? InventoryService.PARTIALLY_RECEIVED
+                                    : InventoryService.RECEIVED;
+                    requireOne(
+                            jdbcTemplate.update(
+                                    "update inventory_purchase_orders set status = ?, "
+                                            + "version = version + 1, updated_at = ? "
+                                            + "where id = ? and organization_id = ? and version = ?",
+                                    target,
+                                    Timestamp.from(command.occurredAt()),
+                                    purchase.id(),
+                                    command.scope(),
+                                    command.version()));
+                    Balance updatedBalance =
+                            updateBalance(
+                                    command.scope(),
+                                    balance,
+                                    add(balance.onHand(), command.quantity()),
+                                    balance.reserved(),
+                                    command.occurredAt());
+                    Movement movement =
+                            new Movement(
+                                    command.movementId(),
+                                    emptyToNull(command.scope()),
+                                    line.itemId(),
+                                    command.warehouseId(),
+                                    "purchase_received",
+                                    command.quantity(),
+                                    0L,
+                                    "purchase_order",
+                                    purchase.id(),
+                                    "purchase order received",
+                                    command.idempotencyKey(),
+                                    command.actorId(),
+                                    command.occurredAt());
+                    insertMovement(command.scope(), movement);
+                    PurchaseOrder updatedPurchase =
+                            getPurchaseOrderInside(command.scope(), purchase.id());
+                    ReceiptResult result =
+                            new ReceiptResult(updatedPurchase, updatedBalance, movement);
+                    completeClaim(
+                            command.scope(),
+                            command.idempotencyKey(),
+                            purchase.id(),
+                            movement.id(),
+                            result);
+                    appendAudit(command.audit());
+                    return result;
+                });
+    }
+
+    @Override
+    public PageResult<Movement> listMovements(
+            String scope,
+            String itemId,
+            String warehouseId,
+            String cursor,
+            int limit) {
+        return page(
+                jdbcTemplate.query(
+                        select(MOVEMENT_COLUMNS, "inventory_movements")
+                                + " where value.organization_id = ? "
+                                + "and (? = '' or value.item_id = ?) "
+                                + "and (? = '' or value.warehouse_id = ?) "
+                                + "and (? = '' or value.id > ?)"
+                                + activeScope("value")
+                                + " order by value.id limit ?",
+                        JdbcInventoryRepository::mapMovement,
+                        scope,
+                        itemId,
+                        itemId,
+                        warehouseId,
+                        warehouseId,
+                        cursor,
+                        cursor,
+                        limit + 1),
+                limit,
+                Movement::id);
+    }
+
+    private <T> Optional<T> claim(
+            StockCommand command, String type, Class<T> resultClass, Instant now) {
+        return claim(
+                command.scope(),
+                command.idempotencyKey(),
+                command.fingerprint(),
+                type,
+                resultClass,
+                now);
+    }
+
+    private <T> Optional<T> claim(
+            ReservationCommand command, String type, Class<T> resultClass, Instant now) {
+        return claim(
+                command.scope(),
+                command.idempotencyKey(),
+                command.fingerprint(),
+                type,
+                resultClass,
+                now);
+    }
+
+    private <T> Optional<T> claim(
+            ReservationTransitionCommand command,
+            String type,
+            Class<T> resultClass,
+            Instant now) {
+        return claim(
+                command.scope(),
+                command.idempotencyKey(),
+                command.fingerprint(),
+                type,
+                resultClass,
+                now);
+    }
+
+    private <T> Optional<T> claim(
+            ReceiptCommand command, String type, Class<T> resultClass, Instant now) {
+        return claim(
+                command.scope(),
+                command.idempotencyKey(),
+                command.fingerprint(),
+                type,
+                resultClass,
+                now);
+    }
+
+    private <T> Optional<T> claim(
+            String scope,
+            String key,
+            String fingerprint,
+            String resultType,
+            Class<T> resultClass,
+            Instant now) {
+        int inserted =
+                jdbcTemplate.update(
+{{- if eq .Database.Engine "postgresql"}}
+                        "insert into inventory_idempotency "
+                                + "(organization_id, idempotency_key, fingerprint, result_type, "
+                                + "created_at) values (?, ?, ?, ?, ?) "
+                                + "on conflict (organization_id, idempotency_key) do nothing",
+{{- else}}
+                        "insert ignore into inventory_idempotency "
+                                + "(organization_id, idempotency_key, fingerprint, result_type, "
+                                + "created_at) values (?, ?, ?, ?, ?)",
+{{- end}}
+                        scope,
+                        key,
+                        fingerprint,
+                        resultType,
+                        Timestamp.from(now));
+        if (inserted == 1) {
+            return Optional.empty();
+        }
+        List<IdempotencyRecord> records =
+                jdbcTemplate.query(
+                        "select fingerprint, result_type, result_id, movement_id, result_payload "
+                                + "from inventory_idempotency "
+                                + "where organization_id = ? and idempotency_key = ?",
+                        (value, rowNumber) ->
+                                new IdempotencyRecord(
+                                        value.getString("fingerprint"),
+                                        value.getString("result_type"),
+                                        value.getString("result_id"),
+                                        value.getString("movement_id"),
+                                        value.getString("result_payload")),
+                        scope,
+                        key);
+        if (records.size() != 1) {
+            throw conflict(null);
+        }
+        IdempotencyRecord record = records.getFirst();
+        if (!fingerprint.equals(record.fingerprint())
+                || !resultType.equals(record.resultType())
+                || blank(record.resultId())
+                || blank(record.movementId())
+                || blank(record.payload())) {
+            throw conflict(null);
+        }
+        try {
+            return Optional.of(objectMapper.readValue(record.payload(), resultClass));
+        } catch (Exception exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private void completeClaim(
+            String scope, String key, String resultId, String movementId, Object result) {
+        String payload;
+        try {
+            payload = objectMapper.writeValueAsString(result);
+        } catch (Exception exception) {
+            throw conflict(exception);
+        }
+        requireOne(
+                jdbcTemplate.update(
+                        "update inventory_idempotency set result_id = ?, movement_id = ?, "
+                                + "result_payload = ? where organization_id = ? "
+                                + "and idempotency_key = ? and result_id is null "
+                                + "and movement_id is null",
+                        resultId,
+                        movementId,
+                        payload,
+                        scope,
+                        key));
+    }
+
+    private void requireActiveStock(String scope, String itemId, String warehouseId) {
+        requireActiveItem(scope, itemId);
+        List<String> warehouses =
+                jdbcTemplate.query(
+                        "select id from inventory_warehouses where id = ? "
+                                + "and organization_id = ? and status = 'active' for update",
+                        (value, rowNumber) -> value.getString(1),
+                        warehouseId,
+                        scope);
+        if (warehouses.isEmpty()) {
+            throw notFound();
+        }
+    }
+
+    private void requireActiveItem(String scope, String itemId) {
+        List<String> items =
+                jdbcTemplate.query(
+                        "select id from inventory_items where id = ? "
+                                + "and organization_id = ? and status = 'active' for update",
+                        (value, rowNumber) -> value.getString(1),
+                        itemId,
+                        scope);
+        if (items.isEmpty()) {
+            throw notFound();
+        }
+    }
+
+    private Balance lockBalance(String scope, String itemId, String warehouseId, Instant now) {
+{{- if eq .Database.Engine "postgresql"}}
+        jdbcTemplate.update(
+                "insert into inventory_balances "
+                        + "(organization_id, item_id, warehouse_id, on_hand, reserved, version, updated_at) "
+                        + "values (?, ?, ?, 0, 0, 1, ?) "
+                        + "on conflict (item_id, warehouse_id) do nothing",
+                scope,
+                itemId,
+                warehouseId,
+                Timestamp.from(now));
+{{- else}}
+        jdbcTemplate.update(
+                "insert ignore into inventory_balances "
+                        + "(organization_id, item_id, warehouse_id, on_hand, reserved, version, updated_at) "
+                        + "values (?, ?, ?, 0, 0, 1, ?)",
+                scope,
+                itemId,
+                warehouseId,
+                Timestamp.from(now));
+{{- end}}
+        List<Balance> values =
+                jdbcTemplate.query(
+                        select(BALANCE_COLUMNS, "inventory_balances")
+                                + " where value.organization_id = ? and value.item_id = ? "
+                                + "and value.warehouse_id = ? for update",
+                        JdbcInventoryRepository::mapBalance,
+                        scope,
+                        itemId,
+                        warehouseId);
+        if (values.size() != 1) {
+            throw conflict(null);
+        }
+        return values.getFirst();
+    }
+
+    private Balance updateBalance(
+            String scope, Balance current, long onHand, long reserved, Instant now) {
+        validateBalance(onHand, reserved);
+        requireOne(
+                jdbcTemplate.update(
+                        "update inventory_balances set on_hand = ?, reserved = ?, "
+                                + "version = version + 1, updated_at = ? "
+                                + "where organization_id = ? and item_id = ? and warehouse_id = ? "
+                                + "and version = ?",
+                        onHand,
+                        reserved,
+                        Timestamp.from(now),
+                        scope,
+                        current.itemId(),
+                        current.warehouseId(),
+                        current.version()));
+        List<Balance> values =
+                jdbcTemplate.query(
+                        select(BALANCE_COLUMNS, "inventory_balances")
+                                + " where value.organization_id = ? and value.item_id = ? "
+                                + "and value.warehouse_id = ?",
+                        JdbcInventoryRepository::mapBalance,
+                        scope,
+                        current.itemId(),
+                        current.warehouseId());
+        if (values.size() != 1) {
+            throw conflict(null);
+        }
+        return values.getFirst();
+    }
+
+    private void insertMovement(String scope, Movement value) {
+        requireOne(
+                jdbcTemplate.update(
+                        "insert into inventory_movements "
+                                + "(id, organization_id, item_id, warehouse_id, movement_kind, quantity_delta, "
+                                + "reserved_delta, reference_type, reference_id, reason, "
+                                + "idempotency_key, created_by, created_at) "
+                                + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        value.id(),
+                        scope,
+                        value.itemId(),
+                        value.warehouseId(),
+                        value.kind(),
+                        value.quantityDelta(),
+                        value.reservedDelta(),
+                        value.referenceType(),
+                        value.referenceId(),
+                        value.reason(),
+                        value.idempotencyKey(),
+                        value.createdBy(),
+                        Timestamp.from(value.createdAt())));
+    }
+
+    private Reservation lockReservation(String scope, String id) {
+        List<Reservation> values =
+                jdbcTemplate.query(
+                        select(RESERVATION_COLUMNS, "inventory_reservations")
+                                + " where value.organization_id = ? and value.id = ? for update",
+                        JdbcInventoryRepository::mapReservation,
+                        scope,
+                        id);
+        if (values.size() != 1) {
+            throw notFound();
+        }
+        return values.getFirst();
+    }
+
+    private PurchaseOrder lockPurchaseOrder(String scope, String id) {
+        List<PurchaseOrder> values =
+                jdbcTemplate.query(
+                        select(PURCHASE_COLUMNS, "inventory_purchase_orders")
+                                + " where value.organization_id = ? and value.id = ? for update",
+                        JdbcInventoryRepository::mapPurchase,
+                        scope,
+                        id);
+        if (values.size() != 1) {
+            throw notFound();
+        }
+        return values.getFirst();
+    }
+
+    private PurchaseOrderLine lockPurchaseLine(String purchaseId, String lineId) {
+        List<PurchaseOrderLine> values =
+                jdbcTemplate.query(
+                        "select id, item_id, ordered_quantity, received_quantity "
+                                + "from inventory_purchase_order_lines "
+                                + "where purchase_order_id = ? and id = ? for update",
+                        JdbcInventoryRepository::mapPurchaseLine,
+                        purchaseId,
+                        lineId);
+        if (values.size() != 1) {
+            throw notFound();
+        }
+        return values.getFirst();
+    }
+
+    private Item getItemInside(String scope, String id) {
+        return first(
+                        jdbcTemplate.query(
+                                select(ITEM_COLUMNS, "inventory_items")
+                                        + " where value.organization_id = ? and value.id = ?",
+                                JdbcInventoryRepository::mapItem,
+                                scope,
+                                id))
+                .orElseThrow(JdbcInventoryRepository::notFound);
+    }
+
+    private Warehouse getWarehouseInside(String scope, String id) {
+        return first(
+                        jdbcTemplate.query(
+                                select(WAREHOUSE_COLUMNS, "inventory_warehouses")
+                                        + " where value.organization_id = ? and value.id = ?",
+                                JdbcInventoryRepository::mapWarehouse,
+                                scope,
+                                id))
+                .orElseThrow(JdbcInventoryRepository::notFound);
+    }
+
+    private Reservation getReservationInside(String scope, String id) {
+        return first(
+                        jdbcTemplate.query(
+                                select(RESERVATION_COLUMNS, "inventory_reservations")
+                                        + " where value.organization_id = ? and value.id = ?",
+                                JdbcInventoryRepository::mapReservation,
+                                scope,
+                                id))
+                .orElseThrow(JdbcInventoryRepository::notFound);
+    }
+
+    private PurchaseOrder getPurchaseOrderInside(String scope, String id) {
+        PurchaseOrder value =
+                first(
+                                jdbcTemplate.query(
+                                        select(PURCHASE_COLUMNS, "inventory_purchase_orders")
+                                                + " where value.organization_id = ? and value.id = ?",
+                                        JdbcInventoryRepository::mapPurchase,
+                                        scope,
+                                        id))
+                        .orElseThrow(JdbcInventoryRepository::notFound);
+        return withLines(value, purchaseLines(id));
+    }
+
+    private List<PurchaseOrderLine> purchaseLines(String purchaseId) {
+        return jdbcTemplate.query(
+                "select id, item_id, ordered_quantity, received_quantity "
+                        + "from inventory_purchase_order_lines where purchase_order_id = ? "
+                        + "order by id",
+                JdbcInventoryRepository::mapPurchaseLine,
+                purchaseId);
+    }
+
+    private <T> T transact(String scope, Operation<T> operation) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                lockScope(scope);
+                                return operation.run();
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private void lockScope(String scope) {
+{{- if .Tenancy}}
+        List<String> values =
+                jdbcTemplate.query(
+                        "select id from organizations where id = ? and status = 'active' for update",
+                        (resultSet, rowNumber) -> resultSet.getString(1),
+                        scope);
+        if (values.isEmpty()) {
+            throw notFound();
+        }
+{{- end}}
+    }
+
+    private void appendAudit(AuditEvent event) {
+        requireOne(
+                jdbcTemplate.update(
+                        "insert into audit_events "
+                                + "(id, user_id, action, outcome, target, ip_address, user_agent, "
+                                + "created_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                        event.id(),
+                        emptyToNull(event.userId()),
+                        event.action(),
+                        event.outcome(),
+                        emptyToNull(event.target()),
+                        emptyToNull(event.ipAddress()),
+                        emptyToNull(event.userAgent()),
+                        Timestamp.from(event.createdAt())));
+    }
+
+    private static Item mapItem(ResultSet value, int rowNumber) throws SQLException {
+        return new Item(
+                value.getString("id"),
+                emptyToNull(value.getString("organization_id")),
+                value.getString("sku"),
+                value.getString("name"),
+                value.getString("unit"),
+                value.getString("status"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static Warehouse mapWarehouse(ResultSet value, int rowNumber) throws SQLException {
+        return new Warehouse(
+                value.getString("id"),
+                emptyToNull(value.getString("organization_id")),
+                value.getString("code"),
+                value.getString("name"),
+                value.getString("status"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static Balance mapBalance(ResultSet value, int rowNumber) throws SQLException {
+        long onHand = value.getLong("on_hand");
+        long reserved = value.getLong("reserved");
+        return new Balance(
+                value.getString("item_id"),
+                value.getString("warehouse_id"),
+                onHand,
+                reserved,
+                onHand - reserved,
+                value.getLong("version"),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static Reservation mapReservation(ResultSet value, int rowNumber)
+            throws SQLException {
+        return new Reservation(
+                value.getString("id"),
+                emptyToNull(value.getString("organization_id")),
+                value.getString("external_reference"),
+                value.getString("item_id"),
+                value.getString("warehouse_id"),
+                value.getLong("quantity"),
+                value.getString("status"),
+                value.getLong("version"),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static PurchaseOrder mapPurchase(ResultSet value, int rowNumber) throws SQLException {
+        return new PurchaseOrder(
+                value.getString("id"),
+                emptyToNull(value.getString("organization_id")),
+                value.getString("order_number"),
+                value.getString("supplier_name"),
+                value.getString("status"),
+                value.getLong("version"),
+                List.of(),
+                instant(value.getTimestamp("created_at")),
+                instant(value.getTimestamp("updated_at")));
+    }
+
+    private static PurchaseOrderLine mapPurchaseLine(ResultSet value, int rowNumber)
+            throws SQLException {
+        return new PurchaseOrderLine(
+                value.getString("id"),
+                value.getString("item_id"),
+                value.getLong("ordered_quantity"),
+                value.getLong("received_quantity"));
+    }
+
+    private static Movement mapMovement(ResultSet value, int rowNumber) throws SQLException {
+        return new Movement(
+                value.getString("id"),
+                emptyToNull(value.getString("organization_id")),
+                value.getString("item_id"),
+                value.getString("warehouse_id"),
+                value.getString("movement_kind"),
+                value.getLong("quantity_delta"),
+                value.getLong("reserved_delta"),
+                value.getString("reference_type"),
+                value.getString("reference_id"),
+                value.getString("reason"),
+                value.getString("idempotency_key"),
+                value.getString("created_by"),
+                instant(value.getTimestamp("created_at")));
+    }
+
+    private static PurchaseOrder withLines(
+            PurchaseOrder value, List<PurchaseOrderLine> lines) {
+        return new PurchaseOrder(
+                value.id(),
+                value.organizationId(),
+                value.number(),
+                value.supplierName(),
+                value.status(),
+                value.version(),
+                lines,
+                value.createdAt(),
+                value.updatedAt());
+    }
+
+    private static String select(String columns, String table) {
+        return "select " + columns + " from " + table + " value";
+    }
+
+    private static String activeScope(String alias) {
+{{- if .Tenancy}}
+        return " and exists (select 1 from organizations organization where organization.id = "
+                + alias
+                + ".organization_id and organization.status = 'active')";
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static <T> Optional<T> first(List<T> values) {
+        return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
+    }
+
+    private static <T> PageResult<T> page(
+            List<T> source, int limit, Identifier<T> identifier) {
+        List<T> values = new ArrayList<>(source);
+        String nextCursor = "";
+        if (values.size() > limit) {
+            nextCursor = identifier.get(values.get(limit - 1));
+            values = new ArrayList<>(values.subList(0, limit));
+        }
+        return new PageResult<>(List.copyOf(values), nextCursor);
+    }
+
+    private static void validateBalance(long onHand, long reserved) {
+        if (onHand < 0L || reserved < 0L || reserved > onHand) {
+            throw conflict(null);
+        }
+    }
+
+    private static long add(long left, long right) {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private static void requireOne(int changed) {
+        if (changed != 1) {
+            throw conflict(null);
+        }
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String scope(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isEmpty();
+    }
+
+    private static InventoryException notFound() {
+        return new InventoryException(
+                InventoryException.Kind.NOT_FOUND, "inventory record was not found");
+    }
+
+    private static InventoryException conflict(Throwable cause) {
+        InventoryException exception =
+                new InventoryException(
+                        InventoryException.Kind.CONFLICT,
+                        "inventory record changed or conflicts with current state");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+
+    private record IdempotencyRecord(
+            String fingerprint,
+            String resultType,
+            String resultId,
+            String movementId,
+            String payload) {}
+
+    @FunctionalInterface
+    private interface Operation<T> {
+        T run();
+    }
+
+    @FunctionalInterface
+    private interface Identifier<T> {
+        String get(T value);
+    }
+}
