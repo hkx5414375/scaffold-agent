@@ -98,8 +98,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Portable `erp-inventory` 0.1 contract for inventory items, warehouses, integer balances, immutable movements, idempotent reservations, and purchase receiving.
 - [x] Go `erp-inventory` 0.1 reference implementation for PostgreSQL and MySQL with transactional stock invariants, active-tenant isolation, and shared Vue administration.
 - [x] Java `erp-inventory` 0.1 parity for PostgreSQL and MySQL with Spring Boot, transactional JDBC persistence, active-tenant isolation, and shared Vue administration.
-- [ ] Python `erp-inventory` 0.1 parity for PostgreSQL and MySQL.
-- [ ] Cross-backend ERP inventory OpenAPI, permission, schema, migration, behavior, and shared administration conformance gate.
+- [x] Python `erp-inventory` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, atomic idempotent stock operations, active-tenant isolation, and shared Vue administration.
+- [x] Cross-backend ERP inventory OpenAPI, permission, schema, migration, behavior, and shared administration conformance gate.
 - [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
 - [ ] Marketing campaigns, coupons, and promotion evaluation.
 - [ ] Payment abstraction with idempotent intents, callbacks, refunds, and reconciliation.

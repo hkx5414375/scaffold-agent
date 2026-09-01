@@ -56,6 +56,8 @@ const (
 	customerVersion         = "0.1.0"
 	crmOwner                = "crm-core"
 	crmVersion              = "0.1.0"
+	inventoryOwner          = "erp-inventory"
+	inventoryVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -225,6 +227,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: crmOwner, Version: crmVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Portable accounts, contacts, activities, and sales opportunities.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: inventoryOwner, Version: inventoryVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable inventory balances, movements, reservations, and purchase receiving.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -517,6 +529,18 @@ var crmTemplates = map[string]string{
 	"tests/test_crm_http.py":                       "templates/test_crm_http.py.tmpl",
 }
 
+var inventoryTemplates = map[string]string{
+	"src/package/inventory/__init__.py":                      "templates/inventory_init.py.tmpl",
+	"src/package/inventory/http.py":                          "templates/inventory_http.py.tmpl",
+	"src/package/inventory/models.py":                        "templates/inventory_models.py.tmpl",
+	"src/package/inventory/repository.py":                    "templates/inventory_repository.py.tmpl",
+	"src/package/inventory/service.py":                       "templates/inventory_service.py.tmpl",
+	"src/package/migration/versions/000290_erp_inventory.py": "templates/inventory_migration.py.tmpl",
+	"tests/test_inventory.py":                                "templates/test_inventory.py.tmpl",
+	"tests/test_inventory_database.py":                       "templates/test_inventory_database.py.tmpl",
+	"tests/test_inventory_http.py":                           "templates/test_inventory_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -583,6 +607,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	catalogEnabled := false
 	customerEnabled := false
 	crmEnabled := false
+	inventoryEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -625,6 +650,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == crmOwner {
 			crmEnabled = true
 		}
+		if pack.Metadata.Name == inventoryOwner {
+			inventoryEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -639,6 +667,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"crm-core with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"erp-inventory with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -684,11 +717,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Catalog:               catalogEnabled,
 		CustomerAccounts:      customerEnabled,
 		CRM:                   crmEnabled,
+		Inventory:             inventoryEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(crmTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+7,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(crmTemplates)+len(inventoryTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+8,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -833,6 +867,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if inventoryEnabled {
+		for path, templatePath := range inventoryTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    inventoryOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -897,6 +939,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets["web/admin/src/views/CRMView.vue"] = renderTarget{
 				Template:    "templates/src/views/CRMView.vue.tmpl",
 				Owner:       crmOwner,
+				SharedAdmin: true,
+			}
+		}
+		if inventoryEnabled {
+			targets["web/admin/src/views/InventoryView.vue"] = renderTarget{
+				Template:    "templates/src/views/InventoryView.vue.tmpl",
+				Owner:       inventoryOwner,
 				SharedAdmin: true,
 			}
 		}
@@ -1007,6 +1056,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if crmEnabled {
 		capabilityLock[crmOwner] = crmVersion
 	}
+	if inventoryEnabled {
+		capabilityLock[inventoryOwner] = inventoryVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -1039,6 +1091,10 @@ func migrationModels(data templateData) (string, string) {
 	if data.CRM {
 		imports = append(imports, "from "+data.PackageName+".crm import models as crm_models")
 		metadata = append(metadata, "_crm_metadata = crm_models.crm_accounts.metadata")
+	}
+	if data.Inventory {
+		imports = append(imports, "from "+data.PackageName+".inventory import models as inventory_models")
+		metadata = append(metadata, "_inventory_metadata = inventory_models.inventory_items.metadata")
 	}
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")

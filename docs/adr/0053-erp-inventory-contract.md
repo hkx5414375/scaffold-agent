@@ -1,6 +1,6 @@
 # ADR 0053：ERP 库存与采购核心契约
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-09-02
 
 ## 背景
@@ -24,4 +24,4 @@
 
 - AI 可以选择一个能力包获得经过约束的库存并发与采购收货主干，不再重复设计余额、流水和幂等规则。
 - 商城、订单、门店和 CRM 可以在不修改 ERP 表的前提下引用稳定标识，能力包之间保持可替换和可单独升级。
-- ADR 在 Go、Java、Python 均完成 PostgreSQL/MySQL、共享 Vue 管理端和跨语言契约门禁前保持 `Proposed`；达到全部门禁后再改为 `Accepted`。
+- Go、Java、Python 已完成 PostgreSQL/MySQL 生成、共享 Vue 管理端和跨语言 OpenAPI、权限、Schema、迁移、行为契约门禁，因此本 ADR 进入 `Accepted`。

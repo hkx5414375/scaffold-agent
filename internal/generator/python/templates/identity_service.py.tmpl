@@ -8,7 +8,11 @@ from uuid import uuid4
 
 from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
 from {{.PackageName}}.identity.models import AuditEvent, Principal, User
-from {{.PackageName}}.identity.passwords import DUMMY_HASH, hash_password, verify_password
+from {{.PackageName}}.identity.passwords import (
+    DUMMY_HASH,
+    hash_password,
+    verify_password,
+)
 from {{.PackageName}}.identity.repository import IdentityConflict, IdentityRepository
 from {{.PackageName}}.identity.tokens import digest_token, new_token
 

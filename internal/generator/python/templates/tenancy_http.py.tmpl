@@ -6,7 +6,11 @@ from fastapi import APIRouter, Depends, Request
 
 from {{.PackageName}}.identity.http import current_principal
 from {{.PackageName}}.identity.models import Principal
-from {{.PackageName}}.tenancy.models import Organization, OrganizationPage, OrganizationWrite
+from {{.PackageName}}.tenancy.models import (
+    Organization,
+    OrganizationPage,
+    OrganizationWrite,
+)
 from {{.PackageName}}.tenancy.service import TenancyService
 
 router = APIRouter(prefix="/api/v1/organizations", tags=["organizations"])

@@ -76,6 +76,34 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/crm/opportunities/{id}", "put"),
         ("/api/v1/crm/opportunities/{id}/advance", "post"),
 {{- end}}
+{{- if .Inventory}}
+        ("/api/v1/inventory/items", "post"),
+        ("/api/v1/inventory/items", "get"),
+        ("/api/v1/inventory/items/{id}", "get"),
+        ("/api/v1/inventory/items/{id}", "put"),
+        ("/api/v1/inventory/items/{id}/archive", "post"),
+        ("/api/v1/inventory/items/{id}/reactivate", "post"),
+        ("/api/v1/inventory/warehouses", "post"),
+        ("/api/v1/inventory/warehouses", "get"),
+        ("/api/v1/inventory/warehouses/{id}", "get"),
+        ("/api/v1/inventory/warehouses/{id}", "put"),
+        ("/api/v1/inventory/warehouses/{id}/archive", "post"),
+        ("/api/v1/inventory/warehouses/{id}/reactivate", "post"),
+        ("/api/v1/inventory/balances", "get"),
+        ("/api/v1/inventory/adjustments", "post"),
+        ("/api/v1/inventory/reservations", "post"),
+        ("/api/v1/inventory/reservations", "get"),
+        ("/api/v1/inventory/reservations/{id}", "get"),
+        ("/api/v1/inventory/reservations/{id}/release", "post"),
+        ("/api/v1/inventory/reservations/{id}/consume", "post"),
+        ("/api/v1/inventory/purchase-orders", "post"),
+        ("/api/v1/inventory/purchase-orders", "get"),
+        ("/api/v1/inventory/purchase-orders/{id}", "get"),
+        ("/api/v1/inventory/purchase-orders/{id}/submit", "post"),
+        ("/api/v1/inventory/purchase-orders/{id}/cancel", "post"),
+        ("/api/v1/inventory/purchase-orders/{id}/receive", "post"),
+        ("/api/v1/inventory/movements", "get"),
+{{- end}}
 {{- if .Tenancy}}
         ("/api/v1/organizations", "post"),
         ("/api/v1/organizations", "get"),
@@ -270,6 +298,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert crm_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
+{{- if .Inventory}}
+
+    inventory_tree = ast.parse((PACKAGE / "inventory" / "service.py").read_text(encoding="utf-8"))
+    inventory_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(inventory_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert inventory_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

@@ -2086,8 +2086,272 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 {{end}}
+{{- if .Inventory}}
+  /api/v1/inventory/items:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: createInventoryItem
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItemWrite"}}}}
+      responses:
+        "201": {description: Inventory item created, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItem"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+    get:
+      operationId: listInventoryItems
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/InventoryRecordStatus"}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses:
+        "200": {description: Bounded inventory item page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItemPage"}}}}
+  /api/v1/inventory/items/{id}:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getInventoryItem
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses: {"200": {description: One inventory item, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItem"}}}}, "404": {$ref: "#/components/responses/ErrorResponse"}}
+    put:
+      operationId: updateInventoryItem
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItemUpdate"}}}}
+      responses: {"200": {description: Inventory item updated, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItem"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/items/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: archiveInventoryItem
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Inventory item archived, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItem"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/items/{id}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: reactivateInventoryItem
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Inventory item reactivated, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryItem"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/warehouses:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: createInventoryWarehouse
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouseWrite"}}}}
+      responses: {"201": {description: Warehouse created, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouse"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+    get:
+      operationId: listInventoryWarehouses
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/InventoryRecordStatus"}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Bounded warehouse page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehousePage"}}}}}
+  /api/v1/inventory/warehouses/{id}:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getInventoryWarehouse
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses: {"200": {description: One warehouse, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouse"}}}}, "404": {$ref: "#/components/responses/ErrorResponse"}}
+    put:
+      operationId: updateInventoryWarehouse
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouseUpdate"}}}}
+      responses: {"200": {description: Warehouse updated, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouse"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/warehouses/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: archiveInventoryWarehouse
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Warehouse archived, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouse"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/warehouses/{id}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: reactivateInventoryWarehouse
+      x-required-permission: inventory:catalog:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Warehouse reactivated, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryWarehouse"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/balances:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: listInventoryBalances
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{name: item_id, in: query, schema: {type: string}}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Bounded inventory balance page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryBalancePage"}}}}}
+  /api/v1/inventory/adjustments:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: adjustInventoryStock
+      x-required-permission: inventory:stock:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryAdjustment"}}}}
+      responses: {"200": {description: Stock atomically adjusted, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryStockResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/movements:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: listInventoryMovements
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{name: item_id, in: query, schema: {type: string}}, {name: warehouse_id, in: query, schema: {type: string}}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Bounded immutable movement page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryMovementPage"}}}}}
+  /api/v1/inventory/reservations:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: createInventoryReservation
+      x-required-permission: inventory:stock:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationWrite"}}}}
+      responses: {"201": {description: Stock atomically reserved, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+    get:
+      operationId: listInventoryReservations
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/InventoryReservationStatus"}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Bounded reservation page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationPage"}}}}}
+  /api/v1/inventory/reservations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getInventoryReservation
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses: {"200": {description: One reservation, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservation"}}}}, "404": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/reservations/{id}/release:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: releaseInventoryReservation
+      x-required-permission: inventory:stock:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationTransition"}}}}
+      responses: {"200": {description: Reservation atomically released, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/reservations/{id}/consume:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: consumeInventoryReservation
+      x-required-permission: inventory:stock:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationTransition"}}}}
+      responses: {"200": {description: Reservation atomically consumed, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReservationResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/purchase-orders:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: createInventoryPurchaseOrder
+      x-required-permission: inventory:procurement:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrderWrite"}}}}
+      responses: {"201": {description: Purchase order created, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+    get:
+      operationId: listInventoryPurchaseOrders
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/InventoryPurchaseStatus"}, {$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Bounded purchase order page, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrderPage"}}}}}
+  /api/v1/inventory/purchase-orders/{id}:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getInventoryPurchaseOrder
+      x-required-permission: inventory:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses: {"200": {description: One purchase order, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrder"}}}}, "404": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/purchase-orders/{id}/submit:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: submitInventoryPurchaseOrder
+      x-required-permission: inventory:procurement:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Purchase order submitted, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/purchase-orders/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: cancelInventoryPurchaseOrder
+      x-required-permission: inventory:procurement:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryTransition"}}}}
+      responses: {"200": {description: Unreceived purchase order cancelled, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryPurchaseOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/inventory/purchase-orders/{id}/receive:
+    parameters:
+      - $ref: "#/components/parameters/InventoryRecordId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: receiveInventoryPurchaseOrder
+      x-required-permission: inventory:procurement:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReceipt"}}}}
+      responses: {"200": {description: Purchase line atomically received, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReceiptResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+{{- end}}
 components:
-{{- if or .Tenancy .Catalog .CustomerAccounts .CRM}}
+{{- if or .Tenancy .Catalog .CustomerAccounts .CRM .Inventory}}
   parameters:
 {{- if .Tenancy}}
     OrganizationHeader:
@@ -2195,6 +2459,25 @@ components:
         minimum: 1
         maximum: 100
         default: 20
+{{- end}}
+{{- if .Inventory}}
+    InventoryRecordStatus:
+      name: status
+      in: query
+      schema: {type: string, enum: [active, archived]}
+    InventoryReservationStatus:
+      name: status
+      in: query
+      schema: {type: string, enum: [active, released, consumed]}
+    InventoryPurchaseStatus:
+      name: status
+      in: query
+      schema: {type: string, enum: [draft, submitted, partially_received, received, cancelled]}
+    InventoryRecordId:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 191}
 {{- end}}
 {{- end}}
   securitySchemes:
@@ -2478,6 +2761,239 @@ components:
           maxLength: 191
 {{- end}}
 {{end}}
+{{- if .Inventory}}
+    InventoryItem:
+      type: object
+      required: [id, sku, name, unit, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        sku: {type: string, pattern: "^[A-Z0-9._-]{1,64}$"}
+        name: {type: string, minLength: 1, maxLength: 160}
+        unit: {type: string, minLength: 1, maxLength: 32}
+        status: {type: string, enum: [active, archived]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InventoryItemWrite:
+      type: object
+      additionalProperties: false
+      required: [sku, name, unit]
+      properties:
+        sku: {type: string, minLength: 1, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 160}
+        unit: {type: string, minLength: 1, maxLength: 32}
+    InventoryItemUpdate:
+      type: object
+      additionalProperties: false
+      required: [sku, name, unit, version]
+      properties:
+        sku: {type: string, minLength: 1, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 160}
+        unit: {type: string, minLength: 1, maxLength: 32}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    InventoryWarehouse:
+      type: object
+      required: [id, code, name, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        code: {type: string, pattern: "^[A-Z0-9._-]{1,64}$"}
+        name: {type: string, minLength: 1, maxLength: 160}
+        status: {type: string, enum: [active, archived]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InventoryWarehouseWrite:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      properties:
+        code: {type: string, minLength: 1, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 160}
+    InventoryWarehouseUpdate:
+      type: object
+      additionalProperties: false
+      required: [code, name, version]
+      properties:
+        code: {type: string, minLength: 1, maxLength: 64}
+        name: {type: string, minLength: 1, maxLength: 160}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    InventoryTransition:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties: {version: {type: string, pattern: "^[1-9][0-9]*$"}}
+    InventoryBalance:
+      type: object
+      required: [item_id, warehouse_id, on_hand, reserved, available, version, updated_at]
+      properties:
+        item_id: {type: string}
+        warehouse_id: {type: string}
+        on_hand: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+        reserved: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+        available: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        updated_at: {type: string, format: date-time}
+    InventoryMovement:
+      type: object
+      required: [id, item_id, warehouse_id, kind, quantity_delta, reserved_delta, reference_type, reference_id, reason, idempotency_key, created_by, created_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        item_id: {type: string}
+        warehouse_id: {type: string}
+        kind: {type: string, enum: [adjustment, reservation_created, reservation_released, reservation_consumed, purchase_received]}
+        quantity_delta: {type: string, pattern: "^-?(0|[1-9][0-9]*)$"}
+        reserved_delta: {type: string, pattern: "^-?(0|[1-9][0-9]*)$"}
+        reference_type: {type: string}
+        reference_id: {type: string}
+        reason: {type: string, minLength: 1, maxLength: 500}
+        idempotency_key: {type: string}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+    InventoryAdjustment:
+      type: object
+      additionalProperties: false
+      required: [item_id, warehouse_id, quantity_delta, reason, idempotency_key]
+      properties:
+        item_id: {type: string}
+        warehouse_id: {type: string}
+        quantity_delta: {type: string, pattern: "^-?[1-9][0-9]*$"}
+        reason: {type: string, minLength: 1, maxLength: 500}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+    InventoryReservation:
+      type: object
+      required: [id, external_reference, item_id, warehouse_id, quantity, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        external_reference: {type: string}
+        item_id: {type: string}
+        warehouse_id: {type: string}
+        quantity: {type: string, pattern: "^[1-9][0-9]*$"}
+        status: {type: string, enum: [active, released, consumed]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InventoryReservationWrite:
+      type: object
+      additionalProperties: false
+      required: [external_reference, item_id, warehouse_id, quantity, idempotency_key]
+      properties:
+        external_reference: {type: string, minLength: 1, maxLength: 191}
+        item_id: {type: string}
+        warehouse_id: {type: string}
+        quantity: {type: string, pattern: "^[1-9][0-9]*$"}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+    InventoryReservationTransition:
+      type: object
+      additionalProperties: false
+      required: [version, idempotency_key]
+      properties:
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+    InventoryPurchaseOrderLine:
+      type: object
+      required: [id, item_id, ordered_quantity, received_quantity]
+      properties:
+        id: {type: string}
+        item_id: {type: string}
+        ordered_quantity: {type: string, pattern: "^[1-9][0-9]*$"}
+        received_quantity: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+    InventoryPurchaseOrderLineWrite:
+      type: object
+      additionalProperties: false
+      required: [item_id, ordered_quantity]
+      properties:
+        item_id: {type: string}
+        ordered_quantity: {type: string, pattern: "^[1-9][0-9]*$"}
+    InventoryPurchaseOrder:
+      type: object
+      required: [id, number, supplier_name, status, version, lines, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        number: {type: string, pattern: "^[A-Z0-9._-]{1,64}$"}
+        supplier_name: {type: string, minLength: 1, maxLength: 160}
+        status: {type: string, enum: [draft, submitted, partially_received, received, cancelled]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        lines: {type: array, minItems: 1, maxItems: 100, items: {$ref: "#/components/schemas/InventoryPurchaseOrderLine"}}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    InventoryPurchaseOrderWrite:
+      type: object
+      additionalProperties: false
+      required: [number, supplier_name, lines]
+      properties:
+        number: {type: string, minLength: 1, maxLength: 64}
+        supplier_name: {type: string, minLength: 1, maxLength: 160}
+        lines: {type: array, minItems: 1, maxItems: 100, items: {$ref: "#/components/schemas/InventoryPurchaseOrderLineWrite"}}
+    InventoryReceipt:
+      type: object
+      additionalProperties: false
+      required: [line_id, warehouse_id, quantity, idempotency_key, version]
+      properties:
+        line_id: {type: string}
+        warehouse_id: {type: string}
+        quantity: {type: string, pattern: "^[1-9][0-9]*$"}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    InventoryStockResult:
+      type: object
+      required: [balance, movement]
+      properties:
+        balance: {$ref: "#/components/schemas/InventoryBalance"}
+        movement: {$ref: "#/components/schemas/InventoryMovement"}
+    InventoryReservationResult:
+      type: object
+      required: [reservation, balance, movement]
+      properties:
+        reservation: {$ref: "#/components/schemas/InventoryReservation"}
+        balance: {$ref: "#/components/schemas/InventoryBalance"}
+        movement: {$ref: "#/components/schemas/InventoryMovement"}
+    InventoryReceiptResult:
+      type: object
+      required: [purchase_order, balance, movement]
+      properties:
+        purchase_order: {$ref: "#/components/schemas/InventoryPurchaseOrder"}
+        balance: {$ref: "#/components/schemas/InventoryBalance"}
+        movement: {$ref: "#/components/schemas/InventoryMovement"}
+    InventoryItemPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryItem"}}, next_cursor: {type: string}}
+    InventoryWarehousePage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryWarehouse"}}, next_cursor: {type: string}}
+    InventoryBalancePage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryBalance"}}, next_cursor: {type: string}}
+    InventoryMovementPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryMovement"}}, next_cursor: {type: string}}
+    InventoryReservationPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryReservation"}}, next_cursor: {type: string}}
+    InventoryPurchaseOrderPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/InventoryPurchaseOrder"}}, next_cursor: {type: string}}
+{{- end}}
 {{if .Approvals}}
     ApprovalRequest:
       type: object

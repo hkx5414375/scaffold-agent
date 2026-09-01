@@ -364,6 +364,95 @@ func TestCRMCoreRequiresLifecycleTenancyWhenScoped(t *testing.T) {
 	}
 }
 
+func TestGenerateERPInventoryAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Metadata.DisplayName = "Generated Python Inventory Service"
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: inventoryOwner, Version: inventoryVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[inventoryOwner] != inventoryVersion ||
+				generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				generated.CapabilityLock[adminui.Owner] != adminui.Version {
+				t.Fatalf("Generate(%s) capability lock = %#v", database, generated.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/demo_service/inventory/models.py",
+				"src/demo_service/inventory/service.py",
+				"src/demo_service/inventory/repository.py",
+				"src/demo_service/inventory/http.py",
+				"src/demo_service/migration/versions/000290_erp_inventory.py",
+				"tests/test_inventory.py",
+				"tests/test_inventory_database.py",
+				"tests/test_inventory_http.py",
+				"web/admin/src/views/InventoryView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != inventoryOwner {
+					t.Errorf("Generate(%s) inventory output %s is missing or has the wrong owner", database, path)
+				}
+			}
+			assertions := map[string][]string{
+				"src/demo_service/main.py": {
+					"app.state.inventory_service = InventoryService",
+					"application.include_router(inventory_router)",
+				},
+				"src/demo_service/inventory/repository.py": {
+					"organizations.c.status == \"active\"",
+					"with_for_update()",
+					"append_audit(connection, audit)",
+				},
+				"api/openapi.yaml": {
+					"/api/v1/inventory/items:",
+					"/api/v1/inventory/purchase-orders/{id}/receive:",
+					"inventory:stock:manage",
+					"InventoryReservationResult:",
+				},
+				"web/admin/src/App.vue": {"InventoryView"},
+			}
+			for path, fragments := range assertions {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+			var contract map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+				t.Fatalf("generated inventory OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestERPInventoryRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: inventoryOwner, Version: inventoryVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate(tenancy %s) error = %v", version, err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 	t.Parallel()
 

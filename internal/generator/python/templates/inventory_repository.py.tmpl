@@ -1,0 +1,1518 @@
+"""Transactional ERP inventory persistence and idempotent stock commands."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, cast
+
+import sqlalchemy as sa
+from pydantic import BaseModel
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.inventory.models import (
+    InventoryBalance,
+    InventoryItem,
+    InventoryMovement,
+    InventoryReservation,
+    InventoryWarehouse,
+    MovementKind,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseOrderStatus,
+    ReceiptResult,
+    RecordStatus,
+    ReservationResult,
+    ReservationStatus,
+    StockResult,
+    inventory_balances,
+    inventory_idempotency,
+    inventory_items,
+    inventory_movements,
+    inventory_purchase_order_lines,
+    inventory_purchase_orders,
+    inventory_reservations,
+    inventory_warehouses,
+)
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organizations
+{{- end}}
+
+MAXIMUM_INTEGER = 9_223_372_036_854_775_807
+MINIMUM_INTEGER = -9_223_372_036_854_775_808
+
+
+class InventoryConflict(Exception):
+    """A uniqueness, version, state, stock, or idempotency rule rejected a command."""
+
+
+class InventoryNotFound(Exception):
+    """A required active scoped inventory record is absent."""
+
+
+@dataclass(frozen=True, slots=True)
+class ItemMutation:
+    organization_id: str
+    item_id: str
+    sku: str
+    name: str
+    unit: str
+    expected_version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class WarehouseMutation:
+    organization_id: str
+    warehouse_id: str
+    code: str
+    name: str
+    expected_version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecordTransition:
+    organization_id: str
+    record_id: str
+    expected_version: int
+    from_status: RecordStatus
+    to_status: RecordStatus
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StockCommand:
+    organization_id: str
+    idempotency_key: str
+    fingerprint: str
+    movement: InventoryMovement
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationCommand:
+    organization_id: str
+    idempotency_key: str
+    fingerprint: str
+    reservation: InventoryReservation
+    movement: InventoryMovement
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationTransitionCommand:
+    organization_id: str
+    reservation_id: str
+    idempotency_key: str
+    fingerprint: str
+    expected_version: int
+    target: ReservationStatus
+    movement_id: str
+    actor_id: str
+    occurred_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class PurchaseTransitionCommand:
+    organization_id: str
+    purchase_order_id: str
+    expected_version: int
+    target: PurchaseOrderStatus
+    updated_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptCommand:
+    organization_id: str
+    purchase_order_id: str
+    line_id: str
+    warehouse_id: str
+    idempotency_key: str
+    fingerprint: str
+    quantity: int
+    expected_version: int
+    movement_id: str
+    actor_id: str
+    occurred_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class ItemPageResult:
+    items: list[InventoryItem]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class WarehousePageResult:
+    items: list[InventoryWarehouse]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class BalancePageResult:
+    items: list[InventoryBalance]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationPageResult:
+    items: list[InventoryReservation]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class PurchaseOrderPageResult:
+    items: list[PurchaseOrder]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class MovementPageResult:
+    items: list[InventoryMovement]
+    next_cursor: str
+
+
+class InventoryRepository(Protocol):
+    def create_item(self, value: InventoryItem, audit: AuditEvent) -> None: ...
+
+    def get_item(self, organization_id: str, record_id: str) -> InventoryItem | None: ...
+
+    def list_items(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ItemPageResult: ...
+
+    def update_item(self, value: ItemMutation, audit: AuditEvent) -> InventoryItem: ...
+
+    def transition_item(self, value: RecordTransition, audit: AuditEvent) -> InventoryItem: ...
+
+    def create_warehouse(self, value: InventoryWarehouse, audit: AuditEvent) -> None: ...
+
+    def get_warehouse(self, organization_id: str, record_id: str) -> InventoryWarehouse | None: ...
+
+    def list_warehouses(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> WarehousePageResult: ...
+
+    def update_warehouse(
+        self, value: WarehouseMutation, audit: AuditEvent
+    ) -> InventoryWarehouse: ...
+
+    def transition_warehouse(
+        self, value: RecordTransition, audit: AuditEvent
+    ) -> InventoryWarehouse: ...
+
+    def list_balances(
+        self, organization_id: str, item_id: str, cursor: str, limit: int
+    ) -> BalancePageResult: ...
+
+    def apply_stock(self, value: StockCommand) -> StockResult: ...
+
+    def create_reservation(self, value: ReservationCommand) -> ReservationResult: ...
+
+    def get_reservation(
+        self, organization_id: str, record_id: str
+    ) -> InventoryReservation | None: ...
+
+    def list_reservations(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ReservationPageResult: ...
+
+    def transition_reservation(self, value: ReservationTransitionCommand) -> ReservationResult: ...
+
+    def create_purchase_order(self, value: PurchaseOrder, audit: AuditEvent) -> None: ...
+
+    def get_purchase_order(self, organization_id: str, record_id: str) -> PurchaseOrder | None: ...
+
+    def list_purchase_orders(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> PurchaseOrderPageResult: ...
+
+    def transition_purchase_order(self, value: PurchaseTransitionCommand) -> PurchaseOrder: ...
+
+    def receive_purchase_order(self, value: ReceiptCommand) -> ReceiptResult: ...
+
+    def list_movements(
+        self,
+        organization_id: str,
+        item_id: str,
+        warehouse_id: str,
+        cursor: str,
+        limit: int,
+    ) -> MovementPageResult: ...
+
+
+class SQLAlchemyInventoryRepository:
+    """SQLAlchemy adapter with row locks, atomic audit, and replay snapshots."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create_item(self, value: InventoryItem, audit: AuditEvent) -> None:
+        self._create(_organization(value), inventory_items, _item_values(value), audit)
+
+    def get_item(self, organization_id: str, record_id: str) -> InventoryItem | None:
+        row = self._read_one(inventory_items, organization_id, record_id)
+        return _map_item(row) if row is not None else None
+
+    def list_items(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ItemPageResult:
+        statement = select(inventory_items).where(
+            inventory_items.c.organization_id == organization_id,
+            _active_scope(inventory_items),
+        )
+        if status:
+            statement = statement.where(inventory_items.c.status == status)
+        if cursor:
+            statement = statement.where(inventory_items.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(inventory_items.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_item(row) for row in rows]
+        return ItemPageResult(values[:limit], _next(values, limit))
+
+    def update_item(self, value: ItemMutation, audit: AuditEvent) -> InventoryItem:
+        def mutation(connection: Connection) -> InventoryItem:
+            changed = connection.execute(
+                update(inventory_items)
+                .where(
+                    inventory_items.c.id == value.item_id,
+                    inventory_items.c.organization_id == value.organization_id,
+                    inventory_items.c.version == value.expected_version,
+                    inventory_items.c.status == RecordStatus.ACTIVE.value,
+                )
+                .values(
+                    sku=value.sku,
+                    name=value.name,
+                    unit=value.unit,
+                    version=inventory_items.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            return _read_item(connection, value.organization_id, value.item_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def transition_item(self, value: RecordTransition, audit: AuditEvent) -> InventoryItem:
+        def mutation(connection: Connection) -> InventoryItem:
+            changed = connection.execute(
+                update(inventory_items)
+                .where(
+                    inventory_items.c.id == value.record_id,
+                    inventory_items.c.organization_id == value.organization_id,
+                    inventory_items.c.version == value.expected_version,
+                    inventory_items.c.status == value.from_status.value,
+                )
+                .values(
+                    status=value.to_status.value,
+                    version=inventory_items.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            return _read_item(connection, value.organization_id, value.record_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def create_warehouse(self, value: InventoryWarehouse, audit: AuditEvent) -> None:
+        self._create(_organization(value), inventory_warehouses, _warehouse_values(value), audit)
+
+    def get_warehouse(self, organization_id: str, record_id: str) -> InventoryWarehouse | None:
+        row = self._read_one(inventory_warehouses, organization_id, record_id)
+        return _map_warehouse(row) if row is not None else None
+
+    def list_warehouses(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> WarehousePageResult:
+        statement = select(inventory_warehouses).where(
+            inventory_warehouses.c.organization_id == organization_id,
+            _active_scope(inventory_warehouses),
+        )
+        if status:
+            statement = statement.where(inventory_warehouses.c.status == status)
+        if cursor:
+            statement = statement.where(inventory_warehouses.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(inventory_warehouses.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_warehouse(row) for row in rows]
+        return WarehousePageResult(values[:limit], _next(values, limit))
+
+    def update_warehouse(self, value: WarehouseMutation, audit: AuditEvent) -> InventoryWarehouse:
+        def mutation(connection: Connection) -> InventoryWarehouse:
+            changed = connection.execute(
+                update(inventory_warehouses)
+                .where(
+                    inventory_warehouses.c.id == value.warehouse_id,
+                    inventory_warehouses.c.organization_id == value.organization_id,
+                    inventory_warehouses.c.version == value.expected_version,
+                    inventory_warehouses.c.status == RecordStatus.ACTIVE.value,
+                )
+                .values(
+                    code=value.code,
+                    name=value.name,
+                    version=inventory_warehouses.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            return _read_warehouse(connection, value.organization_id, value.warehouse_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def transition_warehouse(
+        self, value: RecordTransition, audit: AuditEvent
+    ) -> InventoryWarehouse:
+        def mutation(connection: Connection) -> InventoryWarehouse:
+            changed = connection.execute(
+                update(inventory_warehouses)
+                .where(
+                    inventory_warehouses.c.id == value.record_id,
+                    inventory_warehouses.c.organization_id == value.organization_id,
+                    inventory_warehouses.c.version == value.expected_version,
+                    inventory_warehouses.c.status == value.from_status.value,
+                )
+                .values(
+                    status=value.to_status.value,
+                    version=inventory_warehouses.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            return _read_warehouse(connection, value.organization_id, value.record_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def list_balances(
+        self, organization_id: str, item_id: str, cursor: str, limit: int
+    ) -> BalancePageResult:
+        cursor_value = inventory_balances.c.item_id + ":" + inventory_balances.c.warehouse_id
+        statement = select(inventory_balances).where(
+            inventory_balances.c.organization_id == organization_id,
+            _active_scope(inventory_balances),
+        )
+        if item_id:
+            statement = statement.where(inventory_balances.c.item_id == item_id)
+        if cursor:
+            statement = statement.where(cursor_value > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    statement.order_by(
+                        inventory_balances.c.item_id,
+                        inventory_balances.c.warehouse_id,
+                    ).limit(limit + 1)
+                )
+                .mappings()
+                .all()
+            )
+        values = [_map_balance(row) for row in rows]
+        return BalancePageResult(values[:limit], _next_balance(values, limit))
+
+    def apply_stock(self, value: StockCommand) -> StockResult:
+        def mutation(connection: Connection) -> StockResult:
+            replay = _claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.fingerprint,
+                "stock",
+                StockResult,
+                value.movement.created_at,
+            )
+            if replay is not None:
+                return replay
+            balance = _lock_stock(
+                connection,
+                value.organization_id,
+                value.movement.item_id,
+                value.movement.warehouse_id,
+                value.movement.created_at,
+            )
+            on_hand = _add(int(balance.on_hand), int(value.movement.quantity_delta))
+            reserved = _add(int(balance.reserved), int(value.movement.reserved_delta))
+            changed = _update_balance(
+                connection,
+                value.organization_id,
+                balance,
+                on_hand,
+                reserved,
+                value.movement.created_at,
+            )
+            connection.execute(
+                insert(inventory_movements).values(
+                    **_movement_values(value.organization_id, value.movement)
+                )
+            )
+            result = StockResult(balance=changed, movement=value.movement)
+            _complete_claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.movement.reference_id,
+                value.movement.id,
+                result,
+            )
+            append_audit(connection, value.audit)
+            return result
+
+        return self._command(value.organization_id, mutation)
+
+    def create_reservation(self, value: ReservationCommand) -> ReservationResult:
+        def mutation(connection: Connection) -> ReservationResult:
+            replay = _claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.fingerprint,
+                "reservation",
+                ReservationResult,
+                value.reservation.created_at,
+            )
+            if replay is not None:
+                return replay
+            balance = _lock_stock(
+                connection,
+                value.organization_id,
+                value.reservation.item_id,
+                value.reservation.warehouse_id,
+                value.reservation.created_at,
+            )
+            reserved = _add(int(balance.reserved), int(value.reservation.quantity))
+            _validate_balance(int(balance.on_hand), reserved)
+            connection.execute(
+                insert(inventory_reservations).values(
+                    **_reservation_values(value.organization_id, value.reservation)
+                )
+            )
+            changed = _update_balance(
+                connection,
+                value.organization_id,
+                balance,
+                int(balance.on_hand),
+                reserved,
+                value.reservation.updated_at,
+            )
+            connection.execute(
+                insert(inventory_movements).values(
+                    **_movement_values(value.organization_id, value.movement)
+                )
+            )
+            result = ReservationResult(
+                reservation=value.reservation,
+                balance=changed,
+                movement=value.movement,
+            )
+            _complete_claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.reservation.id,
+                value.movement.id,
+                result,
+            )
+            append_audit(connection, value.audit)
+            return result
+
+        return self._command(value.organization_id, mutation)
+
+    def get_reservation(self, organization_id: str, record_id: str) -> InventoryReservation | None:
+        row = self._read_one(inventory_reservations, organization_id, record_id)
+        return _map_reservation(row) if row is not None else None
+
+    def list_reservations(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ReservationPageResult:
+        statement = select(inventory_reservations).where(
+            inventory_reservations.c.organization_id == organization_id,
+            _active_scope(inventory_reservations),
+        )
+        if status:
+            statement = statement.where(inventory_reservations.c.status == status)
+        if cursor:
+            statement = statement.where(inventory_reservations.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(inventory_reservations.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_reservation(row) for row in rows]
+        return ReservationPageResult(values[:limit], _next(values, limit))
+
+    def transition_reservation(self, value: ReservationTransitionCommand) -> ReservationResult:
+        def mutation(connection: Connection) -> ReservationResult:
+            replay = _claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.fingerprint,
+                "reservation",
+                ReservationResult,
+                value.occurred_at,
+            )
+            if replay is not None:
+                return replay
+            reservation = _lock_reservation(connection, value.organization_id, value.reservation_id)
+            if (
+                reservation.status != ReservationStatus.ACTIVE
+                or int(reservation.version) != value.expected_version
+            ):
+                raise InventoryConflict()
+            balance = _lock_stock(
+                connection,
+                value.organization_id,
+                reservation.item_id,
+                reservation.warehouse_id,
+                value.occurred_at,
+            )
+            quantity = int(reservation.quantity)
+            consumed = value.target == ReservationStatus.CONSUMED
+            quantity_delta = -quantity if consumed else 0
+            on_hand = _add(int(balance.on_hand), quantity_delta)
+            reserved = _add(int(balance.reserved), -quantity)
+            _validate_balance(on_hand, reserved)
+            changed = connection.execute(
+                update(inventory_reservations)
+                .where(
+                    inventory_reservations.c.id == reservation.id,
+                    inventory_reservations.c.organization_id == value.organization_id,
+                    inventory_reservations.c.version == value.expected_version,
+                    inventory_reservations.c.status == ReservationStatus.ACTIVE.value,
+                )
+                .values(
+                    status=value.target.value,
+                    version=inventory_reservations.c.version + 1,
+                    updated_at=value.occurred_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            updated_reservation = _read_reservation(
+                connection, value.organization_id, reservation.id
+            )
+            updated_balance = _update_balance(
+                connection,
+                value.organization_id,
+                balance,
+                on_hand,
+                reserved,
+                value.occurred_at,
+            )
+            movement = InventoryMovement(
+                id=value.movement_id,
+{{- if .Tenancy}}
+                organization_id=value.organization_id,
+{{- end}}
+                item_id=reservation.item_id,
+                warehouse_id=reservation.warehouse_id,
+                kind=(
+                    MovementKind.RESERVATION_CONSUMED
+                    if consumed
+                    else MovementKind.RESERVATION_RELEASED
+                ),
+                quantity_delta=str(quantity_delta),
+                reserved_delta=str(-quantity),
+                reference_type="reservation",
+                reference_id=reservation.id,
+                reason=("stock reservation consumed" if consumed else "stock reservation released"),
+                idempotency_key=value.idempotency_key,
+                created_by=value.actor_id,
+                created_at=value.occurred_at,
+            )
+            connection.execute(
+                insert(inventory_movements).values(
+                    **_movement_values(value.organization_id, movement)
+                )
+            )
+            result = ReservationResult(
+                reservation=updated_reservation,
+                balance=updated_balance,
+                movement=movement,
+            )
+            _complete_claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                reservation.id,
+                movement.id,
+                result,
+            )
+            append_audit(connection, value.audit)
+            return result
+
+        return self._command(value.organization_id, mutation)
+
+    def create_purchase_order(self, value: PurchaseOrder, audit: AuditEvent) -> None:
+        organization_id = _organization(value)
+
+        def mutation(connection: Connection) -> bool:
+            for line in value.lines:
+                _require_active_item(connection, organization_id, line.item_id)
+            connection.execute(
+                insert(inventory_purchase_orders).values(**_purchase_values(organization_id, value))
+            )
+            for line in value.lines:
+                connection.execute(
+                    insert(inventory_purchase_order_lines).values(**_line_values(value.id, line))
+                )
+            append_audit(connection, audit)
+            return True
+
+        self._command(organization_id, mutation)
+
+    def get_purchase_order(self, organization_id: str, record_id: str) -> PurchaseOrder | None:
+        row = self._read_one(inventory_purchase_orders, organization_id, record_id)
+        if row is None:
+            return None
+        with self._engine.connect() as connection:
+            return _map_purchase(row, _purchase_lines(connection, record_id))
+
+    def list_purchase_orders(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> PurchaseOrderPageResult:
+        statement = select(inventory_purchase_orders).where(
+            inventory_purchase_orders.c.organization_id == organization_id,
+            _active_scope(inventory_purchase_orders),
+        )
+        if status:
+            statement = statement.where(inventory_purchase_orders.c.status == status)
+        if cursor:
+            statement = statement.where(inventory_purchase_orders.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    statement.order_by(inventory_purchase_orders.c.id).limit(limit + 1)
+                )
+                .mappings()
+                .all()
+            )
+            values = [
+                _map_purchase(row, _purchase_lines(connection, str(row["id"]))) for row in rows
+            ]
+        return PurchaseOrderPageResult(values[:limit], _next(values, limit))
+
+    def transition_purchase_order(self, value: PurchaseTransitionCommand) -> PurchaseOrder:
+        def mutation(connection: Connection) -> PurchaseOrder:
+            purchase = _lock_purchase(connection, value.organization_id, value.purchase_order_id)
+            allowed = (
+                value.target == PurchaseOrderStatus.SUBMITTED
+                and purchase.status == PurchaseOrderStatus.DRAFT
+            ) or (
+                value.target == PurchaseOrderStatus.CANCELLED
+                and purchase.status in {PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.SUBMITTED}
+                and all(int(line.received_quantity) == 0 for line in purchase.lines)
+            )
+            if not allowed or int(purchase.version) != value.expected_version:
+                raise InventoryConflict()
+            changed = connection.execute(
+                update(inventory_purchase_orders)
+                .where(
+                    inventory_purchase_orders.c.id == purchase.id,
+                    inventory_purchase_orders.c.organization_id == value.organization_id,
+                    inventory_purchase_orders.c.version == value.expected_version,
+                )
+                .values(
+                    status=value.target.value,
+                    version=inventory_purchase_orders.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            append_audit(connection, value.audit)
+            return _read_purchase(connection, value.organization_id, purchase.id)
+
+        return self._command(value.organization_id, mutation)
+
+    def receive_purchase_order(self, value: ReceiptCommand) -> ReceiptResult:
+        def mutation(connection: Connection) -> ReceiptResult:
+            replay = _claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                value.fingerprint,
+                "receipt",
+                ReceiptResult,
+                value.occurred_at,
+            )
+            if replay is not None:
+                return replay
+            purchase = _lock_purchase(connection, value.organization_id, value.purchase_order_id)
+            if int(purchase.version) != value.expected_version or purchase.status not in {
+                PurchaseOrderStatus.SUBMITTED,
+                PurchaseOrderStatus.PARTIALLY_RECEIVED,
+            }:
+                raise InventoryConflict()
+            line = _lock_purchase_line(connection, purchase.id, value.line_id)
+            received = _add(int(line.received_quantity), value.quantity)
+            if received > int(line.ordered_quantity):
+                raise InventoryConflict()
+            balance = _lock_stock(
+                connection,
+                value.organization_id,
+                line.item_id,
+                value.warehouse_id,
+                value.occurred_at,
+            )
+            connection.execute(
+                update(inventory_purchase_order_lines)
+                .where(inventory_purchase_order_lines.c.id == line.id)
+                .values(received_quantity=received)
+            )
+            remaining = cast(
+                int,
+                connection.scalar(
+                    select(func.count())
+                    .select_from(inventory_purchase_order_lines)
+                    .where(
+                        inventory_purchase_order_lines.c.purchase_order_id == purchase.id,
+                        inventory_purchase_order_lines.c.received_quantity
+                        < inventory_purchase_order_lines.c.ordered_quantity,
+                    )
+                ),
+            )
+            target = (
+                PurchaseOrderStatus.PARTIALLY_RECEIVED
+                if remaining > 0
+                else PurchaseOrderStatus.RECEIVED
+            )
+            changed = connection.execute(
+                update(inventory_purchase_orders)
+                .where(
+                    inventory_purchase_orders.c.id == purchase.id,
+                    inventory_purchase_orders.c.organization_id == value.organization_id,
+                    inventory_purchase_orders.c.version == value.expected_version,
+                )
+                .values(
+                    status=target.value,
+                    version=inventory_purchase_orders.c.version + 1,
+                    updated_at=value.occurred_at,
+                )
+            ).rowcount
+            _require_changed(changed)
+            updated_balance = _update_balance(
+                connection,
+                value.organization_id,
+                balance,
+                _add(int(balance.on_hand), value.quantity),
+                int(balance.reserved),
+                value.occurred_at,
+            )
+            movement = InventoryMovement(
+                id=value.movement_id,
+{{- if .Tenancy}}
+                organization_id=value.organization_id,
+{{- end}}
+                item_id=line.item_id,
+                warehouse_id=value.warehouse_id,
+                kind=MovementKind.PURCHASE_RECEIVED,
+                quantity_delta=str(value.quantity),
+                reserved_delta="0",
+                reference_type="purchase_order",
+                reference_id=purchase.id,
+                reason="purchase order received",
+                idempotency_key=value.idempotency_key,
+                created_by=value.actor_id,
+                created_at=value.occurred_at,
+            )
+            connection.execute(
+                insert(inventory_movements).values(
+                    **_movement_values(value.organization_id, movement)
+                )
+            )
+            updated_purchase = _read_purchase(connection, value.organization_id, purchase.id)
+            result = ReceiptResult(
+                purchase_order=updated_purchase,
+                balance=updated_balance,
+                movement=movement,
+            )
+            _complete_claim(
+                connection,
+                value.organization_id,
+                value.idempotency_key,
+                purchase.id,
+                movement.id,
+                result,
+            )
+            append_audit(connection, value.audit)
+            return result
+
+        return self._command(value.organization_id, mutation)
+
+    def list_movements(
+        self,
+        organization_id: str,
+        item_id: str,
+        warehouse_id: str,
+        cursor: str,
+        limit: int,
+    ) -> MovementPageResult:
+        statement = select(inventory_movements).where(
+            inventory_movements.c.organization_id == organization_id,
+            _active_scope(inventory_movements),
+        )
+        if item_id:
+            statement = statement.where(inventory_movements.c.item_id == item_id)
+        if warehouse_id:
+            statement = statement.where(inventory_movements.c.warehouse_id == warehouse_id)
+        if cursor:
+            statement = statement.where(inventory_movements.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(inventory_movements.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_movement(row) for row in rows]
+        return MovementPageResult(values[:limit], _next(values, limit))
+
+    def _read_one(self, table: sa.Table, organization_id: str, record_id: str) -> RowMapping | None:
+        with self._engine.connect() as connection:
+            return (
+                connection.execute(
+                    select(table).where(
+                        table.c.id == record_id,
+                        table.c.organization_id == organization_id,
+                        _active_scope(table),
+                    )
+                )
+                .mappings()
+                .first()
+            )
+
+    def _create(
+        self,
+        organization_id: str,
+        table: sa.Table,
+        values: dict[str, object],
+        audit: AuditEvent,
+    ) -> None:
+        def mutation(connection: Connection) -> bool:
+            connection.execute(insert(table).values(**values))
+            append_audit(connection, audit)
+            return True
+
+        self._command(organization_id, mutation)
+
+    def _mutate[ResultModel](
+        self,
+        organization_id: str,
+        audit: AuditEvent,
+        mutation: Callable[[Connection], ResultModel],
+    ) -> ResultModel:
+        def audited(connection: Connection) -> ResultModel:
+            result = mutation(connection)
+            append_audit(connection, audit)
+            return result
+
+        return self._command(organization_id, audited)
+
+    def _command[ResultModel](
+        self,
+        organization_id: str,
+        mutation: Callable[[Connection], ResultModel],
+    ) -> ResultModel:
+        try:
+            with self._engine.begin() as connection:
+                _lock_scope(connection, organization_id)
+                return mutation(connection)
+        except IntegrityError as error:
+            raise InventoryConflict() from error
+
+
+def _claim[ResultSnapshot: BaseModel](
+    connection: Connection,
+    organization_id: str,
+    key: str,
+    fingerprint: str,
+    result_type: str,
+    model: type[ResultSnapshot],
+    now: datetime,
+) -> ResultSnapshot | None:
+    inserted = True
+    try:
+        with connection.begin_nested():
+            connection.execute(
+                insert(inventory_idempotency).values(
+                    organization_id=organization_id,
+                    idempotency_key=key,
+                    fingerprint=fingerprint,
+                    result_type=result_type,
+                    result_id=None,
+                    movement_id=None,
+                    result_payload=None,
+                    created_at=now,
+                )
+            )
+    except IntegrityError:
+        inserted = False
+    if inserted:
+        return None
+    row = (
+        connection.execute(
+            select(inventory_idempotency)
+            .where(
+                inventory_idempotency.c.organization_id == organization_id,
+                inventory_idempotency.c.idempotency_key == key,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        row is None
+        or str(row["fingerprint"]) != fingerprint
+        or str(row["result_type"]) != result_type
+        or row["result_id"] is None
+        or row["movement_id"] is None
+        or row["result_payload"] is None
+    ):
+        raise InventoryConflict()
+    try:
+        return model.model_validate_json(str(row["result_payload"]))
+    except ValueError as error:
+        raise InventoryConflict() from error
+
+
+def _complete_claim(
+    connection: Connection,
+    organization_id: str,
+    key: str,
+    result_id: str,
+    movement_id: str,
+    result: BaseModel,
+) -> None:
+    changed = connection.execute(
+        update(inventory_idempotency)
+        .where(
+            inventory_idempotency.c.organization_id == organization_id,
+            inventory_idempotency.c.idempotency_key == key,
+            inventory_idempotency.c.result_id.is_(None),
+            inventory_idempotency.c.movement_id.is_(None),
+        )
+        .values(
+            result_id=result_id,
+            movement_id=movement_id,
+            result_payload=result.model_dump_json(),
+        )
+    ).rowcount
+    _require_changed(changed)
+
+
+def _lock_scope(connection: Connection, organization_id: str) -> None:
+{{- if .Tenancy}}
+    found = connection.execute(
+        select(organizations.c.id)
+        .where(
+            organizations.c.id == organization_id,
+            organizations.c.status == "active",
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if found is None:
+        raise InventoryNotFound()
+{{- else}}
+    del connection
+    if organization_id:
+        raise InventoryNotFound()
+{{- end}}
+
+
+def _active_scope(table: sa.Table) -> sa.ColumnElement[bool]:
+{{- if .Tenancy}}
+    return sa.exists(
+        select(organizations.c.id).where(
+            organizations.c.id == table.c.organization_id,
+            organizations.c.status == "active",
+        )
+    )
+{{- else}}
+    del table
+    return sa.true()
+{{- end}}
+
+
+def _lock_stock(
+    connection: Connection,
+    organization_id: str,
+    item_id: str,
+    warehouse_id: str,
+    now: datetime,
+) -> InventoryBalance:
+    _require_active_item(connection, organization_id, item_id)
+    warehouse = connection.execute(
+        select(inventory_warehouses.c.id)
+        .where(
+            inventory_warehouses.c.id == warehouse_id,
+            inventory_warehouses.c.organization_id == organization_id,
+            inventory_warehouses.c.status == RecordStatus.ACTIVE.value,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if warehouse is None:
+        raise InventoryNotFound()
+    try:
+        with connection.begin_nested():
+            connection.execute(
+                insert(inventory_balances).values(
+                    organization_id=organization_id,
+                    item_id=item_id,
+                    warehouse_id=warehouse_id,
+                    on_hand=0,
+                    reserved=0,
+                    version=1,
+                    updated_at=now,
+                )
+            )
+    except IntegrityError:
+        pass
+    row = (
+        connection.execute(
+            select(inventory_balances)
+            .where(
+                inventory_balances.c.organization_id == organization_id,
+                inventory_balances.c.item_id == item_id,
+                inventory_balances.c.warehouse_id == warehouse_id,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise InventoryConflict()
+    return _map_balance(row)
+
+
+def _require_active_item(connection: Connection, organization_id: str, item_id: str) -> None:
+    found = connection.execute(
+        select(inventory_items.c.id)
+        .where(
+            inventory_items.c.id == item_id,
+            inventory_items.c.organization_id == organization_id,
+            inventory_items.c.status == RecordStatus.ACTIVE.value,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if found is None:
+        raise InventoryNotFound()
+
+
+def _update_balance(
+    connection: Connection,
+    organization_id: str,
+    current: InventoryBalance,
+    on_hand: int,
+    reserved: int,
+    updated_at: datetime,
+) -> InventoryBalance:
+    _validate_balance(on_hand, reserved)
+    changed = connection.execute(
+        update(inventory_balances)
+        .where(
+            inventory_balances.c.organization_id == organization_id,
+            inventory_balances.c.item_id == current.item_id,
+            inventory_balances.c.warehouse_id == current.warehouse_id,
+            inventory_balances.c.version == int(current.version),
+        )
+        .values(
+            on_hand=on_hand,
+            reserved=reserved,
+            version=inventory_balances.c.version + 1,
+            updated_at=updated_at,
+        )
+    ).rowcount
+    _require_changed(changed)
+    row = (
+        connection.execute(
+            select(inventory_balances).where(
+                inventory_balances.c.organization_id == organization_id,
+                inventory_balances.c.item_id == current.item_id,
+                inventory_balances.c.warehouse_id == current.warehouse_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_balance(row)
+
+
+def _lock_reservation(
+    connection: Connection, organization_id: str, record_id: str
+) -> InventoryReservation:
+    row = (
+        connection.execute(
+            select(inventory_reservations)
+            .where(
+                inventory_reservations.c.id == record_id,
+                inventory_reservations.c.organization_id == organization_id,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise InventoryNotFound()
+    return _map_reservation(row)
+
+
+def _lock_purchase(connection: Connection, organization_id: str, record_id: str) -> PurchaseOrder:
+    row = (
+        connection.execute(
+            select(inventory_purchase_orders)
+            .where(
+                inventory_purchase_orders.c.id == record_id,
+                inventory_purchase_orders.c.organization_id == organization_id,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise InventoryNotFound()
+    return _map_purchase(row, _purchase_lines(connection, record_id))
+
+
+def _lock_purchase_line(
+    connection: Connection, purchase_order_id: str, line_id: str
+) -> PurchaseOrderLine:
+    row = (
+        connection.execute(
+            select(inventory_purchase_order_lines)
+            .where(
+                inventory_purchase_order_lines.c.id == line_id,
+                inventory_purchase_order_lines.c.purchase_order_id == purchase_order_id,
+            )
+            .with_for_update()
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        raise InventoryNotFound()
+    return _map_line(row)
+
+
+def _read_item(connection: Connection, organization_id: str, record_id: str) -> InventoryItem:
+    row = (
+        connection.execute(
+            select(inventory_items).where(
+                inventory_items.c.id == record_id,
+                inventory_items.c.organization_id == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_item(row)
+
+
+def _read_warehouse(
+    connection: Connection, organization_id: str, record_id: str
+) -> InventoryWarehouse:
+    row = (
+        connection.execute(
+            select(inventory_warehouses).where(
+                inventory_warehouses.c.id == record_id,
+                inventory_warehouses.c.organization_id == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_warehouse(row)
+
+
+def _read_reservation(
+    connection: Connection, organization_id: str, record_id: str
+) -> InventoryReservation:
+    row = (
+        connection.execute(
+            select(inventory_reservations).where(
+                inventory_reservations.c.id == record_id,
+                inventory_reservations.c.organization_id == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_reservation(row)
+
+
+def _read_purchase(connection: Connection, organization_id: str, record_id: str) -> PurchaseOrder:
+    row = (
+        connection.execute(
+            select(inventory_purchase_orders).where(
+                inventory_purchase_orders.c.id == record_id,
+                inventory_purchase_orders.c.organization_id == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_purchase(row, _purchase_lines(connection, record_id))
+
+
+def _purchase_lines(connection: Connection, purchase_order_id: str) -> list[PurchaseOrderLine]:
+    rows = (
+        connection.execute(
+            select(inventory_purchase_order_lines)
+            .where(inventory_purchase_order_lines.c.purchase_order_id == purchase_order_id)
+            .order_by(inventory_purchase_order_lines.c.id)
+        )
+        .mappings()
+        .all()
+    )
+    return [_map_line(row) for row in rows]
+
+
+def _validate_balance(on_hand: int, reserved: int) -> None:
+    if on_hand < 0 or reserved < 0 or reserved > on_hand:
+        raise InventoryConflict()
+
+
+def _add(left: int, right: int) -> int:
+    value = left + right
+    if value < MINIMUM_INTEGER or value > MAXIMUM_INTEGER:
+        raise InventoryConflict()
+    return value
+
+
+def _require_changed(changed: int | None) -> None:
+    if changed != 1:
+        raise InventoryConflict()
+
+
+def _next[
+    Identified: (
+        InventoryItem,
+        InventoryWarehouse,
+        InventoryReservation,
+        PurchaseOrder,
+        InventoryMovement,
+    )
+](values: list[Identified], limit: int) -> str:
+    return values[limit - 1].id if len(values) > limit else ""
+
+
+def _next_balance(values: list[InventoryBalance], limit: int) -> str:
+    if len(values) <= limit:
+        return ""
+    value = values[limit - 1]
+    return f"{value.item_id}:{value.warehouse_id}"
+
+
+def _organization(value: InventoryItem | InventoryWarehouse | PurchaseOrder) -> str:
+    return {{if .Tenancy}}value.organization_id{{else}}""{{end}}
+
+
+def _item_values(value: InventoryItem) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": _organization(value),
+        "sku": value.sku,
+        "name": value.name,
+        "unit": value.unit,
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _warehouse_values(value: InventoryWarehouse) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": _organization(value),
+        "code": value.code,
+        "name": value.name,
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _movement_values(organization_id: str, value: InventoryMovement) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": organization_id,
+        "item_id": value.item_id,
+        "warehouse_id": value.warehouse_id,
+        "movement_kind": value.kind.value,
+        "quantity_delta": int(value.quantity_delta),
+        "reserved_delta": int(value.reserved_delta),
+        "reference_type": value.reference_type,
+        "reference_id": value.reference_id,
+        "reason": value.reason,
+        "idempotency_key": value.idempotency_key,
+        "created_by": value.created_by,
+        "created_at": value.created_at,
+    }
+
+
+def _reservation_values(organization_id: str, value: InventoryReservation) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": organization_id,
+        "external_reference": value.external_reference,
+        "item_id": value.item_id,
+        "warehouse_id": value.warehouse_id,
+        "quantity": int(value.quantity),
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _purchase_values(organization_id: str, value: PurchaseOrder) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": organization_id,
+        "order_number": value.number,
+        "supplier_name": value.supplier_name,
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _line_values(purchase_order_id: str, value: PurchaseOrderLine) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "purchase_order_id": purchase_order_id,
+        "item_id": value.item_id,
+        "ordered_quantity": int(value.ordered_quantity),
+        "received_quantity": int(value.received_quantity),
+    }
+
+
+def _map_item(row: RowMapping) -> InventoryItem:
+    return InventoryItem(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        sku=str(row["sku"]),
+        name=str(row["name"]),
+        unit=str(row["unit"]),
+        status=RecordStatus(str(row["status"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_warehouse(row: RowMapping) -> InventoryWarehouse:
+    return InventoryWarehouse(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        code=str(row["code"]),
+        name=str(row["name"]),
+        status=RecordStatus(str(row["status"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_balance(row: RowMapping) -> InventoryBalance:
+    on_hand = int(row["on_hand"])
+    reserved = int(row["reserved"])
+    return InventoryBalance(
+        item_id=str(row["item_id"]),
+        warehouse_id=str(row["warehouse_id"]),
+        on_hand=str(on_hand),
+        reserved=str(reserved),
+        available=str(on_hand - reserved),
+        version=str(row["version"]),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_movement(row: RowMapping) -> InventoryMovement:
+    return InventoryMovement(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        item_id=str(row["item_id"]),
+        warehouse_id=str(row["warehouse_id"]),
+        kind=MovementKind(str(row["movement_kind"])),
+        quantity_delta=str(row["quantity_delta"]),
+        reserved_delta=str(row["reserved_delta"]),
+        reference_type=str(row["reference_type"]),
+        reference_id=str(row["reference_id"]),
+        reason=str(row["reason"]),
+        idempotency_key=str(row["idempotency_key"]),
+        created_by=str(row["created_by"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+    )
+
+
+def _map_reservation(row: RowMapping) -> InventoryReservation:
+    return InventoryReservation(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        external_reference=str(row["external_reference"]),
+        item_id=str(row["item_id"]),
+        warehouse_id=str(row["warehouse_id"]),
+        quantity=str(row["quantity"]),
+        status=ReservationStatus(str(row["status"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_purchase(row: RowMapping, lines: list[PurchaseOrderLine]) -> PurchaseOrder:
+    return PurchaseOrder(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        number=str(row["order_number"]),
+        supplier_name=str(row["supplier_name"]),
+        status=PurchaseOrderStatus(str(row["status"])),
+        version=str(row["version"]),
+        lines=lines,
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_line(row: RowMapping) -> PurchaseOrderLine:
+    return PurchaseOrderLine(
+        id=str(row["id"]),
+        item_id=str(row["item_id"]),
+        ordered_quantity=str(row["ordered_quantity"]),
+        received_quantity=str(row["received_quantity"]),
+    )
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

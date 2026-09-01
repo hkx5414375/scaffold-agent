@@ -1,0 +1,507 @@
+"""ERP inventory API records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from {{.PackageName}}.identity.models import metadata
+
+SIGNED_INTEGER = r"^-?(0|[1-9][0-9]*)$"
+NON_NEGATIVE_INTEGER = r"^(0|[1-9][0-9]*)$"
+POSITIVE_INTEGER = r"^[1-9][0-9]*$"
+
+
+def _organization_column() -> sa.Column[str]:
+    return sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+{{- end}}
+        nullable=False,
+    )
+
+
+inventory_items = sa.Table(
+    "inventory_items",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("sku", sa.String(64), nullable=False),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("unit", sa.String(32), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('active', 'archived')", name="inventory_items_status"),
+    sa.CheckConstraint("version > 0", name="inventory_items_version"),
+    sa.UniqueConstraint("organization_id", "sku", name="inventory_items_scope_sku_unique"),
+)
+sa.Index(
+    "inventory_items_scope_status_id_idx",
+    inventory_items.c.organization_id,
+    inventory_items.c.status,
+    inventory_items.c.id,
+)
+
+inventory_warehouses = sa.Table(
+    "inventory_warehouses",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("code", sa.String(64), nullable=False),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('active', 'archived')", name="inventory_warehouses_status"),
+    sa.CheckConstraint("version > 0", name="inventory_warehouses_version"),
+    sa.UniqueConstraint("organization_id", "code", name="inventory_warehouses_scope_code_unique"),
+)
+sa.Index(
+    "inventory_warehouses_scope_status_id_idx",
+    inventory_warehouses.c.organization_id,
+    inventory_warehouses.c.status,
+    inventory_warehouses.c.id,
+)
+
+inventory_balances = sa.Table(
+    "inventory_balances",
+    metadata,
+    _organization_column(),
+    sa.Column("item_id", sa.String(191), sa.ForeignKey("inventory_items.id"), primary_key=True),
+    sa.Column(
+        "warehouse_id",
+        sa.String(191),
+        sa.ForeignKey("inventory_warehouses.id"),
+        primary_key=True,
+    ),
+    sa.Column("on_hand", sa.BigInteger(), nullable=False),
+    sa.Column("reserved", sa.BigInteger(), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("on_hand >= 0", name="inventory_balances_on_hand"),
+    sa.CheckConstraint("reserved >= 0 and reserved <= on_hand", name="inventory_balances_reserved"),
+    sa.CheckConstraint("version > 0", name="inventory_balances_version"),
+)
+sa.Index(
+    "inventory_balances_scope_item_id_idx",
+    inventory_balances.c.organization_id,
+    inventory_balances.c.item_id,
+    inventory_balances.c.warehouse_id,
+)
+
+inventory_movements = sa.Table(
+    "inventory_movements",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("item_id", sa.String(191), sa.ForeignKey("inventory_items.id"), nullable=False),
+    sa.Column(
+        "warehouse_id", sa.String(191), sa.ForeignKey("inventory_warehouses.id"), nullable=False
+    ),
+    sa.Column("movement_kind", sa.String(32), nullable=False),
+    sa.Column("quantity_delta", sa.BigInteger(), nullable=False),
+    sa.Column("reserved_delta", sa.BigInteger(), nullable=False),
+    sa.Column("reference_type", sa.String(32), nullable=False),
+    sa.Column("reference_id", sa.String(191), nullable=False),
+    sa.Column("reason", sa.String(500), nullable=False),
+    sa.Column("idempotency_key", sa.String(191), nullable=False),
+    sa.Column("created_by", sa.String(191), sa.ForeignKey("identity_users.id"), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "movement_kind in ('adjustment', 'reservation_created', "
+        "'reservation_released', 'reservation_consumed', 'purchase_received')",
+        name="inventory_movements_kind",
+    ),
+)
+sa.Index(
+    "inventory_movements_scope_stock_id_idx",
+    inventory_movements.c.organization_id,
+    inventory_movements.c.item_id,
+    inventory_movements.c.warehouse_id,
+    inventory_movements.c.id,
+)
+
+inventory_reservations = sa.Table(
+    "inventory_reservations",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("external_reference", sa.String(191), nullable=False),
+    sa.Column("item_id", sa.String(191), sa.ForeignKey("inventory_items.id"), nullable=False),
+    sa.Column(
+        "warehouse_id", sa.String(191), sa.ForeignKey("inventory_warehouses.id"), nullable=False
+    ),
+    sa.Column("quantity", sa.BigInteger(), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("quantity > 0", name="inventory_reservations_quantity"),
+    sa.CheckConstraint(
+        "status in ('active', 'released', 'consumed')",
+        name="inventory_reservations_status",
+    ),
+    sa.CheckConstraint("version > 0", name="inventory_reservations_version"),
+    sa.UniqueConstraint(
+        "organization_id",
+        "external_reference",
+        name="inventory_reservations_scope_reference_unique",
+    ),
+)
+sa.Index(
+    "inventory_reservations_scope_status_id_idx",
+    inventory_reservations.c.organization_id,
+    inventory_reservations.c.status,
+    inventory_reservations.c.id,
+)
+
+inventory_purchase_orders = sa.Table(
+    "inventory_purchase_orders",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("order_number", sa.String(64), nullable=False),
+    sa.Column("supplier_name", sa.String(160), nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('draft', 'submitted', 'partially_received', 'received', 'cancelled')",
+        name="inventory_purchase_orders_status",
+    ),
+    sa.CheckConstraint("version > 0", name="inventory_purchase_orders_version"),
+    sa.UniqueConstraint(
+        "organization_id", "order_number", name="inventory_purchase_orders_scope_number_unique"
+    ),
+)
+sa.Index(
+    "inventory_purchase_orders_scope_status_id_idx",
+    inventory_purchase_orders.c.organization_id,
+    inventory_purchase_orders.c.status,
+    inventory_purchase_orders.c.id,
+)
+
+inventory_purchase_order_lines = sa.Table(
+    "inventory_purchase_order_lines",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "purchase_order_id",
+        sa.String(191),
+        sa.ForeignKey("inventory_purchase_orders.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("item_id", sa.String(191), sa.ForeignKey("inventory_items.id"), nullable=False),
+    sa.Column("ordered_quantity", sa.BigInteger(), nullable=False),
+    sa.Column("received_quantity", sa.BigInteger(), nullable=False),
+    sa.CheckConstraint("ordered_quantity > 0", name="inventory_purchase_lines_ordered"),
+    sa.CheckConstraint(
+        "received_quantity >= 0 and received_quantity <= ordered_quantity",
+        name="inventory_purchase_lines_received",
+    ),
+    sa.UniqueConstraint(
+        "purchase_order_id", "item_id", name="inventory_purchase_lines_item_unique"
+    ),
+)
+
+inventory_idempotency = sa.Table(
+    "inventory_idempotency",
+    metadata,
+    sa.Column("organization_id", sa.String(191), primary_key=True),
+    sa.Column("idempotency_key", sa.String(191), primary_key=True),
+    sa.Column("fingerprint", sa.String(64), nullable=False),
+    sa.Column("result_type", sa.String(32), nullable=False),
+    sa.Column("result_id", sa.String(191), nullable=True),
+    sa.Column(
+        "movement_id", sa.String(191), sa.ForeignKey("inventory_movements.id"), nullable=True
+    ),
+    sa.Column("result_payload", sa.Text(), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+
+class RecordStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ReservationStatus(StrEnum):
+    ACTIVE = "active"
+    RELEASED = "released"
+    CONSUMED = "consumed"
+
+
+class PurchaseOrderStatus(StrEnum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    PARTIALLY_RECEIVED = "partially_received"
+    RECEIVED = "received"
+    CANCELLED = "cancelled"
+
+
+class MovementKind(StrEnum):
+    ADJUSTMENT = "adjustment"
+    RESERVATION_CREATED = "reservation_created"
+    RESERVATION_RELEASED = "reservation_released"
+    RESERVATION_CONSUMED = "reservation_consumed"
+    PURCHASE_RECEIVED = "purchase_received"
+
+
+class InventoryErrorKind(StrEnum):
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    STORAGE = "storage"
+
+
+class InventoryError(Exception):
+    def __init__(self, kind: InventoryErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class InventoryItem(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    sku: str = Field(pattern=r"^[A-Z0-9._-]{1,64}$")
+    name: str = Field(min_length=1, max_length=160)
+    unit: str = Field(min_length=1, max_length=32)
+    status: RecordStatus
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class InventoryWarehouse(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    code: str = Field(pattern=r"^[A-Z0-9._-]{1,64}$")
+    name: str = Field(min_length=1, max_length=160)
+    status: RecordStatus
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class InventoryBalance(StrictModel):
+    item_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    on_hand: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    reserved: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    available: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    updated_at: datetime
+
+    @field_validator("updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class InventoryMovement(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    item_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    kind: MovementKind
+    quantity_delta: str = Field(pattern=SIGNED_INTEGER, max_length=20)
+    reserved_delta: str = Field(pattern=SIGNED_INTEGER, max_length=20)
+    reference_type: str = Field(min_length=1, max_length=32)
+    reference_id: str = Field(min_length=1, max_length=191)
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+    created_by: str = Field(min_length=1, max_length=191)
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class InventoryReservation(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    external_reference: str = Field(min_length=1, max_length=191)
+    item_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    status: ReservationStatus
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class PurchaseOrderLine(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+    item_id: str = Field(min_length=1, max_length=191)
+    ordered_quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    received_quantity: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+
+
+class PurchaseOrder(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    number: str = Field(pattern=r"^[A-Z0-9._-]{1,64}$")
+    supplier_name: str = Field(min_length=1, max_length=160)
+    status: PurchaseOrderStatus
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    lines: list[PurchaseOrderLine] = Field(min_length=1, max_length=100)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        return _aware(value)
+
+
+class StockResult(StrictModel):
+    balance: InventoryBalance
+    movement: InventoryMovement
+
+
+class ReservationResult(StrictModel):
+    reservation: InventoryReservation
+    balance: InventoryBalance
+    movement: InventoryMovement
+
+
+class ReceiptResult(StrictModel):
+    purchase_order: PurchaseOrder
+    balance: InventoryBalance
+    movement: InventoryMovement
+
+
+class ItemWrite(StrictModel):
+    sku: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=160)
+    unit: str = Field(min_length=1, max_length=32)
+
+
+class ItemUpdate(ItemWrite):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class WarehouseWrite(StrictModel):
+    code: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=160)
+
+
+class WarehouseUpdate(WarehouseWrite):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class InventoryTransition(StrictModel):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class AdjustmentWrite(StrictModel):
+    item_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    quantity_delta: str = Field(pattern=SIGNED_INTEGER, max_length=20)
+    reason: str = Field(min_length=1, max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class ReservationWrite(StrictModel):
+    external_reference: str = Field(min_length=1, max_length=191)
+    item_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class ReservationTransition(InventoryTransition):
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class PurchaseOrderLineWrite(StrictModel):
+    item_id: str = Field(min_length=1, max_length=191)
+    ordered_quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class PurchaseOrderWrite(StrictModel):
+    number: str = Field(min_length=1, max_length=64)
+    supplier_name: str = Field(min_length=1, max_length=160)
+    lines: list[PurchaseOrderLineWrite] = Field(min_length=1, max_length=100)
+
+
+class ReceiptWrite(InventoryTransition):
+    line_id: str = Field(min_length=1, max_length=191)
+    warehouse_id: str = Field(min_length=1, max_length=191)
+    quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class ItemPage(StrictModel):
+    items: list[InventoryItem]
+    next_cursor: str
+
+
+class WarehousePage(StrictModel):
+    items: list[InventoryWarehouse]
+    next_cursor: str
+
+
+class BalancePage(StrictModel):
+    items: list[InventoryBalance]
+    next_cursor: str
+
+
+class ReservationPage(StrictModel):
+    items: list[InventoryReservation]
+    next_cursor: str
+
+
+class PurchaseOrderPage(StrictModel):
+    items: list[PurchaseOrder]
+    next_cursor: str
+
+
+class MovementPage(StrictModel):
+    items: list[InventoryMovement]
+    next_cursor: str
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("datetime values must include a UTC offset")
+    return value

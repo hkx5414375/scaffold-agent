@@ -41,6 +41,14 @@ from {{.PackageName}}.health import router as health_router
 from {{.PackageName}}.identity.http import router as identity_router
 from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
 from {{.PackageName}}.identity.service import IdentityService
+{{- if .Inventory}}
+from {{.PackageName}}.inventory.http import (
+    install_error_handlers as install_inventory_error_handlers,
+)
+from {{.PackageName}}.inventory.http import router as inventory_router
+from {{.PackageName}}.inventory.repository import SQLAlchemyInventoryRepository
+from {{.PackageName}}.inventory.service import InventoryService
+{{- end}}
 {{- if .JobAdmin}}
 from {{.PackageName}}.jobadmin.http import (
     install_error_handlers as install_job_administration_error_handlers,
@@ -70,7 +78,9 @@ from {{.PackageName}}.tenancy.lifecycle_http import (
     install_error_handlers as install_lifecycle_error_handlers,
 )
 from {{.PackageName}}.tenancy.lifecycle_http import router as lifecycle_router
-from {{.PackageName}}.tenancy.lifecycle_repository import SQLAlchemyTenancyLifecycleRepository
+from {{.PackageName}}.tenancy.lifecycle_repository import (
+    SQLAlchemyTenancyLifecycleRepository,
+)
 from {{.PackageName}}.tenancy.lifecycle_service import TenancyLifecycleService
 {{- end}}
 {{- if .TenancyMembers}}
@@ -78,7 +88,9 @@ from {{.PackageName}}.tenancy.member_http import (
     install_error_handlers as install_member_error_handlers,
 )
 from {{.PackageName}}.tenancy.member_http import router as member_router
-from {{.PackageName}}.tenancy.member_repository import SQLAlchemyTenancyMemberRepository
+from {{.PackageName}}.tenancy.member_repository import (
+    SQLAlchemyTenancyMemberRepository,
+)
 from {{.PackageName}}.tenancy.member_service import TenancyMemberService
 {{- end}}
 from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
@@ -107,6 +119,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 {{- end}}
 {{- if .CRM}}
         app.state.crm_service = CRMService(SQLAlchemyCRMRepository(engine))
+{{- end}}
+{{- if .Inventory}}
+        app.state.inventory_service = InventoryService(SQLAlchemyInventoryRepository(engine))
 {{- end}}
 {{- if .CustomerAccounts}}
         app.state.customer_account_service = CustomerAccountService(
@@ -154,7 +169,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     """Create one application without opening infrastructure during import."""
-    application = FastAPI(title="{{.ProjectName}}", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(
+        title="{{.ProjectName}}",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
 {{- if .Observability}}
     observer = HttpObserver()
     application.state.http_observer = observer
@@ -166,6 +185,9 @@ def create_app() -> FastAPI:
 {{- end}}
 {{- if .CRM}}
     install_crm_error_handlers(application)
+{{- end}}
+{{- if .Inventory}}
+    install_inventory_error_handlers(application)
 {{- end}}
 {{- if .CustomerAccounts}}
     install_customer_error_handlers(application)
@@ -192,6 +214,9 @@ def create_app() -> FastAPI:
 {{- end}}
 {{- if .CRM}}
     application.include_router(crm_router)
+{{- end}}
+{{- if .Inventory}}
+    application.include_router(inventory_router)
 {{- end}}
 {{- if .CustomerAccounts}}
     application.include_router(customer_router)

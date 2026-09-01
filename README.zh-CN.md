@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在都能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座，以及 `commerce-catalog` `0.1.0`、`customer-accounts` `0.1.0` 和 `crm-core` `0.1.0`。CRM 包含业务企业、联系人、不可变跟进记录、只前进的销售机会、事务审计、停用租户隔离和完全相同的 Vue 管理端，并由跨语言 OpenAPI 与迁移契约门禁持续保证 Go、Java、Python 一致。Go 与 Java 适配器还提供 `erp-inventory` `0.1.0`，覆盖整数库存、不可变流水、幂等预留与收货、采购单、停用租户隔离和共用 Vue 管理端；Python 对齐仍在进行。Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在都能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座，以及 `commerce-catalog` `0.1.0`、`customer-accounts` `0.1.0`、`crm-core` `0.1.0` 和 `erp-inventory` `0.1.0`。ERP 库存包含整数库存、不可变流水、幂等预留与收货、采购单、事务审计、停用租户隔离和完全相同的 Vue 管理端，并由跨语言 OpenAPI、迁移、行为和管理端契约门禁持续保证 Go、Java、Python 一致。Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 
@@ -82,6 +82,8 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/crm-service-pytho
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-go --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-go-mysql --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-java --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python-mysql --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

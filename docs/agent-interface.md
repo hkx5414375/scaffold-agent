@@ -189,7 +189,7 @@ administration view aligned. See `examples/crm-service-go/scaffold.yaml`,
 `examples/crm-service-java/scaffold.yaml`, and
 `examples/crm-service-python/scaffold.yaml` for complete selections.
 
-Selecting `erp-inventory` version `0.1.0` with the Go or Java adapter generates inventory
+Selecting `erp-inventory` version `0.1.0` with the Go, Java, or Python adapter generates inventory
 items, warehouses, integer balances, an immutable movement ledger, stock
 reservations, purchase orders, PostgreSQL or MySQL persistence, OpenAPI, and the
 shared Vue administration view. Add the capability by exact version in
@@ -205,9 +205,10 @@ audit event. Agents should reuse `inventory:read`, `inventory:catalog:write`,
 `inventory:stock:manage`, and `inventory:procurement:manage`; keep movements
 append-only; and must not automatically couple inventory items to commerce products.
 See `examples/inventory-service-go/scaffold.yaml`,
-`examples/inventory-service-go-mysql/scaffold.yaml`, and
-`examples/inventory-service-java/scaffold.yaml` for the current reference
-selections. Python parity remains tracked in the roadmap.
+`examples/inventory-service-go-mysql/scaffold.yaml`,
+`examples/inventory-service-java/scaffold.yaml`,
+`examples/inventory-service-python/scaffold.yaml`, and
+`examples/inventory-service-python-mysql/scaffold.yaml` for complete reference selections.
 
 ## STDIO protocol
 

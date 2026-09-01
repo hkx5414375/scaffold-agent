@@ -13,6 +13,11 @@ node_modules/
 .scaffold-agent/results/
 .scaffold-agent/backups/
 .scaffold-agent/tmp/
+**/.scaffold-agent/cache/
+**/.scaffold-agent/plans/
+**/.scaffold-agent/results/
+**/.scaffold-agent/backups/
+**/.scaffold-agent/tmp/
 
 # Editors and operating systems
 .idea/

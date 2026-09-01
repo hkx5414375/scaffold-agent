@@ -18,7 +18,10 @@ from {{.PackageName}}.identity.models import (
     role_permissions,
     roles,
 )
-from {{.PackageName}}.identity.repository import IdentityConflict, SQLAlchemyIdentityRepository
+from {{.PackageName}}.identity.repository import (
+    IdentityConflict,
+    SQLAlchemyIdentityRepository,
+)
 from {{.PackageName}}.identity.tokens import digest_token
 from {{.PackageName}}.migrations import upgrade_database
 

@@ -6,11 +6,19 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from {{.PackageName}}.errors import IdentityError, IdentityErrorKind, install_error_handlers
+from {{.PackageName}}.errors import (
+    IdentityError,
+    IdentityErrorKind,
+    install_error_handlers,
+)
 from {{.PackageName}}.identity.http import router
 from {{.PackageName}}.identity.models import AuditEvent, Principal, User
 from {{.PackageName}}.identity.repository import IdentityConflict
-from {{.PackageName}}.identity.service import ApiTokenResult, IdentityService, LoginResult
+from {{.PackageName}}.identity.service import (
+    ApiTokenResult,
+    IdentityService,
+    LoginResult,
+)
 from {{.PackageName}}.identity.tokens import digest_token
 
 NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)

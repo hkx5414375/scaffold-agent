@@ -6,7 +6,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from {{.PackageName}}.errors import IdentityError, IdentityErrorKind, install_error_handlers
+from {{.PackageName}}.errors import (
+    IdentityError,
+    IdentityErrorKind,
+    install_error_handlers,
+)
 from {{.PackageName}}.identity.models import AuditEvent, Principal
 from {{.PackageName}}.tenancy.http import router
 from {{.PackageName}}.tenancy.models import Organization

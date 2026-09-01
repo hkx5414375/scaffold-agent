@@ -1,0 +1,404 @@
+"""Inventory transaction, idempotency, isolation, and permission contracts."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select{{if .Tenancy}}, update{{end}}
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    role_permissions,
+    users,
+)
+from {{.PackageName}}.inventory.models import (
+    AdjustmentWrite,
+    InventoryError,
+    InventoryErrorKind,
+    InventoryTransition,
+    ItemUpdate,
+    ItemWrite,
+    PurchaseOrderLineWrite,
+    PurchaseOrderStatus,
+    PurchaseOrderWrite,
+    ReceiptWrite,
+    RecordStatus,
+    ReservationStatus,
+    ReservationTransition,
+    ReservationWrite,
+    WarehouseUpdate,
+    WarehouseWrite,
+    inventory_balances,
+    inventory_idempotency,
+    inventory_items,
+    inventory_movements,
+    inventory_purchase_order_lines,
+    inventory_purchase_orders,
+    inventory_reservations,
+    inventory_warehouses,
+)
+from {{.PackageName}}.inventory.repository import SQLAlchemyInventoryRepository
+from {{.PackageName}}.inventory.service import InventoryService
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime(2026, 9, 2, tzinfo=UTC)
+    user_id = "inventory-admin-" + suffix
+    email = suffix + "@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    actor = Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization = tenancy.create("Inventory " + suffix, actor)
+    actor = actor.model_copy(update={"organization_id": organization.id})
+    scope = organization.id
+{{- else}}
+    scope = ""
+{{- end}}
+    service = InventoryService(SQLAlchemyInventoryRepository(engine), lambda: now)
+
+    item = service.create_item(ItemWrite(sku=" sku-1 ", name=" Widget ", unit=" ea "), actor)
+    warehouse = service.create_warehouse(
+        WarehouseWrite(code=" main ", name=" Main warehouse "), actor
+    )
+    assert item.sku == "SKU-1"
+    assert item.unit == "EA"
+    assert warehouse.code == "MAIN"
+    assert service.get_item(item.id, actor) == item
+    assert service.get_warehouse(warehouse.id, actor) == warehouse
+
+    item = service.update_item(
+        item.id,
+        ItemUpdate(sku="sku-1", name="Widget Two", unit="each", version="1"),
+        actor,
+    )
+    warehouse = service.update_warehouse(
+        warehouse.id,
+        WarehouseUpdate(code="main", name="Primary", version="1"),
+        actor,
+    )
+    assert item.version == "2"
+    assert warehouse.version == "2"
+
+    adjusted = service.adjust_stock(
+        AdjustmentWrite(
+            item_id=item.id,
+            warehouse_id=warehouse.id,
+            quantity_delta="100",
+            reason=" initial stock ",
+            idempotency_key="adjust-" + suffix,
+        ),
+        actor,
+    )
+    adjusted_replay = service.adjust_stock(
+        AdjustmentWrite(
+            item_id=item.id,
+            warehouse_id=warehouse.id,
+            quantity_delta="100",
+            reason="initial stock",
+            idempotency_key="adjust-" + suffix,
+        ),
+        actor,
+    )
+    assert adjusted_replay == adjusted
+    assert adjusted.balance.on_hand == "100"
+    with pytest.raises(InventoryError) as changed_replay:
+        service.adjust_stock(
+            AdjustmentWrite(
+                item_id=item.id,
+                warehouse_id=warehouse.id,
+                quantity_delta="1",
+                reason="different",
+                idempotency_key="adjust-" + suffix,
+            ),
+            actor,
+        )
+    assert changed_replay.value.kind == InventoryErrorKind.CONFLICT
+
+    reserved = service.create_reservation(
+        ReservationWrite(
+            external_reference="order-" + suffix,
+            item_id=item.id,
+            warehouse_id=warehouse.id,
+            quantity="30",
+            idempotency_key="reserve-" + suffix,
+        ),
+        actor,
+    )
+    reserved_replay = service.create_reservation(
+        ReservationWrite(
+            external_reference="order-" + suffix,
+            item_id=item.id,
+            warehouse_id=warehouse.id,
+            quantity="30",
+            idempotency_key="reserve-" + suffix,
+        ),
+        actor,
+    )
+    assert reserved_replay == reserved
+    assert service.get_reservation(reserved.reservation.id, actor) == reserved.reservation
+    consumed = service.consume_reservation(
+        reserved.reservation.id,
+        ReservationTransition(version="1", idempotency_key="consume-" + suffix),
+        actor,
+    )
+    assert consumed.reservation.status == ReservationStatus.CONSUMED
+    assert consumed.balance.on_hand == "70"
+    assert consumed.balance.reserved == "0"
+
+    released_source = service.create_reservation(
+        ReservationWrite(
+            external_reference="release-" + suffix,
+            item_id=item.id,
+            warehouse_id=warehouse.id,
+            quantity="5",
+            idempotency_key="reserve-release-" + suffix,
+        ),
+        actor,
+    )
+    released = service.release_reservation(
+        released_source.reservation.id,
+        ReservationTransition(version="1", idempotency_key="release-" + suffix),
+        actor,
+    )
+    assert released.reservation.status == ReservationStatus.RELEASED
+    assert released.balance.reserved == "0"
+
+    purchase = service.create_purchase_order(
+        PurchaseOrderWrite(
+            number="po-" + suffix[:8],
+            supplier_name=" Supplier ",
+            lines=[PurchaseOrderLineWrite(item_id=item.id, ordered_quantity="50")],
+        ),
+        actor,
+    )
+    purchase = service.submit_purchase_order(purchase.id, InventoryTransition(version="1"), actor)
+    partial = service.receive_purchase_order(
+        purchase.id,
+        ReceiptWrite(
+            line_id=purchase.lines[0].id,
+            warehouse_id=warehouse.id,
+            quantity="20",
+            idempotency_key="receive-1-" + suffix,
+            version="2",
+        ),
+        actor,
+    )
+    partial_replay = service.receive_purchase_order(
+        purchase.id,
+        ReceiptWrite(
+            line_id=purchase.lines[0].id,
+            warehouse_id=warehouse.id,
+            quantity="20",
+            idempotency_key="receive-1-" + suffix,
+            version="2",
+        ),
+        actor,
+    )
+    assert partial_replay == partial
+    assert partial.purchase_order.status == PurchaseOrderStatus.PARTIALLY_RECEIVED
+    completed = service.receive_purchase_order(
+        purchase.id,
+        ReceiptWrite(
+            line_id=purchase.lines[0].id,
+            warehouse_id=warehouse.id,
+            quantity="30",
+            idempotency_key="receive-2-" + suffix,
+            version="3",
+        ),
+        actor,
+    )
+    assert completed.purchase_order.status == PurchaseOrderStatus.RECEIVED
+    assert completed.balance.on_hand == "120"
+    assert service.get_purchase_order(purchase.id, actor) == completed.purchase_order
+
+    cancelled = service.create_purchase_order(
+        PurchaseOrderWrite(
+            number="cancel-" + suffix[:8],
+            supplier_name="Supplier",
+            lines=[PurchaseOrderLineWrite(item_id=item.id, ordered_quantity="1")],
+        ),
+        actor,
+    )
+    cancelled = service.cancel_purchase_order(cancelled.id, InventoryTransition(version="1"), actor)
+    assert cancelled.status == PurchaseOrderStatus.CANCELLED
+
+    with pytest.raises(InventoryError) as negative:
+        service.adjust_stock(
+            AdjustmentWrite(
+                item_id=item.id,
+                warehouse_id=warehouse.id,
+                quantity_delta="-121",
+                reason="invalid negative",
+                idempotency_key="negative-" + suffix,
+            ),
+            actor,
+        )
+    assert negative.value.kind == InventoryErrorKind.CONFLICT
+    assert service.list_balances(item.id, "", 20, actor).items[0].available == "120"
+    assert len(service.list_movements(item.id, warehouse.id, "", 100, actor).items) == 7
+    assert len(service.list_reservations("", "", 100, actor).items) == 2
+    assert len(service.list_purchase_orders("", "", 100, actor).items) == 2
+    assert service.list_items("active", "", 1, actor).items == [item]
+    assert service.list_warehouses("active", "", 1, actor).items == [warehouse]
+
+    archived_item = service.archive_item(item.id, InventoryTransition(version=item.version), actor)
+    item = service.reactivate_item(
+        item.id, InventoryTransition(version=archived_item.version), actor
+    )
+    archived_warehouse = service.archive_warehouse(
+        warehouse.id, InventoryTransition(version=warehouse.version), actor
+    )
+    warehouse = service.reactivate_warehouse(
+        warehouse.id, InventoryTransition(version=archived_warehouse.version), actor
+    )
+    assert item.status == RecordStatus.ACTIVE
+    assert warehouse.status == RecordStatus.ACTIVE
+
+    permission_codes = [
+        "inventory:read",
+        "inventory:catalog:write",
+        "inventory:stock:manage",
+        "inventory:procurement:manage",
+    ]
+    with engine.connect() as connection:
+        audit_count = connection.scalar(
+            select(func.count())
+            .select_from(audit_events)
+            .where(
+                audit_events.c.user_id == user_id,
+                audit_events.c.action.like("inventory:%"),
+            )
+        )
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(permission_codes)
+                )
+            ).all()
+        )
+    assert audit_count == 19
+    assert grants == {("admin", code) for code in permission_codes}
+
+{{- if .Tenancy}}
+    wrong_scope = actor.model_copy(update={"organization_id": "missing-" + suffix})
+    with pytest.raises(InventoryError) as hidden:
+        service.get_item(item.id, wrong_scope)
+    assert hidden.value.kind == InventoryErrorKind.NOT_FOUND
+    with engine.begin() as connection:
+        connection.execute(
+            update(organizations)
+            .where(organizations.c.id == organization.id)
+            .values(status="inactive", deactivated_at=now, updated_at=now)
+        )
+    with pytest.raises(InventoryError) as inactive_replay:
+        service.adjust_stock(
+            AdjustmentWrite(
+                item_id=item.id,
+                warehouse_id=warehouse.id,
+                quantity_delta="100",
+                reason="initial stock",
+                idempotency_key="adjust-" + suffix,
+            ),
+            actor,
+        )
+    assert inactive_replay.value.kind == InventoryErrorKind.NOT_FOUND
+{{- end}}
+
+    with engine.begin() as connection:
+        connection.execute(
+            delete(inventory_idempotency).where(inventory_idempotency.c.organization_id == scope)
+        )
+        connection.execute(
+            delete(inventory_purchase_order_lines).where(
+                inventory_purchase_order_lines.c.purchase_order_id.in_([purchase.id, cancelled.id])
+            )
+        )
+        connection.execute(
+            delete(inventory_purchase_orders).where(
+                inventory_purchase_orders.c.organization_id == scope
+            )
+        )
+        connection.execute(
+            delete(inventory_reservations).where(inventory_reservations.c.organization_id == scope)
+        )
+        connection.execute(
+            delete(inventory_movements).where(inventory_movements.c.organization_id == scope)
+        )
+        connection.execute(
+            delete(inventory_balances).where(inventory_balances.c.organization_id == scope)
+        )
+        connection.execute(
+            delete(inventory_warehouses).where(inventory_warehouses.c.organization_id == scope)
+        )
+        connection.execute(
+            delete(inventory_items).where(inventory_items.c.organization_id == scope)
+        )
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

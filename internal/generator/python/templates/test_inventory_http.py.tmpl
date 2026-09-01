@@ -1,0 +1,262 @@
+"""Inventory HTTP routes, decimal serialization, and stable errors."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, insert
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.identity.models import Principal, users
+from {{.PackageName}}.inventory.http import install_error_handlers, router
+from {{.PackageName}}.inventory.models import InventoryError, InventoryErrorKind
+from {{.PackageName}}.inventory.repository import SQLAlchemyInventoryRepository
+from {{.PackageName}}.inventory.service import InventoryService
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def test_real_routes_cover_inventory_lifecycle_and_decimal_strings() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    now = datetime(2026, 9, 2, tzinfo=UTC)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                insert(users).values(
+                    id="inventory-http-admin",
+                    email="inventory-http@example.com",
+                    password_hash="unused",
+                    role="admin",
+                    disabled=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        actor = Principal(
+            user_id="inventory-http-admin",
+            email="inventory-http@example.com",
+            role="admin",
+            method="token",
+{{- if .Tenancy}}
+            organization_id=None,
+{{- end}}
+        )
+{{- if .Tenancy}}
+        organization = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now).create(
+            "Inventory HTTP", actor
+        )
+        actor = actor.model_copy(update={"organization_id": organization.id})
+{{- end}}
+        application = FastAPI()
+        application.state.inventory_service = InventoryService(
+            SQLAlchemyInventoryRepository(engine), lambda: now
+        )
+        install_error_handlers(application)
+        for route in router.routes:
+            if isinstance(route, APIRoute):
+                for dependency in route.dependant.dependencies:
+                    if dependency.name == "principal" and dependency.call is not None:
+                        application.dependency_overrides[dependency.call] = lambda: actor
+        application.include_router(router)
+        client = TestClient(application)
+
+        item = client.post(
+            "/api/v1/inventory/items",
+            json={"sku": "sku-http", "name": "Widget", "unit": "ea"},
+        )
+        assert item.status_code == 201
+        item_value = item.json()
+        item_id = item_value["id"]
+        assert item_value["version"] == "1"
+        warehouse = client.post(
+            "/api/v1/inventory/warehouses",
+            json={"code": "main", "name": "Main"},
+        )
+        assert warehouse.status_code == 201
+        warehouse_id = warehouse.json()["id"]
+
+        assert client.get(f"/api/v1/inventory/items/{item_id}").status_code == 200
+        assert client.get("/api/v1/inventory/items?status=active").json()["items"]
+        updated_item = client.put(
+            f"/api/v1/inventory/items/{item_id}",
+            json={"sku": "sku-http", "name": "Widget Two", "unit": "ea", "version": "1"},
+        )
+        assert updated_item.json()["version"] == "2"
+        archived_item = client.post(
+            f"/api/v1/inventory/items/{item_id}/archive", json={"version": "2"}
+        )
+        assert archived_item.json()["status"] == "archived"
+        assert (
+            client.post(
+                f"/api/v1/inventory/items/{item_id}/reactivate",
+                json={"version": "3"},
+            ).json()["status"]
+            == "active"
+        )
+
+        assert client.get(f"/api/v1/inventory/warehouses/{warehouse_id}").status_code == 200
+        assert client.get("/api/v1/inventory/warehouses?status=active").json()["items"]
+        updated_warehouse = client.put(
+            f"/api/v1/inventory/warehouses/{warehouse_id}",
+            json={"code": "main", "name": "Primary", "version": "1"},
+        )
+        assert updated_warehouse.json()["version"] == "2"
+        archived_warehouse = client.post(
+            f"/api/v1/inventory/warehouses/{warehouse_id}/archive",
+            json={"version": "2"},
+        )
+        assert archived_warehouse.json()["status"] == "archived"
+        assert (
+            client.post(
+                f"/api/v1/inventory/warehouses/{warehouse_id}/reactivate",
+                json={"version": "3"},
+            ).json()["status"]
+            == "active"
+        )
+
+        adjustment = client.post(
+            "/api/v1/inventory/adjustments",
+            json={
+                "item_id": item_id,
+                "warehouse_id": warehouse_id,
+                "quantity_delta": "9007199254740993",
+                "reason": "maximum",
+                "idempotency_key": "http-adjust",
+            },
+        )
+        assert adjustment.status_code == 200
+        assert adjustment.json()["balance"]["on_hand"] == "9007199254740993"
+        assert client.get("/api/v1/inventory/balances?limit=1").json()["items"]
+
+        reservation = client.post(
+            "/api/v1/inventory/reservations",
+            json={
+                "external_reference": "http-order",
+                "item_id": item_id,
+                "warehouse_id": warehouse_id,
+                "quantity": "1",
+                "idempotency_key": "http-reserve",
+            },
+        )
+        assert reservation.status_code == 201
+        reservation_id = reservation.json()["reservation"]["id"]
+        assert client.get(f"/api/v1/inventory/reservations/{reservation_id}").status_code == 200
+        assert client.get("/api/v1/inventory/reservations?status=active").json()["items"]
+        released = client.post(
+            f"/api/v1/inventory/reservations/{reservation_id}/release",
+            json={"version": "1", "idempotency_key": "http-release"},
+        )
+        assert released.json()["reservation"]["status"] == "released"
+
+        consumed_source = client.post(
+            "/api/v1/inventory/reservations",
+            json={
+                "external_reference": "http-consume",
+                "item_id": item_id,
+                "warehouse_id": warehouse_id,
+                "quantity": "1",
+                "idempotency_key": "http-reserve-consume",
+            },
+        ).json()["reservation"]
+        consumed = client.post(
+            f"/api/v1/inventory/reservations/{consumed_source['id']}/consume",
+            json={"version": "1", "idempotency_key": "http-consume"},
+        )
+        assert consumed.json()["reservation"]["status"] == "consumed"
+
+        purchase = client.post(
+            "/api/v1/inventory/purchase-orders",
+            json={
+                "number": "po-http",
+                "supplier_name": "Supplier",
+                "lines": [{"item_id": item_id, "ordered_quantity": "2"}],
+            },
+        )
+        assert purchase.status_code == 201
+        purchase_value = purchase.json()
+        purchase_id = purchase_value["id"]
+        assert client.get(f"/api/v1/inventory/purchase-orders/{purchase_id}").status_code == 200
+        assert client.get("/api/v1/inventory/purchase-orders?status=draft").json()["items"]
+        submitted = client.post(
+            f"/api/v1/inventory/purchase-orders/{purchase_id}/submit",
+            json={"version": "1"},
+        ).json()
+        received = client.post(
+            f"/api/v1/inventory/purchase-orders/{purchase_id}/receive",
+            json={
+                "line_id": submitted["lines"][0]["id"],
+                "warehouse_id": warehouse_id,
+                "quantity": "2",
+                "idempotency_key": "http-receive",
+                "version": "2",
+            },
+        )
+        assert received.json()["purchase_order"]["status"] == "received"
+
+        cancelled = client.post(
+            "/api/v1/inventory/purchase-orders",
+            json={
+                "number": "po-http-cancel",
+                "supplier_name": "Supplier",
+                "lines": [{"item_id": item_id, "ordered_quantity": "1"}],
+            },
+        ).json()
+        cancelled_response = client.post(
+            f"/api/v1/inventory/purchase-orders/{cancelled['id']}/cancel",
+            json={"version": "1"},
+        )
+        assert cancelled_response.json()["status"] == "cancelled"
+        movements = client.get(
+            f"/api/v1/inventory/movements?item_id={item_id}&warehouse_id={warehouse_id}"
+        )
+        assert movements.status_code == 200
+        assert all(isinstance(row["quantity_delta"], str) for row in movements.json()["items"])
+    finally:
+        engine.dispose()
+
+
+def test_inventory_errors_use_stable_public_mapping() -> None:
+    cases = {
+        InventoryErrorKind.INVALID: (400, "inventory.invalid", "inventory data is invalid"),
+        InventoryErrorKind.NOT_FOUND: (
+            404,
+            "inventory.not_found",
+            "inventory record was not found",
+        ),
+        InventoryErrorKind.CONFLICT: (
+            409,
+            "inventory.conflict",
+            "inventory record changed or conflicts with current state",
+        ),
+        InventoryErrorKind.STORAGE: (
+            500,
+            "internal.error",
+            "inventory operation could not be completed",
+        ),
+    }
+    for kind, (status, code, message) in cases.items():
+        application = FastAPI()
+        install_error_handlers(application)
+        application.get("/failure")(_failure_handler(kind, message))
+        response = TestClient(application).get("/failure")
+        assert response.status_code == status
+        assert response.json() == {"code": code, "message": message}
+
+
+def _failure_handler(kind: InventoryErrorKind, message: str) -> Callable[[], None]:
+    def failure() -> None:
+        raise InventoryError(kind, message)
+
+    return failure

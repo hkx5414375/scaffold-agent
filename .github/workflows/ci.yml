@@ -59,7 +59,7 @@ jobs:
       - name: Generate, lint, test, and build administration UI
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCommerceCatalogPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCRMCorePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantERPInventoryPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCRMCorePlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantERPInventoryPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantJobAdministrationPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCRMCorePlanApplyVerifyEndToEnd|TestPythonPostgreSQLPlatformCapabilitiesCompose)$' -count=1
+        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCommerceCatalogPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCRMCorePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantERPInventoryPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCRMCorePlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantERPInventoryPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantJobAdministrationPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCRMCorePlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantERPInventoryPlanApplyVerifyEndToEnd|TestPythonPostgreSQLPlatformCapabilitiesCompose)$' -count=1
 
   generated-storefront:
     name: Shared generated Nuxt storefront foundation
@@ -121,7 +121,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Python projects
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
-        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows|CommerceCatalog|TenantCommerceCatalog|CustomerAccounts|TenantCustomerAccounts|CRMCore|TenantCRMCore)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows|CommerceCatalog|TenantCommerceCatalog|CustomerAccounts|TenantCustomerAccounts|CRMCore|TenantCRMCore|ERPInventory|TenantERPInventory)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration
@@ -186,7 +186,7 @@ jobs:
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5433/scaffold_agent_python
-        run: go test ./internal/engine -run '^TestPythonPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|Observability|CSVImportExport|ApprovalWorkflows|CommerceCatalog|CustomerAccounts|CRMCore)PlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|Observability|CSVImportExport|ApprovalWorkflows|CommerceCatalog|CustomerAccounts|CRMCore|ERPInventory)PlanApplyVerifyEndToEnd$' -count=1
 
   generated-mysql:
     name: Generated MySQL integration
@@ -237,4 +237,4 @@ jobs:
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: mysql+pymysql://root:mysql@127.0.0.1:3306/scaffold_agent_python?charset=utf8mb4
-        run: go test ./internal/engine -run '^TestPythonMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog|CustomerAccounts|CRMCore)PlanApplyVerifyEndToEnd$|^TestPythonMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog|CustomerAccounts|CRMCore|ERPInventory)PlanApplyVerifyEndToEnd$|^TestPythonMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1

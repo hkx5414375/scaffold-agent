@@ -27,7 +27,11 @@ from {{.PackageName}}.customer_accounts.repository import (
     CustomerStatusTransition,
 )
 from {{.PackageName}}.identity.models import AuditEvent, Principal
-from {{.PackageName}}.identity.passwords import DUMMY_HASH, hash_password, verify_password
+from {{.PackageName}}.identity.passwords import (
+    DUMMY_HASH,
+    hash_password,
+    verify_password,
+)
 from {{.PackageName}}.identity.tokens import digest_token, new_token
 
 CUSTOMER_SESSION_LIFETIME = timedelta(days=30)

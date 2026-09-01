@@ -13,14 +13,18 @@ from {{.PackageName}}.database import create_database_engine
 from {{.PackageName}}.errors import IdentityError
 from {{.PackageName}}.identity.models import Principal, audit_events, roles, users
 from {{.PackageName}}.migrations import upgrade_database
-from {{.PackageName}}.tenancy.lifecycle_repository import SQLAlchemyTenancyLifecycleRepository
+from {{.PackageName}}.tenancy.lifecycle_repository import (
+    SQLAlchemyTenancyLifecycleRepository,
+)
 from {{.PackageName}}.tenancy.lifecycle_service import (
     LifecycleError,
     LifecycleErrorKind,
     TenancyLifecycleService,
 )
 from {{.PackageName}}.tenancy.member_models import organization_invitations
-from {{.PackageName}}.tenancy.member_repository import SQLAlchemyTenancyMemberRepository
+from {{.PackageName}}.tenancy.member_repository import (
+    SQLAlchemyTenancyMemberRepository,
+)
 from {{.PackageName}}.tenancy.member_service import TenancyMemberService
 from {{.PackageName}}.tenancy.models import organization_memberships, organizations
 from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository

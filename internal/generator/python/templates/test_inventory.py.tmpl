@@ -1,0 +1,147 @@
+"""Inventory normalization and stable service failure contracts."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import cast
+
+import pytest
+from pydantic import ValidationError
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.inventory.models import (
+    AdjustmentWrite,
+    InventoryError,
+    InventoryErrorKind,
+    InventoryItem,
+    ItemWrite,
+    PurchaseOrderLineWrite,
+    PurchaseOrderWrite,
+)
+from {{.PackageName}}.inventory.repository import (
+    InventoryConflict,
+    InventoryNotFound,
+    InventoryRepository,
+)
+from {{.PackageName}}.inventory.service import InventoryService
+
+NOW = datetime(2026, 9, 2, tzinfo=UTC)
+
+
+class ProbeRepository:
+    def __init__(self, failure: Exception | None = None) -> None:
+        self.failure = failure
+        self.created: InventoryItem | None = None
+
+    def create_item(self, value: InventoryItem, _audit: AuditEvent) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.created = value
+
+    def get_item(self, _organization_id: str, _record_id: str) -> InventoryItem | None:
+        if self.failure is not None:
+            raise self.failure
+        return self.created
+
+
+def _actor() -> Principal:
+    return Principal(
+        user_id="admin-1",
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id="organization-1",
+{{- end}}
+    )
+
+
+def _service(
+    repository: ProbeRepository, clock: Callable[[], datetime] | None = None
+) -> InventoryService:
+    selected_clock = (lambda: NOW) if clock is None else clock
+    return InventoryService(
+        cast(InventoryRepository, repository),
+        selected_clock,
+    )
+
+
+def test_item_normalization_and_expected_failures() -> None:
+    repository = ProbeRepository()
+    service = _service(repository)
+    item = service.create_item(ItemWrite(sku=" sku-1 ", name=" Widget ", unit=" ea "), _actor())
+    assert item.sku == "SKU-1"
+    assert item.name == "Widget"
+    assert item.unit == "EA"
+    assert service.get_item(item.id, _actor()) == item
+
+    with pytest.raises(InventoryError) as invalid_code:
+        service.create_item(ItemWrite(sku="bad sku", name="Widget", unit="ea"), _actor())
+    assert invalid_code.value.kind == InventoryErrorKind.INVALID
+    with pytest.raises(InventoryError) as missing:
+        _service(ProbeRepository()).get_item("missing", _actor())
+    assert missing.value.kind == InventoryErrorKind.NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    ("failure", "kind"),
+    [
+        (InventoryConflict(), InventoryErrorKind.CONFLICT),
+        (InventoryNotFound(), InventoryErrorKind.NOT_FOUND),
+        (RuntimeError("private storage detail"), InventoryErrorKind.STORAGE),
+    ],
+)
+def test_repository_failures_are_mapped_without_details(
+    failure: Exception, kind: InventoryErrorKind
+) -> None:
+    with pytest.raises(InventoryError) as captured:
+        _service(ProbeRepository(failure)).create_item(
+            ItemWrite(sku="SKU", name="Widget", unit="EA"), _actor()
+        )
+    assert captured.value.kind == kind
+    assert "private storage detail" not in captured.value.message
+
+
+def test_invalid_commands_fail_before_repository_access() -> None:
+    service = _service(ProbeRepository())
+    with pytest.raises(InventoryError) as duplicate_line:
+        service.create_purchase_order(
+            PurchaseOrderWrite(
+                number="PO-1",
+                supplier_name="Supplier",
+                lines=[
+                    PurchaseOrderLineWrite(item_id="item-1", ordered_quantity="1"),
+                    PurchaseOrderLineWrite(item_id="item-1", ordered_quantity="2"),
+                ],
+            ),
+            _actor(),
+        )
+    assert duplicate_line.value.kind == InventoryErrorKind.INVALID
+
+    noncanonical = AdjustmentWrite.model_construct(
+        item_id="item-1",
+        warehouse_id="warehouse-1",
+        quantity_delta="01",
+        reason="adjust",
+        idempotency_key="key-1",
+    )
+    with pytest.raises(InventoryError) as quantity:
+        service.adjust_stock(noncanonical, _actor())
+    assert quantity.value.kind == InventoryErrorKind.INVALID
+    with pytest.raises(InventoryError) as filter_error:
+        service.list_items("unknown", "", 20, _actor())
+    assert filter_error.value.kind == InventoryErrorKind.INVALID
+    with pytest.raises(InventoryError) as page_error:
+        service.list_items("", "", 101, _actor())
+    assert page_error.value.kind == InventoryErrorKind.INVALID
+
+
+def test_models_reject_unknown_fields_and_naive_clock() -> None:
+    with pytest.raises(ValidationError):
+        ItemWrite.model_validate({"sku": "SKU", "name": "Widget", "unit": "EA", "unknown": True})
+    service = InventoryService(
+        cast(InventoryRepository, ProbeRepository()),
+        lambda: datetime.fromisoformat("2026-09-02T00:00:00"),
+    )
+    with pytest.raises(InventoryError) as naive:
+        service.create_item(ItemWrite(sku="SKU", name="Widget", unit="EA"), _actor())
+    assert naive.value.kind == InventoryErrorKind.INVALID

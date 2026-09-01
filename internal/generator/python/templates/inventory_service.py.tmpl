@@ -1,0 +1,763 @@
+"""Validated ERP inventory use cases independent of HTTP and SQLAlchemy."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from hashlib import sha256
+from typing import NoReturn
+from uuid import uuid4
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.inventory.models import (
+    AdjustmentWrite,
+    BalancePage,
+    InventoryError,
+    InventoryErrorKind,
+    InventoryItem,
+    InventoryMovement,
+    InventoryReservation,
+    InventoryTransition,
+    InventoryWarehouse,
+    ItemPage,
+    ItemUpdate,
+    ItemWrite,
+    MovementKind,
+    MovementPage,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    PurchaseOrderPage,
+    PurchaseOrderStatus,
+    PurchaseOrderWrite,
+    ReceiptResult,
+    ReceiptWrite,
+    RecordStatus,
+    ReservationPage,
+    ReservationResult,
+    ReservationStatus,
+    ReservationTransition,
+    ReservationWrite,
+    StockResult,
+    WarehousePage,
+    WarehouseUpdate,
+    WarehouseWrite,
+)
+from {{.PackageName}}.inventory.repository import (
+    InventoryConflict,
+    InventoryNotFound,
+    InventoryRepository,
+    ItemMutation,
+    PurchaseTransitionCommand,
+    ReceiptCommand,
+    RecordTransition,
+    ReservationCommand,
+    ReservationTransitionCommand,
+    StockCommand,
+    WarehouseMutation,
+)
+
+MAXIMUM_IDENTIFIER_LENGTH = 191
+MAXIMUM_INTEGER = 9_223_372_036_854_775_807
+MINIMUM_INTEGER = -9_223_372_036_854_775_808
+CODE_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+RECORD_STATUSES = {item.value for item in RecordStatus}
+RESERVATION_STATUSES = {item.value for item in ReservationStatus}
+PURCHASE_STATUSES = {item.value for item in PurchaseOrderStatus}
+
+
+class InventoryService:
+    """Normalize commands and preserve the portable inventory contract."""
+
+    def __init__(
+        self,
+        repository: InventoryRepository,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._repository = repository
+        self._clock = clock
+
+    def create_item(self, value: ItemWrite, actor: Principal) -> InventoryItem:
+{{- if .Tenancy}}
+        scope = _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        item = InventoryItem(
+            id=_new_id(),
+{{- if .Tenancy}}
+            organization_id=scope,
+{{- end}}
+            sku=_code(value.sku),
+            name=_required(value.name, 160),
+            unit=_required(value.unit, 32).upper(),
+            status=RecordStatus.ACTIVE,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_item(item, _audit(actor, "inventory:item:create", item.id, now))
+        except Exception as error:
+            _raise_repository(error)
+        return item
+
+    def get_item(self, record_id: str, actor: Principal) -> InventoryItem:
+        try:
+            value = self._repository.get_item(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_items(self, status: str, cursor: str, limit: int, actor: Principal) -> ItemPage:
+        normalized = _page(status, RECORD_STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_items(
+                _actor_scope(actor), normalized, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return ItemPage(items=result.items, next_cursor=result.next_cursor)
+
+    def update_item(self, record_id: str, value: ItemUpdate, actor: Principal) -> InventoryItem:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        mutation = ItemMutation(
+            organization_id=scope,
+            item_id=normalized_id,
+            sku=_code(value.sku),
+            name=_required(value.name, 160),
+            unit=_required(value.unit, 32).upper(),
+            expected_version=_positive(value.version),
+            updated_at=now,
+        )
+        try:
+            return self._repository.update_item(
+                mutation, _audit(actor, "inventory:item:update", normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def archive_item(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> InventoryItem:
+        return self._transition_item(record_id, value, RecordStatus.ARCHIVED, actor)
+
+    def reactivate_item(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> InventoryItem:
+        return self._transition_item(record_id, value, RecordStatus.ACTIVE, actor)
+
+    def _transition_item(
+        self,
+        record_id: str,
+        value: InventoryTransition,
+        target: RecordStatus,
+        actor: Principal,
+    ) -> InventoryItem:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        command = RecordTransition(
+            organization_id=scope,
+            record_id=normalized_id,
+            expected_version=_positive(value.version),
+            from_status=(
+                RecordStatus.ACTIVE if target == RecordStatus.ARCHIVED else RecordStatus.ARCHIVED
+            ),
+            to_status=target,
+            updated_at=now,
+        )
+        try:
+            return self._repository.transition_item(
+                command,
+                _audit(actor, f"inventory:item:{target.value}", normalized_id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def create_warehouse(self, value: WarehouseWrite, actor: Principal) -> InventoryWarehouse:
+{{- if .Tenancy}}
+        scope = _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        warehouse = InventoryWarehouse(
+            id=_new_id(),
+{{- if .Tenancy}}
+            organization_id=scope,
+{{- end}}
+            code=_code(value.code),
+            name=_required(value.name, 160),
+            status=RecordStatus.ACTIVE,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_warehouse(
+                warehouse,
+                _audit(actor, "inventory:warehouse:create", warehouse.id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return warehouse
+
+    def get_warehouse(self, record_id: str, actor: Principal) -> InventoryWarehouse:
+        try:
+            value = self._repository.get_warehouse(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_warehouses(
+        self, status: str, cursor: str, limit: int, actor: Principal
+    ) -> WarehousePage:
+        normalized = _page(status, RECORD_STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_warehouses(
+                _actor_scope(actor), normalized, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return WarehousePage(items=result.items, next_cursor=result.next_cursor)
+
+    def update_warehouse(
+        self, record_id: str, value: WarehouseUpdate, actor: Principal
+    ) -> InventoryWarehouse:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        mutation = WarehouseMutation(
+            organization_id=scope,
+            warehouse_id=normalized_id,
+            code=_code(value.code),
+            name=_required(value.name, 160),
+            expected_version=_positive(value.version),
+            updated_at=now,
+        )
+        try:
+            return self._repository.update_warehouse(
+                mutation,
+                _audit(actor, "inventory:warehouse:update", normalized_id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def archive_warehouse(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> InventoryWarehouse:
+        return self._transition_warehouse(record_id, value, RecordStatus.ARCHIVED, actor)
+
+    def reactivate_warehouse(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> InventoryWarehouse:
+        return self._transition_warehouse(record_id, value, RecordStatus.ACTIVE, actor)
+
+    def _transition_warehouse(
+        self,
+        record_id: str,
+        value: InventoryTransition,
+        target: RecordStatus,
+        actor: Principal,
+    ) -> InventoryWarehouse:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        command = RecordTransition(
+            organization_id=scope,
+            record_id=normalized_id,
+            expected_version=_positive(value.version),
+            from_status=(
+                RecordStatus.ACTIVE if target == RecordStatus.ARCHIVED else RecordStatus.ARCHIVED
+            ),
+            to_status=target,
+            updated_at=now,
+        )
+        try:
+            return self._repository.transition_warehouse(
+                command,
+                _audit(actor, f"inventory:warehouse:{target.value}", normalized_id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def list_balances(self, item_id: str, cursor: str, limit: int, actor: Principal) -> BalancePage:
+        _page("", set(), cursor, limit)
+        try:
+            result = self._repository.list_balances(
+                _actor_scope(actor), _optional_identifier(item_id), cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return BalancePage(items=result.items, next_cursor=result.next_cursor)
+
+    def adjust_stock(self, value: AdjustmentWrite, actor: Principal) -> StockResult:
+        scope = _actor_scope(actor)
+        item_id = _identifier(value.item_id)
+        warehouse_id = _identifier(value.warehouse_id)
+        quantity = _nonzero(value.quantity_delta)
+        reason = _required(value.reason, 500)
+        key = _identifier(value.idempotency_key)
+        now = _now(self._clock)
+        movement = _movement(
+            scope,
+            item_id,
+            warehouse_id,
+            MovementKind.ADJUSTMENT,
+            quantity,
+            0,
+            "adjustment",
+            key,
+            reason,
+            key,
+            actor,
+            now,
+        )
+        command = StockCommand(
+            organization_id=scope,
+            idempotency_key=key,
+            fingerprint=_fingerprint("adjust", item_id, warehouse_id, str(quantity), reason),
+            movement=movement,
+            audit=_audit(actor, "inventory:stock:adjust", movement.id, now),
+        )
+        try:
+            return self._repository.apply_stock(command)
+        except Exception as error:
+            _raise_repository(error)
+
+    def create_reservation(self, value: ReservationWrite, actor: Principal) -> ReservationResult:
+        scope = _actor_scope(actor)
+        reference = _identifier(value.external_reference)
+        item_id = _identifier(value.item_id)
+        warehouse_id = _identifier(value.warehouse_id)
+        quantity = _positive(value.quantity)
+        key = _identifier(value.idempotency_key)
+        now = _now(self._clock)
+        reservation = InventoryReservation(
+            id=_new_id(),
+{{- if .Tenancy}}
+            organization_id=scope,
+{{- end}}
+            external_reference=reference,
+            item_id=item_id,
+            warehouse_id=warehouse_id,
+            quantity=str(quantity),
+            status=ReservationStatus.ACTIVE,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        movement = _movement(
+            scope,
+            item_id,
+            warehouse_id,
+            MovementKind.RESERVATION_CREATED,
+            0,
+            quantity,
+            "reservation",
+            reservation.id,
+            "stock reserved",
+            key,
+            actor,
+            now,
+        )
+        command = ReservationCommand(
+            organization_id=scope,
+            idempotency_key=key,
+            fingerprint=_fingerprint("reserve", reference, item_id, warehouse_id, str(quantity)),
+            reservation=reservation,
+            movement=movement,
+            audit=_audit(actor, "inventory:reservation:create", reservation.id, now),
+        )
+        try:
+            return self._repository.create_reservation(command)
+        except Exception as error:
+            _raise_repository(error)
+
+    def get_reservation(self, record_id: str, actor: Principal) -> InventoryReservation:
+        try:
+            value = self._repository.get_reservation(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_reservations(
+        self, status: str, cursor: str, limit: int, actor: Principal
+    ) -> ReservationPage:
+        normalized = _page(status, RESERVATION_STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_reservations(
+                _actor_scope(actor), normalized, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return ReservationPage(items=result.items, next_cursor=result.next_cursor)
+
+    def release_reservation(
+        self, record_id: str, value: ReservationTransition, actor: Principal
+    ) -> ReservationResult:
+        return self._transition_reservation(record_id, value, ReservationStatus.RELEASED, actor)
+
+    def consume_reservation(
+        self, record_id: str, value: ReservationTransition, actor: Principal
+    ) -> ReservationResult:
+        return self._transition_reservation(record_id, value, ReservationStatus.CONSUMED, actor)
+
+    def _transition_reservation(
+        self,
+        record_id: str,
+        value: ReservationTransition,
+        target: ReservationStatus,
+        actor: Principal,
+    ) -> ReservationResult:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        version = _positive(value.version)
+        key = _identifier(value.idempotency_key)
+        now = _now(self._clock)
+        command = ReservationTransitionCommand(
+            organization_id=scope,
+            reservation_id=normalized_id,
+            idempotency_key=key,
+            fingerprint=_fingerprint("reservation", normalized_id, target.value, str(version)),
+            expected_version=version,
+            target=target,
+            movement_id=_new_id(),
+            actor_id=actor.user_id,
+            occurred_at=now,
+            audit=_audit(actor, f"inventory:reservation:{target.value}", normalized_id, now),
+        )
+        try:
+            return self._repository.transition_reservation(command)
+        except Exception as error:
+            _raise_repository(error)
+
+    def create_purchase_order(self, value: PurchaseOrderWrite, actor: Principal) -> PurchaseOrder:
+{{- if .Tenancy}}
+        scope = _actor_scope(actor)
+{{- end}}
+        item_ids: set[str] = set()
+        lines: list[PurchaseOrderLine] = []
+        for line in value.lines:
+            item_id = _identifier(line.item_id)
+            if item_id in item_ids:
+                raise _invalid()
+            item_ids.add(item_id)
+            lines.append(
+                PurchaseOrderLine(
+                    id=_new_id(),
+                    item_id=item_id,
+                    ordered_quantity=str(_positive(line.ordered_quantity)),
+                    received_quantity="0",
+                )
+            )
+        now = _now(self._clock)
+        purchase = PurchaseOrder(
+            id=_new_id(),
+{{- if .Tenancy}}
+            organization_id=scope,
+{{- end}}
+            number=_code(value.number),
+            supplier_name=_required(value.supplier_name, 160),
+            status=PurchaseOrderStatus.DRAFT,
+            version="1",
+            lines=lines,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_purchase_order(
+                purchase,
+                _audit(actor, "inventory:purchase:create", purchase.id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return purchase
+
+    def get_purchase_order(self, record_id: str, actor: Principal) -> PurchaseOrder:
+        try:
+            value = self._repository.get_purchase_order(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_purchase_orders(
+        self, status: str, cursor: str, limit: int, actor: Principal
+    ) -> PurchaseOrderPage:
+        normalized = _page(status, PURCHASE_STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_purchase_orders(
+                _actor_scope(actor), normalized, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return PurchaseOrderPage(items=result.items, next_cursor=result.next_cursor)
+
+    def submit_purchase_order(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> PurchaseOrder:
+        return self._transition_purchase(record_id, value, PurchaseOrderStatus.SUBMITTED, actor)
+
+    def cancel_purchase_order(
+        self, record_id: str, value: InventoryTransition, actor: Principal
+    ) -> PurchaseOrder:
+        return self._transition_purchase(record_id, value, PurchaseOrderStatus.CANCELLED, actor)
+
+    def _transition_purchase(
+        self,
+        record_id: str,
+        value: InventoryTransition,
+        target: PurchaseOrderStatus,
+        actor: Principal,
+    ) -> PurchaseOrder:
+        scope = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        command = PurchaseTransitionCommand(
+            organization_id=scope,
+            purchase_order_id=normalized_id,
+            expected_version=_positive(value.version),
+            target=target,
+            updated_at=now,
+            audit=_audit(actor, f"inventory:purchase:{target.value}", normalized_id, now),
+        )
+        try:
+            return self._repository.transition_purchase_order(command)
+        except Exception as error:
+            _raise_repository(error)
+
+    def receive_purchase_order(
+        self, record_id: str, value: ReceiptWrite, actor: Principal
+    ) -> ReceiptResult:
+        scope = _actor_scope(actor)
+        purchase_id = _identifier(record_id)
+        line_id = _identifier(value.line_id)
+        warehouse_id = _identifier(value.warehouse_id)
+        quantity = _positive(value.quantity)
+        version = _positive(value.version)
+        key = _identifier(value.idempotency_key)
+        now = _now(self._clock)
+        command = ReceiptCommand(
+            organization_id=scope,
+            purchase_order_id=purchase_id,
+            line_id=line_id,
+            warehouse_id=warehouse_id,
+            idempotency_key=key,
+            fingerprint=_fingerprint(
+                "receive",
+                purchase_id,
+                line_id,
+                warehouse_id,
+                str(quantity),
+                str(version),
+            ),
+            quantity=quantity,
+            expected_version=version,
+            movement_id=_new_id(),
+            actor_id=actor.user_id,
+            occurred_at=now,
+            audit=_audit(actor, "inventory:purchase:receive", purchase_id, now),
+        )
+        try:
+            return self._repository.receive_purchase_order(command)
+        except Exception as error:
+            _raise_repository(error)
+
+    def list_movements(
+        self,
+        item_id: str,
+        warehouse_id: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> MovementPage:
+        _page("", set(), cursor, limit)
+        try:
+            result = self._repository.list_movements(
+                _actor_scope(actor),
+                _optional_identifier(item_id),
+                _optional_identifier(warehouse_id),
+                cursor.strip(),
+                limit,
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return MovementPage(items=result.items, next_cursor=result.next_cursor)
+
+
+def _movement(
+    scope: str,
+    item_id: str,
+    warehouse_id: str,
+    kind: MovementKind,
+    quantity_delta: int,
+    reserved_delta: int,
+    reference_type: str,
+    reference_id: str,
+    reason: str,
+    idempotency_key: str,
+    actor: Principal,
+    now: datetime,
+) -> InventoryMovement:
+    return InventoryMovement(
+        id=_new_id(),
+{{- if .Tenancy}}
+        organization_id=scope,
+{{- end}}
+        item_id=item_id,
+        warehouse_id=warehouse_id,
+        kind=kind,
+        quantity_delta=str(quantity_delta),
+        reserved_delta=str(reserved_delta),
+        reference_type=reference_type,
+        reference_id=reference_id,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        created_by=actor.user_id,
+        created_at=now,
+    )
+
+
+def _actor_scope(actor: Principal) -> str:
+    _identifier(actor.user_id)
+{{- if .Tenancy}}
+    return _identifier(actor.organization_id or "")
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _identifier(value: str) -> str:
+    return _required(value, MAXIMUM_IDENTIFIER_LENGTH)
+
+
+def _optional_identifier(value: str) -> str:
+    normalized = value.strip()
+    return _identifier(normalized) if normalized else ""
+
+
+def _code(value: str) -> str:
+    normalized = value.strip().upper()
+    if (
+        not normalized
+        or len(normalized) > 64
+        or any(character not in CODE_CHARACTERS for character in normalized)
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _required(value: str, maximum: int) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum or not _safe(normalized):
+        raise _invalid()
+    return normalized
+
+
+def _safe(value: str) -> bool:
+    return all(character.isprintable() for character in value)
+
+
+def _canonical(value: str) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as error:
+        raise _invalid() from error
+    if number < MINIMUM_INTEGER or number > MAXIMUM_INTEGER or str(number) != value:
+        raise _invalid()
+    return number
+
+
+def _positive(value: str) -> int:
+    number = _canonical(value)
+    if number < 1:
+        raise _invalid()
+    return number
+
+
+def _nonzero(value: str) -> int:
+    number = _canonical(value)
+    if number == 0:
+        raise _invalid()
+    return number
+
+
+def _page(filter_value: str, choices: set[str], cursor: str, limit: int) -> str:
+    normalized = filter_value.strip()
+    normalized_cursor = cursor.strip()
+    if (
+        (normalized and normalized not in choices)
+        or len(normalized_cursor) > MAXIMUM_IDENTIFIER_LENGTH
+        or not _safe(normalized_cursor)
+        or limit < 1
+        or limit > 100
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _fingerprint(*values: str) -> str:
+    digest = sha256()
+    for index, value in enumerate(values):
+        if index:
+            digest.update(b"\0")
+        digest.update(value.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=_new_id(),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _new_id() -> str:
+    return str(uuid4())
+
+
+def _raise_repository(error: Exception) -> NoReturn:
+    if isinstance(error, InventoryError):
+        raise error
+    if isinstance(error, InventoryNotFound):
+        raise _not_found() from error
+    if isinstance(error, InventoryConflict):
+        raise _conflict() from error
+    raise _storage() from error
+
+
+def _invalid() -> InventoryError:
+    return InventoryError(InventoryErrorKind.INVALID, "inventory data is invalid")
+
+
+def _not_found() -> InventoryError:
+    return InventoryError(InventoryErrorKind.NOT_FOUND, "inventory record was not found")
+
+
+def _conflict() -> InventoryError:
+    return InventoryError(
+        InventoryErrorKind.CONFLICT,
+        "inventory record changed or conflicts with current state",
+    )
+
+
+def _storage() -> InventoryError:
+    return InventoryError(InventoryErrorKind.STORAGE, "inventory operation could not be completed")

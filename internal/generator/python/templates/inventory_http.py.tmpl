@@ -1,0 +1,302 @@
+"""Permission-protected ERP inventory HTTP transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.inventory.models import (
+    AdjustmentWrite,
+    BalancePage,
+    InventoryError,
+    InventoryErrorKind,
+    InventoryItem,
+    InventoryReservation,
+    InventoryTransition,
+    InventoryWarehouse,
+    ItemPage,
+    ItemUpdate,
+    ItemWrite,
+    MovementPage,
+    PurchaseOrder,
+    PurchaseOrderPage,
+    PurchaseOrderWrite,
+    ReceiptResult,
+    ReceiptWrite,
+    ReservationPage,
+    ReservationResult,
+    ReservationTransition,
+    ReservationWrite,
+    StockResult,
+    WarehousePage,
+    WarehouseUpdate,
+    WarehouseWrite,
+)
+from {{.PackageName}}.inventory.service import InventoryService
+
+router = APIRouter(tags=["inventory"])
+
+
+def inventory_service(request: Request) -> InventoryService:
+    service: InventoryService = request.app.state.inventory_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(InventoryError)
+    async def inventory_error(_request: Request, error: InventoryError) -> JSONResponse:
+        status, code = {
+            InventoryErrorKind.INVALID: (400, "inventory.invalid"),
+            InventoryErrorKind.NOT_FOUND: (404, "inventory.not_found"),
+            InventoryErrorKind.CONFLICT: (409, "inventory.conflict"),
+            InventoryErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+ReadPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("inventory:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+CatalogPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("inventory:catalog:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+StockPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("inventory:stock:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+ProcurementPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("inventory:procurement:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+Service = Annotated[InventoryService, Depends(inventory_service)]
+
+
+@router.post("/api/v1/inventory/items", response_model=InventoryItem, status_code=201)
+def create_item(value: ItemWrite, principal: CatalogPrincipal, service: Service) -> InventoryItem:
+    return service.create_item(value, principal)
+
+
+@router.get("/api/v1/inventory/items", response_model=ItemPage)
+def list_items(
+    principal: ReadPrincipal,
+    service: Service,
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ItemPage:
+    return service.list_items(status, cursor, limit, principal)
+
+
+@router.get("/api/v1/inventory/items/{id}", response_model=InventoryItem)
+def get_item(id: str, principal: ReadPrincipal, service: Service) -> InventoryItem:
+    return service.get_item(id, principal)
+
+
+@router.put("/api/v1/inventory/items/{id}", response_model=InventoryItem)
+def update_item(
+    id: str, value: ItemUpdate, principal: CatalogPrincipal, service: Service
+) -> InventoryItem:
+    return service.update_item(id, value, principal)
+
+
+@router.post("/api/v1/inventory/items/{id}/archive", response_model=InventoryItem)
+def archive_item(
+    id: str, value: InventoryTransition, principal: CatalogPrincipal, service: Service
+) -> InventoryItem:
+    return service.archive_item(id, value, principal)
+
+
+@router.post("/api/v1/inventory/items/{id}/reactivate", response_model=InventoryItem)
+def reactivate_item(
+    id: str, value: InventoryTransition, principal: CatalogPrincipal, service: Service
+) -> InventoryItem:
+    return service.reactivate_item(id, value, principal)
+
+
+@router.post("/api/v1/inventory/warehouses", response_model=InventoryWarehouse, status_code=201)
+def create_warehouse(
+    value: WarehouseWrite, principal: CatalogPrincipal, service: Service
+) -> InventoryWarehouse:
+    return service.create_warehouse(value, principal)
+
+
+@router.get("/api/v1/inventory/warehouses", response_model=WarehousePage)
+def list_warehouses(
+    principal: ReadPrincipal,
+    service: Service,
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> WarehousePage:
+    return service.list_warehouses(status, cursor, limit, principal)
+
+
+@router.get("/api/v1/inventory/warehouses/{id}", response_model=InventoryWarehouse)
+def get_warehouse(id: str, principal: ReadPrincipal, service: Service) -> InventoryWarehouse:
+    return service.get_warehouse(id, principal)
+
+
+@router.put("/api/v1/inventory/warehouses/{id}", response_model=InventoryWarehouse)
+def update_warehouse(
+    id: str,
+    value: WarehouseUpdate,
+    principal: CatalogPrincipal,
+    service: Service,
+) -> InventoryWarehouse:
+    return service.update_warehouse(id, value, principal)
+
+
+@router.post("/api/v1/inventory/warehouses/{id}/archive", response_model=InventoryWarehouse)
+def archive_warehouse(
+    id: str,
+    value: InventoryTransition,
+    principal: CatalogPrincipal,
+    service: Service,
+) -> InventoryWarehouse:
+    return service.archive_warehouse(id, value, principal)
+
+
+@router.post("/api/v1/inventory/warehouses/{id}/reactivate", response_model=InventoryWarehouse)
+def reactivate_warehouse(
+    id: str,
+    value: InventoryTransition,
+    principal: CatalogPrincipal,
+    service: Service,
+) -> InventoryWarehouse:
+    return service.reactivate_warehouse(id, value, principal)
+
+
+@router.get("/api/v1/inventory/balances", response_model=BalancePage)
+def list_balances(
+    principal: ReadPrincipal,
+    service: Service,
+    item_id: Annotated[str, Query(max_length=191)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> BalancePage:
+    return service.list_balances(item_id, cursor, limit, principal)
+
+
+@router.post("/api/v1/inventory/adjustments", response_model=StockResult)
+def adjust_stock(
+    value: AdjustmentWrite, principal: StockPrincipal, service: Service
+) -> StockResult:
+    return service.adjust_stock(value, principal)
+
+
+@router.post("/api/v1/inventory/reservations", response_model=ReservationResult, status_code=201)
+def create_reservation(
+    value: ReservationWrite, principal: StockPrincipal, service: Service
+) -> ReservationResult:
+    return service.create_reservation(value, principal)
+
+
+@router.get("/api/v1/inventory/reservations", response_model=ReservationPage)
+def list_reservations(
+    principal: ReadPrincipal,
+    service: Service,
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ReservationPage:
+    return service.list_reservations(status, cursor, limit, principal)
+
+
+@router.get("/api/v1/inventory/reservations/{id}", response_model=InventoryReservation)
+def get_reservation(id: str, principal: ReadPrincipal, service: Service) -> InventoryReservation:
+    return service.get_reservation(id, principal)
+
+
+@router.post("/api/v1/inventory/reservations/{id}/release", response_model=ReservationResult)
+def release_reservation(
+    id: str,
+    value: ReservationTransition,
+    principal: StockPrincipal,
+    service: Service,
+) -> ReservationResult:
+    return service.release_reservation(id, value, principal)
+
+
+@router.post("/api/v1/inventory/reservations/{id}/consume", response_model=ReservationResult)
+def consume_reservation(
+    id: str,
+    value: ReservationTransition,
+    principal: StockPrincipal,
+    service: Service,
+) -> ReservationResult:
+    return service.consume_reservation(id, value, principal)
+
+
+@router.post("/api/v1/inventory/purchase-orders", response_model=PurchaseOrder, status_code=201)
+def create_purchase_order(
+    value: PurchaseOrderWrite,
+    principal: ProcurementPrincipal,
+    service: Service,
+) -> PurchaseOrder:
+    return service.create_purchase_order(value, principal)
+
+
+@router.get("/api/v1/inventory/purchase-orders", response_model=PurchaseOrderPage)
+def list_purchase_orders(
+    principal: ReadPrincipal,
+    service: Service,
+    status: Annotated[str, Query(max_length=32)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> PurchaseOrderPage:
+    return service.list_purchase_orders(status, cursor, limit, principal)
+
+
+@router.get("/api/v1/inventory/purchase-orders/{id}", response_model=PurchaseOrder)
+def get_purchase_order(id: str, principal: ReadPrincipal, service: Service) -> PurchaseOrder:
+    return service.get_purchase_order(id, principal)
+
+
+@router.post("/api/v1/inventory/purchase-orders/{id}/submit", response_model=PurchaseOrder)
+def submit_purchase_order(
+    id: str,
+    value: InventoryTransition,
+    principal: ProcurementPrincipal,
+    service: Service,
+) -> PurchaseOrder:
+    return service.submit_purchase_order(id, value, principal)
+
+
+@router.post("/api/v1/inventory/purchase-orders/{id}/cancel", response_model=PurchaseOrder)
+def cancel_purchase_order(
+    id: str,
+    value: InventoryTransition,
+    principal: ProcurementPrincipal,
+    service: Service,
+) -> PurchaseOrder:
+    return service.cancel_purchase_order(id, value, principal)
+
+
+@router.post("/api/v1/inventory/purchase-orders/{id}/receive", response_model=ReceiptResult)
+def receive_purchase_order(
+    id: str,
+    value: ReceiptWrite,
+    principal: ProcurementPrincipal,
+    service: Service,
+) -> ReceiptResult:
+    return service.receive_purchase_order(id, value, principal)
+
+
+@router.get("/api/v1/inventory/movements", response_model=MovementPage)
+def list_movements(
+    principal: ReadPrincipal,
+    service: Service,
+    item_id: Annotated[str, Query(max_length=191)] = "",
+    warehouse_id: Annotated[str, Query(max_length=191)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> MovementPage:
+    return service.list_movements(item_id, warehouse_id, cursor, limit, principal)

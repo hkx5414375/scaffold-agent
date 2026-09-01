@@ -228,12 +228,153 @@ func TestPythonMySQLCRMCorePlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, false, false, false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantERPInventoryPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonInventoryReference(t, "postgresql", true)
+}
+
+func TestPythonMySQLTenantERPInventoryPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonInventoryReference(t, "mysql", true)
+}
+
+func TestPythonPostgreSQLERPInventoryPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonInventoryReference(t, "postgresql", false)
+}
+
+func TestPythonMySQLERPInventoryPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonInventoryReference(t, "mysql", false)
+}
+
+func runGeneratedPythonInventoryReference(t *testing.T, database string, tenancy bool) {
+	t.Helper()
+	root := t.TempDir()
+	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
+		root = filepath.Join(captureRoot, database)
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+	}
+	capabilities := "  capabilities:\n"
+	if tenancy {
+		capabilities += `    - name: organization-tenancy
+      version: 0.3.0
+`
+	}
+	capabilities += `    - name: erp-inventory
+      version: 0.1.0
+`
+	blueprint := `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-python-inventory
+spec:
+  stack:
+    backend: python
+    admin_ui: element-plus
+    storefront: none
+  database:
+    engine: DATABASE_ENGINE
+  auth:
+    modes: [session, token]
+CAPABILITIES`
+	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
+	writeBlueprint(t, root, blueprint)
+	application := New("test")
+	ctx := context.Background()
+	planned := application.Plan(ctx, PlanInput{
+		ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate,
+	})
+	if planned.Status != result.StatusOK {
+		t.Fatalf("Plan() = %#v, want ok", planned)
+	}
+	plannedData := planned.Data.(planData)
+	wantChanges := 59
+	if tenancy {
+		wantChanges = 82
+	}
+	if plannedData.ChangeCount != wantChanges ||
+		plannedData.CapabilityLock["erp-inventory"] != "0.1.0" ||
+		plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
+		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	previewed := application.Preview(ctx, PreviewInput{
+		ProjectRoot: root, PlanID: plannedData.PlanID,
+	})
+	if previewed.Status != result.StatusOK {
+		t.Fatalf("Preview() = %#v, want ok", previewed)
+	}
+	applied := application.Apply(ctx, ApplyInput{
+		ProjectRoot: root,
+		PlanID:      plannedData.PlanID,
+		ApplyToken:  previewed.Data.(previewData).ApplyToken,
+	})
+	if applied.Status != result.StatusOK {
+		t.Fatalf("Apply() = %#v, want ok", applied)
+	}
+	for _, path := range []string{
+		"src/generated_python_inventory/inventory/models.py",
+		"src/generated_python_inventory/inventory/service.py",
+		"src/generated_python_inventory/inventory/repository.py",
+		"src/generated_python_inventory/inventory/http.py",
+		"src/generated_python_inventory/migration/versions/000290_erp_inventory.py",
+		"tests/test_inventory.py",
+		"tests/test_inventory_database.py",
+		"tests/test_inventory_http.py",
+		"web/admin/src/views/InventoryView.vue",
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+			t.Errorf("generated Python inventory project is missing %s: %v", path, err)
+		}
+	}
+	if os.Getenv("SCAFFOLD_AGENT_RUN_PYTHON_BUILD") == "1" {
+		for _, arguments := range [][]string{
+			{"uv", "sync", "--frozen", "--all-groups"},
+			{"uv", "lock", "--check"},
+			{"uv", "run", "ruff", "format", "--check", "."},
+			{"uv", "run", "ruff", "check", "."},
+			{"uv", "run", "mypy", "src", "tests"},
+			{"uv", "run", "bandit", "-c", "pyproject.toml", "-r", "src"},
+			{"uv", "run", "pytest"},
+		} {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = root
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("generated Python inventory %s failed: %v\n%s",
+					strings.Join(arguments, " "), err, output)
+			}
+		}
+	}
+	if tenancy && database == "postgresql" &&
+		os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+		adminRoot := filepath.Join(root, "web", "admin")
+		for _, arguments := range [][]string{
+			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},
+			{"npm", "run", "lint"},
+			{"npm", "test"},
+			{"npm", "run", "build"},
+			{"npm", "run", "format:check"},
+		} {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = adminRoot
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("generated Python inventory admin %s failed: %v\n%s",
+					strings.Join(arguments, " "), err, output)
+			}
+		}
+	}
+	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+	if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+		t.Fatalf("Verify() = %#v, want no findings", verified)
+	}
+}
+
 func TestPythonPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func TestPythonMySQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func runGeneratedPythonReference(
@@ -279,6 +420,7 @@ func runGeneratedPythonReferenceOptions(
 	catalog := len(platformSelections) > 2 && platformSelections[2]
 	customerAccounts := len(platformSelections) > 3 && platformSelections[3]
 	crm := len(platformSelections) > 4 && platformSelections[4]
+	inventory := len(platformSelections) > 5 && platformSelections[5]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -316,7 +458,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "STOREFRONT", storefront)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts || crm {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts || crm || inventory {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -381,6 +523,11 @@ CAPABILITIES
 	}
 	if crm {
 		capabilities += `    - name: crm-core
+      version: 0.1.0
+`
+	}
+	if inventory {
+		capabilities += `    - name: erp-inventory
       version: 0.1.0
 `
 	}
@@ -501,6 +648,12 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
+	if inventory {
+		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -548,6 +701,9 @@ CAPABILITIES
 	}
 	if crm && plannedData.CapabilityLock["crm-core"] != "0.1.0" {
 		t.Fatalf("Plan() CRM core lock = %#v", plannedData.CapabilityLock)
+	}
+	if inventory && plannedData.CapabilityLock["erp-inventory"] != "0.1.0" {
+		t.Fatalf("Plan() ERP inventory lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

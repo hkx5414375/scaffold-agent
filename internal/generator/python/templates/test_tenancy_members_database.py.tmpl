@@ -21,7 +21,9 @@ from {{.PackageName}}.identity.models import (
 )
 from {{.PackageName}}.migrations import upgrade_database
 from {{.PackageName}}.tenancy.member_models import organization_invitations
-from {{.PackageName}}.tenancy.member_repository import SQLAlchemyTenancyMemberRepository
+from {{.PackageName}}.tenancy.member_repository import (
+    SQLAlchemyTenancyMemberRepository,
+)
 from {{.PackageName}}.tenancy.member_service import (
     MemberError,
     MemberErrorKind,
