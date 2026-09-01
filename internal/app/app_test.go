@@ -139,6 +139,27 @@ func TestRunDoctorJSON(t *testing.T) {
 	}
 }
 
+func TestRunConformanceJSON(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run([]string{"conformance", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var report struct {
+		Status   string `json:"status"`
+		Profiles []any  `json:"profiles"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("conformance output is not JSON: %v", err)
+	}
+	if report.Status != "ok" || len(report.Profiles) != 6 {
+		t.Fatalf("conformance report = %#v", report)
+	}
+}
+
 func TestRunRejectsUnexpectedFlags(t *testing.T) {
 	t.Parallel()
 

@@ -71,6 +71,8 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"artifact-storage",
 				"result-pagination",
 				"mcp-stdio",
+				"cross-agent-mcp-conformance",
+				"bounded-token-benchmarks",
 				"go-base-generator",
 				"go-postgresql-identity",
 				"go-postgresql-crud",

@@ -38,6 +38,10 @@ jobs:
         run: go build ./cmd/scaffold-agent
       - name: Doctor
         run: go run ./cmd/scaffold-agent doctor --json
+      - name: Cross-Agent conformance
+        run: go run ./cmd/scaffold-agent conformance --json
+      - name: Token budgets
+        run: go run ./cmd/scaffold-agent benchmark --json
 
   generated-admin:
     name: Shared generated Vue administration

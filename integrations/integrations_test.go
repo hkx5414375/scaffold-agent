@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -15,8 +17,16 @@ func TestJSONExamplesAreValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Glob() error = %v", err)
 	}
-	if len(paths) != 2 {
-		t.Fatalf("JSON examples = %d, want 2", len(paths))
+	wantPaths := []string{
+		filepath.Join("claude-code", "mcp.json.example"),
+		filepath.Join("deepseek", "mcp.json.example"),
+		filepath.Join("generic", "mcp.json.example"),
+		filepath.Join("glm", "mcp.json.example"),
+		filepath.Join("kimi-code", "mcp.json.example"),
+	}
+	sort.Strings(paths)
+	if !reflect.DeepEqual(paths, wantPaths) {
+		t.Fatalf("JSON examples = %v, want %v", paths, wantPaths)
 	}
 	for _, path := range paths {
 		content, err := os.ReadFile(path)
@@ -27,8 +37,23 @@ func TestJSONExamplesAreValid(t *testing.T) {
 		if err := json.Unmarshal(content, &document); err != nil {
 			t.Fatalf("example %q is invalid JSON: %v", path, err)
 		}
-		if _, exists := document["mcpServers"]; !exists {
+		servers, ok := document["mcpServers"].(map[string]any)
+		if !ok {
 			t.Fatalf("example %q has no mcpServers object", path)
+		}
+		server, ok := servers["scaffold-agent"].(map[string]any)
+		if !ok || server["command"] != "/absolute/path/to/scaffold-agent" {
+			t.Fatalf("example %q has no portable Scaffold Agent command", path)
+		}
+		args, ok := server["args"].([]any)
+		if !ok || len(args) != 1 || args[0] != "mcp" {
+			t.Fatalf("example %q has invalid arguments", path)
+		}
+		if env, exists := server["env"]; exists {
+			values, ok := env.(map[string]any)
+			if !ok || len(values) != 0 {
+				t.Fatalf("example %q must not contain model credentials", path)
+			}
 		}
 	}
 }

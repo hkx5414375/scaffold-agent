@@ -66,6 +66,8 @@ scaffold-agent mcp
 
 服务支持 MCP 版本 `2025-11-25`、`2025-06-18`、`2025-03-26` 和 `2024-11-05`。每条 STDIO 消息是一个以换行结束的 UTF-8 JSON-RPC 对象。标准输出只能写协议消息，运行错误写到标准错误。
 
+OpenAI GPT、Claude、Kimi、GLM 和 DeepSeek 都必须由支持 MCP 的编码宿主承载；裸模型 API 不能直接安装本地 Engine。运行 `scaffold-agent conformance --json` 可在不调用模型、不使用凭据的情况下验证六类宿主画像和完整安全工作流，详见[跨 Agent 兼容性](agent-conformance.zh-CN.md)。
+
 Codex 可以用下列命令注册本地可执行文件：
 
 ```bash
@@ -85,6 +87,8 @@ scaffold-agent preview --project-root /path/to/project --plan-id plan_...
 scaffold-agent apply --project-root /path/to/project --plan-id plan_... --apply-token apply_...
 scaffold-agent verify --project-root /path/to/project
 scaffold-agent result --project-root /path/to/project --result-id result_... --cursor ...
+scaffold-agent conformance --json
+scaffold-agent benchmark --json
 ```
 
 还提供两个仅供运维恢复的命令：

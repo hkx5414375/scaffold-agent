@@ -220,6 +220,8 @@ scaffold-agent mcp
 
 The server supports MCP protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`. Each STDIO message is one UTF-8 JSON-RPC object terminated by a newline. Standard output is reserved for protocol messages; operational failures go to standard error.
 
+GPT, Claude, Kimi, GLM, and DeepSeek require an MCP-capable coding host; a bare model API cannot install a local Engine. Run `scaffold-agent conformance --json` for a credential-free six-profile workflow gate. See [cross-Agent conformance](agent-conformance.md).
+
 Codex can register the local executable with:
 
 ```bash
@@ -239,6 +241,8 @@ scaffold-agent preview --project-root /path/to/project --plan-id plan_...
 scaffold-agent apply --project-root /path/to/project --plan-id plan_... --apply-token apply_...
 scaffold-agent verify --project-root /path/to/project
 scaffold-agent result --project-root /path/to/project --result-id result_... --cursor ...
+scaffold-agent conformance --json
+scaffold-agent benchmark --json
 ```
 
 Operator-only recovery commands are also available:

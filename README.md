@@ -4,9 +4,11 @@
 
 Scaffold Agent is a model-neutral local tool agent for AI coding assistants. It turns versioned project blueprints and reusable capability packs into deterministic, testable, and upgradeable full-stack applications.
 
-The project is intentionally not an AI model, chat UI, or model gateway. Codex, Claude Code, Kimi Code, and other MCP-capable coding agents provide the reasoning; Scaffold Agent provides stable software-engineering facts and safe file operations.
+The project is intentionally not an AI model, chat UI, or model gateway. OpenAI GPT through Codex, Claude Code, Kimi K3, GLM, DeepSeek, and other models run in MCP-capable coding hosts and provide the reasoning; Scaffold Agent provides stable software-engineering facts and safe file operations.
 
 ## Status
+
+Six Agent protocol profiles and token budgets are now executable release gates; every model uses the same MCP tool contract and Engine implementation.
 
 Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation, `commerce-catalog` `0.1.0`, `customer-accounts` `0.1.0`, `crm-core` `0.1.0`, and `erp-inventory` `0.1.0`. ERP inventory generation includes integer stock, immutable movements, idempotent reservations and receiving, purchase orders, atomic audit, active-tenant isolation, and the identical Vue administration view; a cross-backend OpenAPI, migration, behavior, and administration conformance gate keeps Go, Java, and Python aligned. Schemas stay experimental until 1.0.
 
@@ -43,6 +45,8 @@ Run the baseline checks:
 go test ./...
 go vet ./...
 go run ./cmd/scaffold-agent doctor --json
+go run ./cmd/scaffold-agent conformance --json
+go run ./cmd/scaffold-agent benchmark --json
 go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
@@ -86,7 +90,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python-mysql --blueprint scaffold.yaml
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [cross-Agent conformance](docs/agent-conformance.md), [token benchmarks](docs/token-benchmarks.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
 
 ## License
 

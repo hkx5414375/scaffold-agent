@@ -4,9 +4,11 @@
 
 Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工具型 Agent。它把版本化项目蓝图和可复用能力包，转换成确定、可测试、可升级的全栈应用。
 
-本项目不是大模型、聊天界面或模型网关。Codex、Claude Code、Kimi Code 以及其他支持 MCP 的编码 Agent 负责理解和推理；Scaffold Agent 负责提供稳定的工程事实、安全的文件变更和可重复验证结果。
+本项目不是大模型、聊天界面或模型网关。OpenAI GPT/Codex、Claude Code、Kimi K3、智谱 GLM、DeepSeek 以及其他模型由支持 MCP 的编码 Agent 承载并负责理解和推理；Scaffold Agent 负责提供稳定的工程事实、安全的文件变更和可重复验证结果。
 
 ## 当前状态
+
+六类 Agent 协议兼容门禁与 Token 预算门禁已经实现；模型兼容由同一套 MCP 工具契约保证，不为任何模型复制 Engine 逻辑。
 
 项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在都能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座，以及 `commerce-catalog` `0.1.0`、`customer-accounts` `0.1.0`、`crm-core` `0.1.0` 和 `erp-inventory` `0.1.0`。ERP 库存包含整数库存、不可变流水、幂等预留与收货、采购单、事务审计、停用租户隔离和完全相同的 Vue 管理端，并由跨语言 OpenAPI、迁移、行为和管理端契约门禁持续保证 Go、Java、Python 一致。Schema 在 1.0 前保持实验状态。
 
@@ -43,6 +45,8 @@ query -> plan -> preview -> apply -> verify
 go test ./...
 go vet ./...
 go run ./cmd/scaffold-agent doctor --json
+go run ./cmd/scaffold-agent conformance --json
+go run ./cmd/scaffold-agent benchmark --json
 go run ./cmd/scaffold-agent query --topic support
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service --blueprint scaffold.yaml
@@ -86,7 +90,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python-mysql --blueprint scaffold.yaml
 ```
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[跨 Agent 兼容性](docs/agent-conformance.zh-CN.md)、[Token 基准](docs/token-benchmarks.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。
 
 ## 许可证
 

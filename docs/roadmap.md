@@ -108,7 +108,10 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M8 — Cross-agent conformance
 
-Codex, Claude Code, Kimi, GLM, DeepSeek, and generic MCP conformance plus measured token benchmarks.
+- [x] Codex/OpenAI GPT, Claude Code, Kimi K3, GLM-hosted, DeepSeek-hosted, and generic MCP protocol profiles.
+- [x] Credential-free initialization, tool-schema, pagination, apply-token, transaction, verification, and result-fallback conformance.
+- [x] Model-neutral context budgets with reproducible Go, Java, and Python full-suite benchmarks.
+- [x] Host-specific installation guidance without model SDK or API-key coupling.
 
 ## M9 — 1.0 release
 

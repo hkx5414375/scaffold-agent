@@ -11,9 +11,11 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/hkx5414375/scaffold-agent/internal/agentcompat"
 	"github.com/hkx5414375/scaffold-agent/internal/engine"
 	"github.com/hkx5414375/scaffold-agent/internal/mcp"
 	"github.com/hkx5414375/scaffold-agent/internal/result"
+	"github.com/hkx5414375/scaffold-agent/internal/tokenbench"
 	"github.com/hkx5414375/scaffold-agent/internal/version"
 )
 
@@ -33,6 +35,8 @@ Commands:
   rollback  Restore one fully applied transaction
   recover   Restore one interrupted transaction
   mcp       Run the newline-delimited JSON-RPC STDIO server
+  conformance  Run credential-free cross-Agent MCP conformance
+  benchmark  Measure bounded Engine context against generated source
   doctor    Check the local development environment
   version   Print build version information
   help      Show this help
@@ -58,6 +62,10 @@ func RunIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runVersion(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
+	case "conformance":
+		return runConformance(args[1:], stdout, stderr)
+	case "benchmark":
+		return runBenchmark(args[1:], stdout, stderr)
 	case "query", "validate", "plan", "preview", "apply", "verify", "result", "rollback", "recover":
 		return runEngineCommand(args[0], args[1:], stdout, stderr)
 	case "mcp":
@@ -76,6 +84,64 @@ func RunIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		return 2
 	}
+}
+
+func runBenchmark(args []string, stdout, stderr io.Writer) int {
+	jsonOutput, err := parseJSONFlag(args)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+	report := tokenbench.Run(context.Background(), version.Current().Version)
+	if jsonOutput {
+		if code := writeJSON(stdout, stderr, report); code != 0 {
+			return code
+		}
+	} else {
+		for _, scenario := range report.Scenarios {
+			_, _ = fmt.Fprintf(
+				stdout,
+				"%-30s %-6s source=%d engine=%d reduction=%.2f%%\n",
+				scenario.ID,
+				scenario.Status,
+				scenario.SourceContextEstimatedTokens,
+				scenario.EngineWorkflowEstimatedTokens,
+				scenario.ReductionPercent,
+			)
+		}
+	}
+	if report.Status != "ok" {
+		return 1
+	}
+	return 0
+}
+
+func runConformance(args []string, stdout, stderr io.Writer) int {
+	jsonOutput, err := parseJSONFlag(args)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 2
+	}
+	report := agentcompat.Run(context.Background(), version.Current().Version)
+	if jsonOutput {
+		if code := writeJSON(stdout, stderr, report); code != 0 {
+			return code
+		}
+	} else {
+		for _, profile := range report.Profiles {
+			_, _ = fmt.Fprintf(
+				stdout,
+				"%-26s %-6s %4d estimated tokens\n",
+				profile.Profile.ID,
+				profile.Status,
+				profile.EstimatedContextTokens,
+			)
+		}
+	}
+	if report.Status != "ok" {
+		return 1
+	}
+	return 0
 }
 
 func writeEnvelope(stdout, stderr io.Writer, envelope result.Envelope) int {
