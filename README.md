@@ -29,6 +29,10 @@ query -> plan -> preview -> apply -> verify
 
 The reference workflow generates a Go modular monolith with PostgreSQL or MySQL, session and token authentication, RBAC, audit logging, one stateful CRUD module, and an optional administration UI.
 
+## Install the Engine
+
+Stable releases provide signed amd64/arm64 archives for Linux, macOS, and Windows, SHA-256 checksums, a CycloneDX SBOM, and Sigstore-backed provenance. Verify the download before putting the single `scaffold-agent` executable on `PATH`. See [installation](docs/installation.md), [host integration](integrations/README.md), and the [upgrade policy](docs/upgrade-policy.md).
+
 ## Development
 
 Prerequisites:
@@ -90,7 +94,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python-mysql --blueprint scaffold.yaml
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [cross-Agent conformance](docs/agent-conformance.md), [token benchmarks](docs/token-benchmarks.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [cross-Agent conformance](docs/agent-conformance.md), [token benchmarks](docs/token-benchmarks.md), [support policy](SUPPORT.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.
 
 ## License
 

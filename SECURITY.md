@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The project is pre-1.0. Security fixes are applied to the latest development release until a stable support policy is published.
+The latest stable 1.x minor receives security fixes. The immediately previous minor receives security fixes for six months after its successor is released. See [SUPPORT.md](SUPPORT.md).
 
 ## Reporting a vulnerability
 

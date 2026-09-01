@@ -42,6 +42,25 @@ jobs:
         run: go run ./cmd/scaffold-agent conformance --json
       - name: Token budgets
         run: go run ./cmd/scaffold-agent benchmark --json
+      - name: Reproducible release candidate
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_date="$(git show -s --format=%cI "$GITHUB_SHA")"
+          for output in dist-a dist-b; do
+            go run ./scripts/release \
+              --root . \
+              --output "$output" \
+              --version 1.0.0-ci \
+              --commit "$GITHUB_SHA" \
+              --date "$build_date"
+            (cd "$output" && sha256sum -c SHA256SUMS)
+          done
+          diff -u dist-a/SHA256SUMS dist-b/SHA256SUMS
+          mkdir package-check
+          tar -xzf dist-a/scaffold-agent_1.0.0-ci_linux_amd64.tar.gz -C package-check
+          package-check/scaffold-agent version --json
 
   generated-admin:
     name: Shared generated Vue administration

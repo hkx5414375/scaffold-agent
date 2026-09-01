@@ -29,6 +29,10 @@ query -> plan -> preview -> apply -> verify
 
 当前参考流程可以生成 Go 模块化单体 + PostgreSQL 或 MySQL，包含 Session 与 Token 双认证、RBAC、审计日志、一个状态型 CRUD 模块，以及可选的管理端。
 
+## 安装 Engine
+
+正式包提供 Linux、macOS、Windows 的 amd64/arm64 归档、SHA-256 校验和、CycloneDX SBOM 和 Sigstore 来源证明。下载后应先验签，再把单个 `scaffold-agent` 可执行文件加入 `PATH`。详见[安装与验签](docs/installation.zh-CN.md)、[宿主接入](integrations/README.md)和[升级策略](docs/upgrade-policy.zh-CN.md)。
+
 ## 本地开发
 
 前置环境：
@@ -90,7 +94,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service
 go run ./cmd/scaffold-agent validate --project-root ./examples/inventory-service-python-mysql --blueprint scaffold.yaml
 ```
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[跨 Agent 兼容性](docs/agent-conformance.zh-CN.md)、[Token 基准](docs/token-benchmarks.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[跨 Agent 兼容性](docs/agent-conformance.zh-CN.md)、[Token 基准](docs/token-benchmarks.zh-CN.md)、[支持策略](docs/support.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。
 
 ## 许可证
 

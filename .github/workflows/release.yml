@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Signed cross-platform release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ "$(git cat-file -t "$GITHUB_REF_NAME")" != "tag" ]]; then
+            echo "release tag must be annotated" >&2
+            exit 1
+          fi
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_ENV"
+      - name: Verify source release gates
+        run: |
+          go test ./...
+          go vet ./...
+          go run ./cmd/scaffold-agent conformance --json
+          go run ./cmd/scaffold-agent benchmark --json
+      - name: Build deterministic release assets
+        run: >-
+          go run ./scripts/release
+          --root .
+          --output dist
+          --version "$VERSION"
+          --commit "$GITHUB_SHA"
+          --date "$BUILD_DATE"
+      - name: Verify checksums and packaged Linux binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS)
+          mkdir package-check
+          tar -xzf "dist/scaffold-agent_${VERSION}_linux_amd64.tar.gz" -C package-check
+          package-check/scaffold-agent version --json
+          package-check/scaffold-agent doctor --json
+          package-check/scaffold-agent conformance --json
+          package-check/scaffold-agent benchmark --json
+      - name: Sign build provenance
+        id: provenance
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Sign archive SBOM statement
+        id: sbom
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+          sbom-path: dist/scaffold-agent_${{ env.VERSION }}_sbom.cdx.json
+      - name: Add portable Sigstore bundles
+        shell: bash
+        run: |
+          cp "${{ steps.provenance.outputs.bundle-path }}" \
+            "dist/scaffold-agent_${VERSION}_provenance.sigstore.json"
+          cp "${{ steps.sbom.outputs.bundle-path }}" \
+            "dist/scaffold-agent_${VERSION}_sbom.sigstore.json"
+      - name: Verify published attestation identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh attestation verify
+          "dist/scaffold-agent_${VERSION}_linux_amd64.tar.gz"
+          --repo "$GITHUB_REPOSITORY"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          dist/*
+          --verify-tag
+          --generate-notes
+          --title "Scaffold Agent $GITHUB_REF_NAME"

@@ -15,6 +15,8 @@ Thank you for helping build Scaffold Agent.
 go test ./...
 go vet ./...
 go run ./cmd/scaffold-agent doctor --json
+go run ./cmd/scaffold-agent conformance --json
+go run ./cmd/scaffold-agent benchmark --json
 ```
 
 Run `gofmt` on every changed Go file. Commits should use a concise imperative subject. Public APIs follow semantic versioning once their schema is marked stable.

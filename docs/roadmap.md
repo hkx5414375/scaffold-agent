@@ -115,4 +115,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M9 — 1.0 release
 
-Signed cross-platform releases, stable public schemas, installation guides, upgrade policy, and long-term support documentation.
+- [x] Deterministic Linux, macOS, and Windows archives for amd64 and arm64 with checksums, release manifest, and CycloneDX SBOM.
+- [x] OIDC/Sigstore build provenance and SBOM attestations in the tag-only release workflow.
+- [x] Frozen 1.x public schema snapshots and wire identifiers with explicit compatibility rules.
+- [x] Bilingual installation, verification, release, upgrade, security, and support documentation.
+- [ ] Publish and independently verify the signed `v1.0.0` GitHub release.
