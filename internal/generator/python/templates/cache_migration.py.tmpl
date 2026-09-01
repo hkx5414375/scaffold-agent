@@ -1,0 +1,61 @@
+"""Create the bounded cross-instance application cache."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
+
+revision: str = "000220_application_cache"
+down_revision: str | None = {{if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create scoped JSON storage and bounded-cleanup indexes."""
+    op.create_table(
+        "application_cache",
+        sa.Column("scope_key", sa.String(length=191), nullable=False),
+        sa.Column("cache_key", sa.String(length=191), nullable=False),
+        sa.Column("organization_id", sa.String(length=191), nullable={{if .Tenancy}}False{{else}}True{{end}}),
+        sa.Column(
+            "value_json",
+            sa.JSON().with_variant(JSONB(), "postgresql"),
+            nullable=False,
+        ),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+{{- if .Tenancy}}
+        sa.ForeignKeyConstraint(
+            ["organization_id"],
+            ["organizations.id"],
+            name="fk_application_cache_organization_id_organizations",
+            ondelete="CASCADE",
+        ),
+{{- end}}
+        sa.PrimaryKeyConstraint("scope_key", "cache_key"),
+    )
+    op.create_index(
+        "ix_application_cache_expires_at",
+        "application_cache",
+        ["expires_at"],
+        unique=False,
+    )
+{{- if .Tenancy}}
+    op.create_index(
+        "ix_application_cache_organization_key",
+        "application_cache",
+        ["organization_id", "cache_key"],
+        unique=False,
+    )
+{{- end}}
+
+
+def downgrade() -> None:
+    """Remove cache data and indexes."""
+{{- if .Tenancy}}
+    op.drop_index("ix_application_cache_organization_key", table_name="application_cache")
+{{- end}}
+    op.drop_index("ix_application_cache_expires_at", table_name="application_cache")
+    op.drop_table("application_cache")

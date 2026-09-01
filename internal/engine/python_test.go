@@ -69,51 +69,71 @@ func TestPythonMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
 }
 
 func TestPythonPostgreSQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", true, false, false)
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", true, false, false, false)
 }
 
 func TestPythonMySQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", true, false, false)
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", true, false, false, false)
 }
 
 func TestPythonPostgreSQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", true, false, false)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", true, false, false, false)
 }
 
 func TestPythonMySQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, false, false)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, false, false, false)
 }
 
 func TestPythonPostgreSQLNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, true, false)
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, true, false, false)
 }
 
 func TestPythonMySQLNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, true, false)
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, true, false, false)
 }
 
 func TestPythonPostgreSQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, true, false)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, true, false, false)
 }
 
 func TestPythonMySQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, true, false)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, true, false, false)
 }
 
 func TestPythonPostgreSQLFilesPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, false, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, false, true, false)
 }
 
 func TestPythonMySQLFilesPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, true, false)
 }
 
 func TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", false, false, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", false, false, true, false)
 }
 
 func TestPythonMySQLTenantFilesPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, true, false)
+}
+
+func TestPythonPostgreSQLCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, false, false, true)
+}
+
+func TestPythonMySQLCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, true)
+}
+
+func TestPythonPostgreSQLTenantCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, false, false, true)
+}
+
+func TestPythonMySQLTenantCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, false, true)
+}
+
+func TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, false, true, true)
 }
 
 func runGeneratedPythonReference(
@@ -133,6 +153,7 @@ func runGeneratedPythonReference(
 		false,
 		false,
 		false,
+		false,
 	)
 }
 
@@ -145,6 +166,7 @@ func runGeneratedPythonReferenceOptions(
 	jobs bool,
 	notifications bool,
 	files bool,
+	cache bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -179,7 +201,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -204,6 +226,11 @@ CAPABILITIES
 	}
 	if files {
 		capabilities += `    - name: file-assets
+      version: 0.1.0
+`
+	}
+	if cache {
+		capabilities += `    - name: application-cache
       version: 0.1.0
 `
 	}
@@ -276,6 +303,9 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
+	if cache {
+		wantChanges += 7
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -297,6 +327,9 @@ CAPABILITIES
 	}
 	if files && plannedData.CapabilityLock["file-assets"] != "0.1.0" {
 		t.Fatalf("Plan() file assets lock = %#v", plannedData.CapabilityLock)
+	}
+	if cache && plannedData.CapabilityLock["application-cache"] != "0.1.0" {
+		t.Fatalf("Plan() cache lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

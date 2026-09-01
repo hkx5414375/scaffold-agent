@@ -540,6 +540,76 @@ func TestGenerateFileAssetsComposeWithTenantLifecycleAndAdministration(t *testin
 	}
 }
 
+func TestGenerateApplicationCacheForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: cacheOwner, Version: cacheVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[cacheOwner] != cacheVersion || len(generated.Outputs) != 36 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/cache/models.py",
+				"src/demo_service/cache/repository.py",
+				"src/demo_service/cache/service.py",
+				"src/demo_service/migration/versions/000220_application_cache.py",
+				"tests/test_application_cache.py",
+				"tests/test_application_cache_database.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != cacheOwner {
+					t.Errorf("Generate(%s) did not produce cache-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			if !strings.Contains(mainSource, "CacheService(SQLAlchemyCacheRepository(engine))") {
+				t.Errorf("Generate(%s) does not compose the cache service", database)
+			}
+			contract := string(outputContent(generated, "api/openapi.yaml"))
+			if strings.Contains(contract, "/api/v1/cache") {
+				t.Errorf("Generate(%s) exposes a generic cache endpoint", database)
+			}
+		})
+	}
+}
+
+func TestGenerateApplicationCacheComposesAfterFileAssets(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: filesOwner, Version: filesVersion},
+		{Name: cacheOwner, Version: cacheVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 100 || generated.CapabilityLock[cacheOwner] != cacheVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000220_application_cache.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000210_file_assets"`) ||
+		!strings.Contains(migration, "organizations.id") {
+		t.Fatalf("generated cache migration does not follow tenant files:\n%s", migration)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

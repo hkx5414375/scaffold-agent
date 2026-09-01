@@ -1,0 +1,140 @@
+"""Application cache bounds, scope, expiry, and failure contracts."""
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from {{.PackageName}}.cache.models import CacheEntry, CacheError, CacheErrorKind
+from {{.PackageName}}.cache.repository import CacheMiss
+from {{.PackageName}}.cache.service import (
+    MAXIMUM_TTL,
+    MAXIMUM_VALUE_BYTES,
+    CacheService,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, str], CacheEntry] = {}
+        self.failure: Exception | None = None
+
+    def set(self, entry: CacheEntry) -> None:
+        self._fail()
+        self.entries[(entry.scope_key, entry.key)] = entry
+
+    def get(self, scope_key: str, key: str, now: datetime) -> CacheEntry:
+        self._fail()
+        entry = self.entries.get((scope_key, key))
+        if entry is None or entry.expires_at <= now:
+            raise CacheMiss()
+        return entry
+
+    def delete(self, scope_key: str, key: str) -> None:
+        self._fail()
+        self.entries.pop((scope_key, key), None)
+
+    def purge_expired(self, now: datetime, limit: int) -> int:
+        self._fail()
+        keys = sorted(
+            (key for key, entry in self.entries.items() if entry.expires_at <= now),
+            key=lambda key: self.entries[key].expires_at,
+        )[:limit]
+        for key in keys:
+            del self.entries[key]
+        return len(keys)
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+def test_set_get_expire_delete_and_purge() -> None:
+    clock = [NOW]
+    repository = MemoryRepository()
+    service = CacheService(repository, lambda: clock[0])
+    organization_id = {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}}
+    scope = {{if .Tenancy}}"organization-1"{{else}}"global"{{end}}
+
+    service.set(organization_id, " task:1 ", {"value": "cached"}, timedelta(hours=1))
+    assert repository.entries[(scope, "task:1")].value_json == '{"value":"cached"}'
+    assert service.get(organization_id, "task:1") == {"value": "cached"}
+    assert service.get_json(organization_id, "task:1") == '{"value":"cached"}'
+{{- if .Tenancy}}
+    with pytest.raises(CacheError) as cross_tenant:
+        service.get("organization-2", "task:1")
+    assert cross_tenant.value.kind == CacheErrorKind.MISS
+{{- else}}
+    assert service.get("different-ignored-value", "task:1") == {"value": "cached"}
+{{- end}}
+
+    service.set(organization_id, "expired", None, timedelta(seconds=1))
+    clock[0] += timedelta(seconds=2)
+    with pytest.raises(CacheError) as expired:
+        service.get(organization_id, "expired")
+    assert expired.value.kind == CacheErrorKind.MISS
+    assert service.purge_expired(100) == 1
+    service.delete(organization_id, "task:1")
+    service.delete(organization_id, "task:1")
+    assert repository.entries == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "ttl"),
+    [
+        ("", timedelta(minutes=1)),
+        ("unsafe\nkey", timedelta(minutes=1)),
+        ("界" * 64, timedelta(minutes=1)),
+        ("key", timedelta(0)),
+        ("key", MAXIMUM_TTL + timedelta(microseconds=1)),
+    ],
+)
+def test_invalid_keys_and_ttl_are_rejected(key: str, ttl: timedelta) -> None:
+    service = CacheService(MemoryRepository(), lambda: NOW)
+    with pytest.raises(CacheError) as failure:
+        service.set({{if .Tenancy}}"organization-1"{{else}}None{{end}}, key, "value", ttl)
+    assert failure.value.kind == CacheErrorKind.INVALID
+
+
+def test_invalid_values_scope_clock_and_purge_are_rejected() -> None:
+    service = CacheService(MemoryRepository(), lambda: NOW)
+    organization_id = {{if .Tenancy}}"organization-1"{{else}}None{{end}}
+    with pytest.raises(CacheError):
+        service.set(
+            organization_id,
+            "large",
+            "x" * (MAXIMUM_VALUE_BYTES + 1),
+            timedelta(minutes=1),
+        )
+    with pytest.raises(CacheError):
+        service.set(organization_id, "unsupported", object(), timedelta(minutes=1))
+{{- if .Tenancy}}
+    with pytest.raises(CacheError):
+        service.set("", "key", "value", timedelta(minutes=1))
+{{- end}}
+    with pytest.raises(CacheError):
+        CacheService(MemoryRepository(), lambda: NOW.replace(tzinfo=None)).set(
+            organization_id,
+            "key",
+            "value",
+            timedelta(minutes=1),
+        )
+    with pytest.raises(CacheError):
+        service.purge_expired(10_001)
+
+
+def test_repository_failures_are_generic_and_expected_failures_survive() -> None:
+    repository = MemoryRepository()
+    service = CacheService(repository, lambda: NOW)
+    organization_id = {{if .Tenancy}}"organization-1"{{else}}None{{end}}
+    repository.failure = RuntimeError("database secret")
+    with pytest.raises(CacheError) as storage:
+        service.set(organization_id, "key", "value", timedelta(minutes=1))
+    assert storage.value.kind == CacheErrorKind.STORAGE
+    assert "database secret" not in storage.value.message
+
+    repository.failure = CacheError(CacheErrorKind.INVALID, "known")
+    with pytest.raises(CacheError) as expected:
+        service.delete(organization_id, "key")
+    assert expected.value.kind == CacheErrorKind.INVALID

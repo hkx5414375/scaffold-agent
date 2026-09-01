@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from {{.PackageName}}.config import get_settings
+{{if .Cache}}from {{.PackageName}}.cache.repository import SQLAlchemyCacheRepository
+from {{.PackageName}}.cache.service import CacheService
+{{end}}from {{.PackageName}}.config import get_settings
 from {{.PackageName}}.database import DatabaseProbe, create_database_engine
 from {{.PackageName}}.errors import install_error_handlers
 {{- if .Files}}
@@ -61,6 +63,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
+{{- if .Cache}}
+        app.state.cache_service = CacheService(SQLAlchemyCacheRepository(engine))
+{{- end}}
 {{- if .Files}}
         app.state.file_asset_service = FileAssetService(
             SQLAlchemyFileAssetRepository(engine),

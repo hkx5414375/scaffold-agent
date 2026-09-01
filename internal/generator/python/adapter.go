@@ -37,6 +37,8 @@ const (
 	notificationsVersion    = "0.1.0"
 	filesOwner              = "file-assets"
 	filesVersion            = "0.1.0"
+	cacheOwner              = "application-cache"
+	cacheVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -129,6 +131,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: cacheOwner, Version: cacheVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Cross-instance bounded JSON cache with tenant-aware database storage.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var pythonKeywords = map[string]struct{}{
@@ -153,6 +165,7 @@ type templateData struct {
 	Jobs                  bool
 	Notifications         bool
 	Files                 bool
+	Cache                 bool
 	MigrationImports      string
 	MigrationMetadata     string
 	JobAdmin              bool
@@ -320,6 +333,16 @@ var fileTemplates = map[string]string{
 	"tests/test_file_assets_storage.py":                    "templates/test_file_assets_storage.py.tmpl",
 }
 
+var cacheTemplates = map[string]string{
+	"src/package/cache/__init__.py":                              "templates/cache_init.py.tmpl",
+	"src/package/cache/models.py":                                "templates/cache_models.py.tmpl",
+	"src/package/cache/repository.py":                            "templates/cache_repository.py.tmpl",
+	"src/package/cache/service.py":                               "templates/cache_service.py.tmpl",
+	"src/package/migration/versions/000220_application_cache.py": "templates/cache_migration.py.tmpl",
+	"tests/test_application_cache.py":                            "templates/test_application_cache.py.tmpl",
+	"tests/test_application_cache_database.py":                   "templates/test_application_cache_database.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -377,6 +400,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobsEnabled := false
 	notificationsEnabled := false
 	filesEnabled := false
+	cacheEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -394,6 +418,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == filesOwner {
 			filesEnabled = true
+		}
+		if pack.Metadata.Name == cacheOwner {
+			cacheEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -421,11 +448,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Jobs:                  jobsEnabled,
 		Notifications:         notificationsEnabled,
 		Files:                 filesEnabled,
+		Cache:                 cacheEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+3,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+3,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -501,6 +529,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[replacePackage(path, data.PackageName)] = renderTarget{
 				Template: templatePath,
 				Owner:    filesOwner,
+			}
+		}
+	}
+	if cacheEnabled {
+		for path, templatePath := range cacheTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    cacheOwner,
 			}
 		}
 	}
@@ -580,6 +616,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if filesEnabled {
 		capabilityLock[filesOwner] = filesVersion
 	}
+	if cacheEnabled {
+		capabilityLock[cacheOwner] = cacheVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -600,6 +639,10 @@ func migrationModels(data templateData) (string, string) {
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")
 		metadata = append(metadata, "_files_metadata = file_models.file_assets.metadata")
+	}
+	if data.Cache {
+		imports = append(imports, "from "+data.PackageName+".cache import models as cache_models")
+		metadata = append(metadata, "_cache_metadata = cache_models.application_cache.metadata")
 	}
 	if data.Jobs {
 		imports = append(imports, "from "+data.PackageName+".jobs import models as job_models")

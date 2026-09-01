@@ -129,6 +129,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
     }
     assert files_imports.isdisjoint({"fastapi", "sqlalchemy", "pathlib"})
 {{- end}}
+{{- if .Cache}}
+
+    cache_tree = ast.parse((PACKAGE / "cache" / "service.py").read_text(encoding="utf-8"))
+    cache_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(cache_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert cache_imports.isdisjoint({"fastapi", "sqlalchemy", "redis"})
+{{- end}}
 
 
 def test_production_code_contains_no_print_calls() -> None:

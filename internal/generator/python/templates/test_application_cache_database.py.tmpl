@@ -1,0 +1,119 @@
+"""Application cache contracts for SQLite and the selected database."""
+
+import os
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine{{if .Tenancy}}, delete, insert{{end}}, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.cache.models import CacheError, CacheErrorKind, application_cache
+from {{.PackageName}}.cache.repository import SQLAlchemyCacheRepository
+from {{.PackageName}}.cache.service import CacheService
+from {{.PackageName}}.database import create_database_engine
+{{- if .Tenancy}}
+from {{.PackageName}}.identity.models import Principal, audit_events, roles, users
+{{- end}}
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    clock = [datetime.now(UTC)]
+    organization_id: str | None = None
+{{- if .Tenancy}}
+    user_id = "cache-user-" + suffix
+    email = suffix + "-cache@example.com"
+    with engine.begin() as connection:
+        if connection.execute(select(roles.c.code).where(roles.c.code == "admin")).first() is None:
+            connection.execute(insert(roles).values(code="admin", display_name="Administrator"))
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=clock[0],
+                updated_at=clock[0],
+            )
+        )
+    identity = Principal(user_id=user_id, email=email, role="admin", method="token")
+    organization_id = (
+        TenancyService(SQLAlchemyTenancyRepository(engine), lambda: clock[0])
+        .create("Cache " + suffix, identity)
+        .id
+    )
+{{- end}}
+    service = CacheService(SQLAlchemyCacheRepository(engine), lambda: clock[0])
+    key = "integration:" + suffix
+    expired_key = "expired:" + suffix
+    service.set(organization_id, key, {"value": "first"}, timedelta(hours=1))
+    assert service.get(organization_id, key) == {"value": "first"}
+    service.set(organization_id, key, {"value": "second"}, timedelta(hours=2))
+    assert service.get(organization_id, key) == {"value": "second"}
+{{- if .Tenancy}}
+    with pytest.raises(CacheError) as cross_tenant:
+        service.get("foreign-organization", key)
+    assert cross_tenant.value.kind == CacheErrorKind.MISS
+{{- end}}
+    service.set(organization_id, expired_key, {"value": "old"}, timedelta(seconds=1))
+    clock[0] += timedelta(seconds=2)
+    with pytest.raises(CacheError) as expired:
+        service.get(organization_id, expired_key)
+    assert expired.value.kind == CacheErrorKind.MISS
+    assert service.purge_expired(100) >= 1
+    service.delete(organization_id, key)
+    service.delete(organization_id, key)
+
+    with engine.connect() as connection:
+        remaining = connection.execute(
+            select(application_cache.c.cache_key).where(
+                application_cache.c.cache_key.in_([key, expired_key])
+            )
+        ).all()
+    assert remaining == []
+
+{{- if .Tenancy}}
+    with engine.begin() as connection:
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization_id
+            )
+        )
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+        connection.execute(delete(organizations).where(organizations.c.id == organization_id))
+        connection.execute(delete(users).where(users.c.id == user_id))
+{{- end}}
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

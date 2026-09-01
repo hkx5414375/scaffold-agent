@@ -1,0 +1,135 @@
+"""Bounded tenant-aware JSON cache use cases."""
+
+import json
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+
+from {{.PackageName}}.cache.models import CacheEntry, CacheError, CacheErrorKind
+from {{.PackageName}}.cache.repository import CacheMiss, CacheRepository
+
+MAXIMUM_VALUE_BYTES = 256 << 10
+MAXIMUM_TTL = timedelta(days=30)
+MAXIMUM_PURGE = 10_000
+
+
+class CacheService:
+    """Replica-coherent cache operations without an HTTP surface."""
+
+    def __init__(
+        self,
+        repository: CacheRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def set(self, organization_id: str | None, key: str, value: object, ttl: timedelta) -> None:
+        """Canonicalize and atomically replace one scoped JSON value."""
+        scope_key, normalized_key = _scope_key(organization_id, key)
+        if not isinstance(ttl, timedelta) or ttl <= timedelta(0) or ttl > MAXIMUM_TTL:
+            raise _invalid()
+        try:
+            encoded = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            expires_at = _now(self._clock) + ttl
+        except (OverflowError, TypeError, ValueError) as error:
+            raise _invalid() from error
+        if len(encoded.encode("utf-8")) > MAXIMUM_VALUE_BYTES:
+            raise _invalid()
+        try:
+            self._repository.set(CacheEntry(scope_key, normalized_key, encoded, expires_at))
+        except CacheError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+    def get_json(self, organization_id: str | None, key: str) -> str:
+        """Return one canonical unexpired JSON document."""
+        scope_key, normalized_key = _scope_key(organization_id, key)
+        try:
+            entry = self._repository.get(
+                scope_key,
+                normalized_key,
+                _now(self._clock),
+            )
+        except CacheMiss as error:
+            raise _miss() from error
+        except CacheError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return entry.value_json
+
+    def get(self, organization_id: str | None, key: str) -> object:
+        """Decode one unexpired value into independent Python JSON data."""
+        try:
+            return json.loads(self.get_json(organization_id, key))
+        except CacheError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise _storage() from error
+
+    def delete(self, organization_id: str | None, key: str) -> None:
+        """Idempotently invalidate one scoped key."""
+        scope_key, normalized_key = _scope_key(organization_id, key)
+        try:
+            self._repository.delete(scope_key, normalized_key)
+        except CacheError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+    def purge_expired(self, limit: int) -> int:
+        """Delete at most one explicitly bounded oldest-expiry batch."""
+        if limit < 1 or limit > MAXIMUM_PURGE:
+            raise _invalid()
+        try:
+            return self._repository.purge_expired(_now(self._clock), limit)
+        except CacheError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+
+def _scope_key(organization_id: str | None, key: str) -> tuple[str, str]:
+    normalized_key = _text(key)
+{{- if .Tenancy}}
+    scope_key = _text(organization_id or "")
+{{- else}}
+    del organization_id
+    scope_key = "global"
+{{- end}}
+    return scope_key, normalized_key
+
+
+def _text(value: str) -> str:
+    if any(not character.isprintable() for character in value):
+        raise _invalid()
+    normalized = value.strip()
+    if not normalized or len(normalized.encode("utf-8")) > 191:
+        raise _invalid()
+    return normalized
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _invalid() -> CacheError:
+    return CacheError(CacheErrorKind.INVALID, "cache input is invalid")
+
+
+def _miss() -> CacheError:
+    return CacheError(CacheErrorKind.MISS, "cache entry was not found")
+
+
+def _storage() -> CacheError:
+    return CacheError(CacheErrorKind.STORAGE, "cache storage is unavailable")

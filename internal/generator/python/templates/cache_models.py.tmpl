@@ -1,0 +1,68 @@
+"""Application cache records, failures, and table metadata."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
+
+from {{.PackageName}}.identity.models import metadata
+
+application_cache = sa.Table(
+    "application_cache",
+    metadata,
+    sa.Column("scope_key", sa.String(191), primary_key=True),
+    sa.Column("cache_key", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column(
+        "value_json",
+        sa.JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    ),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+sa.Index("ix_application_cache_expires_at", application_cache.c.expires_at)
+{{- if .Tenancy}}
+sa.Index(
+    "ix_application_cache_organization_key",
+    application_cache.c.organization_id,
+    application_cache.c.cache_key,
+)
+{{- end}}
+
+
+class CacheErrorKind(StrEnum):
+    """Stable internal cache failure categories."""
+
+    INVALID = "invalid"
+    MISS = "miss"
+    STORAGE = "storage"
+
+
+@dataclass(frozen=True, slots=True)
+class CacheError(Exception):
+    """Cache failure without database or payload disclosure."""
+
+    kind: CacheErrorKind
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class CacheEntry:
+    """One canonical JSON value and its absolute expiration."""
+
+    scope_key: str
+    key: str
+    value_json: str
+    expires_at: datetime

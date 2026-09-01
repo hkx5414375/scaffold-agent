@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}
 
 ## 环境要求
 
@@ -47,6 +47,11 @@ $env:SMTP_PASSWORD = "replace-me"
 {{end}}
 {{if .Files}}
 文件接口以流式方式接收最大 10 MiB 的单个 multipart 文件，保存 SHA-256 和租户范围元数据，不向 API 暴露内部存储键。`FILE_STORAGE_ROOT` 必须指向独立运行时目录；目录不能位于源码仓库内，也不能包含符号链接。元数据写入或文件删除失败时会执行跨资源补偿。
+{{end}}
+{{if .Cache}}
+`CacheService` 在 {{.Database.DisplayName}} 中保存跨进程一致的 JSON，租户项目按组织隔离，非租户项目固定使用 `global` 范围。键最多 191 字节，值最多 256 KiB，TTL 必须大于零且不超过 30 天；不存在、过期和跨租户读取统一返回 `CacheErrorKind.MISS`。`purge_expired` 每次最多清理 10,000 行。
+
+业务代码应使用稳定命名空间并在权威数据变更后主动失效，不得缓存凭据或生成通用缓存 HTTP 接口。需要 Redis 时只替换仓储适配器，并保留范围、大小、过期、Miss 和有界清理契约。
 {{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
@@ -110,6 +115,9 @@ uv run pytest
 {{end}}
 {{if .Files}}
 - `src/{{.PackageName}}/files`：租户范围文件元数据、事务仓储、用例和原子本地对象存储。
+{{end}}
+{{if .Cache}}
+- `src/{{.PackageName}}/cache`：跨实例 JSON 缓存用例、原子方言 Upsert 和有界过期清理。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。
