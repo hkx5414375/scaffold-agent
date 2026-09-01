@@ -6,6 +6,11 @@ from alembic import context
 from sqlalchemy import Connection, engine_from_config, pool
 
 from {{.PackageName}}.identity.models import metadata
+{{- if .Jobs}}
+from {{.PackageName}}.jobs import models as job_models
+
+_jobs_metadata = job_models.background_jobs.metadata
+{{- end}}
 {{- if .Tenancy}}
 {{- if .TenancyMembers}}
 from {{.PackageName}}.tenancy import member_models

@@ -1,0 +1,92 @@
+"""Durable background job records and SQLAlchemy metadata."""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import sqlalchemy as sa
+
+from {{.PackageName}}.identity.models import metadata
+
+background_jobs = sa.Table(
+    "background_jobs",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("scope_key", sa.String(191), nullable=False),
+    sa.Column("type", sa.String(128), nullable=False),
+    sa.Column("payload_json", sa.Text, nullable=False),
+    sa.Column("dedupe_key", sa.String(191), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("priority", sa.Integer, nullable=False),
+    sa.Column("attempts", sa.Integer, nullable=False),
+    sa.Column("max_attempts", sa.Integer, nullable=False),
+    sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("lease_owner", sa.String(128), nullable=True),
+    sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("last_error", sa.String(2000), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint(
+        "status IN ('queued', 'running', 'succeeded', 'retry', 'dead')",
+        name="background_jobs_status",
+    ),
+    sa.CheckConstraint("attempts >= 0", name="background_jobs_attempts"),
+    sa.CheckConstraint("max_attempts > 0", name="background_jobs_max_attempts"),
+    sa.UniqueConstraint(
+        "scope_key",
+        "type",
+        "dedupe_key",
+        name="uq_background_jobs_scope_type_dedupe",
+    ),
+)
+sa.Index(
+    "ix_background_jobs_claim",
+    background_jobs.c.status,
+    background_jobs.c.priority.desc(),
+    background_jobs.c.available_at,
+    background_jobs.c.created_at,
+    background_jobs.c.id,
+)
+sa.Index(
+    "ix_background_jobs_expired_lease", background_jobs.c.status, background_jobs.c.lease_until
+)
+{{- if .Tenancy}}
+sa.Index(
+    "ix_background_jobs_organization",
+    background_jobs.c.organization_id,
+    background_jobs.c.created_at.desc(),
+)
+{{- end}}
+
+
+@dataclass(frozen=True, slots=True)
+class Job:
+    """One public worker record plus internal idempotency coordinates."""
+
+    id: str
+    organization_id: str | None
+    type: str
+    payload_json: str
+    status: str
+    priority: int
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    lease_owner: str | None
+    lease_until: datetime | None
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+    scope_key: str
+    dedupe_key: str

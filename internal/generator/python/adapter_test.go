@@ -305,6 +305,74 @@ func TestOrganizationLifecycleUpgradePreservesPriorMigrations(t *testing.T) {
 	}
 }
 
+func TestGenerateDurableJobsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: jobsOwner, Version: jobsVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[jobsOwner] != jobsVersion || len(generated.Outputs) != 38 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/jobs/models.py",
+				"src/demo_service/jobs/repository.py",
+				"src/demo_service/jobs/service.py",
+				"src/demo_service/jobs/worker.py",
+				"src/demo_service/migration/versions/000200_background_jobs.py",
+				"tests/test_jobs.py",
+				"tests/test_jobs_database.py",
+				"tests/test_jobs_worker.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != jobsOwner {
+					t.Errorf("Generate(%s) did not produce jobs-owned %s", database, path)
+				}
+			}
+			readme := string(outputContent(generated, "README.md"))
+			if !strings.Contains(readme, "python -m demo_service.jobs.worker") ||
+				!strings.Contains(readme, "JobService.enqueue") {
+				t.Fatalf("Generate(%s) README does not document the independent worker:\n%s", database, readme)
+			}
+		})
+	}
+}
+
+func TestGenerateDurableJobsComposesWithTenantLifecycle(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: jobsOwner, Version: jobsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 90 {
+		t.Fatalf("Generate() output count = %d, want 90", len(generated.Outputs))
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000200_background_jobs.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000070_tenancy_lifecycle"`) ||
+		!strings.Contains(migration, "organizations.id") {
+		t.Fatalf("generated tenant job migration is not lifecycle-aware:\n%s", migration)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

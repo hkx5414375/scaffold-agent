@@ -1,0 +1,243 @@
+"""Transactional durable background job persistence."""
+
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import and_, insert, or_, select, update
+from sqlalchemy.engine import Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
+
+from {{.PackageName}}.jobs.models import Job, background_jobs
+
+
+class JobNotFound(Exception):
+    """No job is currently available or the identifier is absent."""
+
+
+class JobLeaseLost(Exception):
+    """Mutation no longer owns a live running-job lease."""
+
+
+class JobRepository(Protocol):
+    """Persistence seam for durable queue behavior."""
+
+    def enqueue(self, job: Job) -> Job: ...
+
+    def lease_next(self, worker_id: str, now: datetime, lease_until: datetime) -> Job: ...
+
+    def extend_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> None: ...
+
+    def complete(self, job_id: str, worker_id: str, now: datetime) -> None: ...
+
+    def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        message: str,
+        retry_at: datetime,
+        dead: bool,
+        now: datetime,
+    ) -> None: ...
+
+
+class SQLAlchemyJobRepository:
+    """SQLAlchemy adapter using unique keys, row locks, and lease predicates."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def enqueue(self, job: Job) -> Job:
+        with self._engine.begin() as connection:
+            try:
+                with connection.begin_nested():
+                    connection.execute(insert(background_jobs).values(**_values(job)))
+            except IntegrityError:
+                pass
+            row = (
+                connection.execute(
+                    select(background_jobs).where(
+                        background_jobs.c.scope_key == job.scope_key,
+                        background_jobs.c.type == job.type,
+                        background_jobs.c.dedupe_key == job.dedupe_key,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise RuntimeError("job enqueue did not produce an idempotent row")
+        return _map_job(row)
+
+    def lease_next(self, worker_id: str, now: datetime, lease_until: datetime) -> Job:
+        result: Job | None = None
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(background_jobs.c.id)
+                .where(
+                    or_(
+                        and_(
+                            background_jobs.c.status.in_(["queued", "retry"]),
+                            background_jobs.c.available_at <= now,
+                        ),
+                        and_(
+                            background_jobs.c.status == "running",
+                            background_jobs.c.lease_until <= now,
+                        ),
+                    )
+                )
+                .order_by(
+                    background_jobs.c.priority.desc(),
+                    background_jobs.c.available_at,
+                    background_jobs.c.created_at,
+                    background_jobs.c.id,
+                )
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            ).first()
+            if row is not None:
+                job_id = str(row[0])
+                connection.execute(
+                    update(background_jobs)
+                    .where(background_jobs.c.id == job_id)
+                    .values(
+                        status="running",
+                        attempts=background_jobs.c.attempts + 1,
+                        lease_owner=worker_id,
+                        lease_until=lease_until,
+                        updated_at=now,
+                        completed_at=None,
+                    )
+                )
+                leased = (
+                    connection.execute(
+                        select(background_jobs).where(background_jobs.c.id == job_id)
+                    )
+                    .mappings()
+                    .one()
+                )
+                result = _map_job(leased)
+        if result is None:
+            raise JobNotFound()
+        return result
+
+    def extend_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> None:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(background_jobs)
+                .where(*_lease_predicate(job_id, worker_id, now))
+                .values(lease_until=lease_until, updated_at=now)
+            ).rowcount
+        _require_lease(changed)
+
+    def complete(self, job_id: str, worker_id: str, now: datetime) -> None:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(background_jobs)
+                .where(*_lease_predicate(job_id, worker_id, now))
+                .values(
+                    status="succeeded",
+                    lease_owner=None,
+                    lease_until=None,
+                    last_error=None,
+                    completed_at=now,
+                    updated_at=now,
+                )
+            ).rowcount
+        _require_lease(changed)
+
+    def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        message: str,
+        retry_at: datetime,
+        dead: bool,
+        now: datetime,
+    ) -> None:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(background_jobs)
+                .where(*_lease_predicate(job_id, worker_id, now))
+                .values(
+                    status="dead" if dead else "retry",
+                    available_at=retry_at,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_error=message,
+                    completed_at=now if dead else None,
+                    updated_at=now,
+                )
+            ).rowcount
+        _require_lease(changed)
+
+
+def _lease_predicate(job_id: str, worker_id: str, now: datetime) -> tuple[ColumnElement[bool], ...]:
+    return (
+        background_jobs.c.id == job_id,
+        background_jobs.c.status == "running",
+        background_jobs.c.lease_owner == worker_id,
+        background_jobs.c.lease_until > now,
+    )
+
+
+def _require_lease(changed: int | None) -> None:
+    if changed != 1:
+        raise JobLeaseLost()
+
+
+def _values(job: Job) -> dict[str, object]:
+    return {
+        "id": job.id,
+        "organization_id": job.organization_id,
+        "scope_key": job.scope_key,
+        "type": job.type,
+        "payload_json": job.payload_json,
+        "dedupe_key": job.dedupe_key,
+        "status": job.status,
+        "priority": job.priority,
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+        "available_at": job.available_at,
+        "lease_owner": job.lease_owner,
+        "lease_until": job.lease_until,
+        "last_error": job.last_error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "completed_at": job.completed_at,
+    }
+
+
+def _map_job(row: RowMapping) -> Job:
+    organization_id = row["organization_id"]
+    return Job(
+        id=str(row["id"]),
+        organization_id=str(organization_id) if organization_id is not None else None,
+        type=str(row["type"]),
+        payload_json=str(row["payload_json"]),
+        status=str(row["status"]),
+        priority=int(row["priority"]),
+        attempts=int(row["attempts"]),
+        max_attempts=int(row["max_attempts"]),
+        available_at=cast(datetime, row["available_at"]),
+        lease_owner=cast(str | None, row["lease_owner"]),
+        lease_until=cast(datetime | None, row["lease_until"]),
+        last_error=cast(str | None, row["last_error"]),
+        created_at=cast(datetime, row["created_at"]),
+        updated_at=cast(datetime, row["updated_at"]),
+        completed_at=cast(datetime | None, row["completed_at"]),
+        scope_key=str(row["scope_key"]),
+        dedupe_key=str(row["dedupe_key"]),
+    )

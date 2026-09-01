@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
@@ -30,7 +30,7 @@ Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会
 
 项目能力选择必须锁定精确版本；传递依赖可以声明语义版本范围。Engine 会在全部约束下确定性选择最高兼容版本，并把精确结果写入能力锁。AI 应复用该锁，不要自行重新推导依赖版本。
 
-选择 `background-jobs` `0.1.0` 后，生成项目会加入数据库可靠队列和独立的 `cmd/worker`。业务能力应通过 `jobs.Service` 提交有大小限制的 JSON 载荷和稳定幂等键；Handler 可以从 `jobs.Job` 读取已经确认的组织标识，必须响应 Context 取消，并且不得记录载荷内容。任务抢占、租约续期、指数重试、死信和过期租约恢复均由能力包提供，AI 不需要重复编写。
+选择 `background-jobs` `0.1.0` 后，Go、Java、Python 生成项目都会加入数据库可靠队列和独立 Worker。业务能力应通过 Go 的 `jobs.Service.Enqueue`、Java 的 `JobService.enqueue` 或 Python 的 `JobService.enqueue` 提交最大 1 MiB 的 JSON 载荷和稳定幂等键。Handler 可以从任务记录读取已经确认的组织标识，并且必须响应 Go Context、Java 线程中断或 Python `threading.Event` 取消信号；任何实现都不得记录载荷内容。任务抢占、租约续期、指数重试、死信和过期租约恢复均由能力包提供，AI 不需要重复编写。
 
 选择 `notifications` `0.1.0` 会自动解析并锁定 `background-jobs` `0.1.x`。业务代码通过生成的通知服务传入稳定幂等键（Go 为 `notifications.Service.EnqueueEmail`，Java 为 `NotificationService.enqueueEmail`），不得额外暴露一个无需业务授权的“任意发邮件”接口。Worker 只接受启用 TLS 的 SMTP 运行时配置。排队中的邮件正文属于数据库内的敏感持久化数据；AI 不得把 SMTP 凭据写入 Blueprint、源码、任务载荷或模型上下文。
 

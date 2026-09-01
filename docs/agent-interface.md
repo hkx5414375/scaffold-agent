@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, organization tenancy 0.3, the shared Vue/Element Plus administration project, and locked quality gates. Unsupported Python capability selections return explicit stable generation errors and never produce partial output.
+The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, organization tenancy 0.3, durable background jobs 0.1, the shared Vue/Element Plus administration project, and locked quality gates. Unsupported Python capability selections return explicit stable generation errors and never produce partial output.
 
 See `examples/task-service/scaffold.yaml` for the Go business-module contract and
 `examples/task-service-java/scaffold.yaml` for the Java-equivalent contract.
@@ -63,11 +63,13 @@ that satisfies the complete graph and records every exact result in the capabili
 lock. Agents should reuse that lock instead of re-resolving dependency versions.
 
 Selecting `background-jobs` version `0.1.0` generates a database-backed queue and
-an independent `cmd/worker`. Feature code should enqueue a bounded JSON payload
-through `jobs.Service` with a stable idempotency key. Handlers receive the verified
-organization identifier on `jobs.Job`; they must honor context cancellation and
-must never log the payload. Retry, lease renewal, dead-letter decisions, and
-expired-lease recovery are Engine-provided behavior, not code for an agent to copy.
+an independent worker for Go, Java, or Python. Feature code should enqueue a JSON
+payload of at most 1 MiB with a stable idempotency key through Go `jobs.Service.Enqueue`,
+Java `JobService.enqueue`, or Python `JobService.enqueue`. Handlers receive the verified
+organization identifier on the job and must honor Go context cancellation, Java
+thread interruption, or the Python `threading.Event` cancellation signal. They must
+never log the payload. Retry, lease renewal, dead-letter decisions, and expired-lease
+recovery are Engine-provided behavior, not code for an agent to copy.
 
 Selecting `notifications` version `0.1.0` automatically resolves
 `background-jobs` `0.1.x`. Feature code calls the generated notification service

@@ -90,6 +90,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
     }
     assert business_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
+{{- if .Jobs}}
+
+    jobs_tree = ast.parse((PACKAGE / "jobs" / "service.py").read_text(encoding="utf-8"))
+    jobs_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(jobs_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert jobs_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
 
 
 def test_production_code_contains_no_print_calls() -> None:

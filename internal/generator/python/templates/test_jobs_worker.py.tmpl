@@ -1,0 +1,85 @@
+"""Background worker dispatch contracts."""
+
+import threading
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from test_jobs import MemoryRepository
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.jobs.service import JobService
+from {{.PackageName}}.jobs.worker import JobWorker, noop_handler, worker_identifier
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_worker_completes_success_and_records_failure() -> None:
+    repository = MemoryRepository()
+    service = JobService(repository, lambda: NOW)
+    successful = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        "system.noop",
+        {},
+        "success",
+    )
+    handled: list[str] = []
+
+    def success(job: Job, cancelled: threading.Event) -> None:
+        assert not cancelled.is_set()
+        handled.append(job.id)
+
+    worker = JobWorker(
+        service,
+        "worker-1",
+        [("system.noop", success)],
+        timedelta(seconds=1),
+    )
+    worker.run_once()
+    assert handled == [successful.id]
+
+    repository.jobs.clear()
+    failed = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        "system.fail",
+        {},
+        "failure",
+        max_attempts=1,
+    )
+
+    def failure(_job: Job, _cancelled: threading.Event) -> None:
+        raise RuntimeError("expected")
+
+    JobWorker(service, "worker-1", [("system.fail", failure)], timedelta(seconds=1)).run_once()
+    assert repository.failed == (
+        failed.id,
+        "background job handler failed: RuntimeError",
+        True,
+    )
+
+
+def test_worker_rejects_duplicate_handlers_and_fails_unknown_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryRepository()
+    service = JobService(repository, lambda: NOW)
+
+    def handler(_job: Job, _cancelled: threading.Event) -> None:
+        return None
+
+    with pytest.raises(ValueError, match="background worker input is invalid"):
+        JobWorker(service, "worker-1", [("system.noop", handler), ("system.noop", handler)])
+
+    unknown = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        "system.unknown",
+        {},
+        max_attempts=1,
+    )
+    JobWorker(service, "worker-1", [("system.noop", noop_handler)]).run_once()
+    assert repository.failed == (
+        unknown.id,
+        "background job handler failed: LookupError",
+        True,
+    )
+    monkeypatch.setenv("WORKER_ID", " configured-worker ")
+    assert worker_identifier() == "configured-worker"

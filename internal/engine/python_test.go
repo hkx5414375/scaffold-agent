@@ -68,12 +68,47 @@ func TestPythonMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReference(t, "mysql", true, false, "0.3.0")
 }
 
+func TestPythonPostgreSQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", true)
+}
+
+func TestPythonMySQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", true)
+}
+
+func TestPythonPostgreSQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", true)
+}
+
+func TestPythonMySQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true)
+}
+
 func runGeneratedPythonReference(
 	t *testing.T,
 	database string,
 	business bool,
 	admin bool,
 	organizationTenancyVersion string,
+) {
+	t.Helper()
+	runGeneratedPythonReferenceOptions(
+		t,
+		database,
+		business,
+		admin,
+		organizationTenancyVersion,
+		false,
+	)
+}
+
+func runGeneratedPythonReferenceOptions(
+	t *testing.T,
+	database string,
+	business bool,
+	admin bool,
+	organizationTenancyVersion string,
+	jobs bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -108,9 +143,11 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
+	if organizationTenancyVersion != "" || jobs {
+		capabilities = "  capabilities:\n"
+	}
 	if organizationTenancyVersion != "" {
-		capabilities = `  capabilities:
-    - name: organization-tenancy
+		capabilities += `    - name: organization-tenancy
       version: TENANCY_VERSION
 `
 		capabilities = strings.ReplaceAll(
@@ -118,6 +155,11 @@ CAPABILITIES
 			"TENANCY_VERSION",
 			organizationTenancyVersion,
 		)
+	}
+	if jobs {
+		capabilities += `    - name: background-jobs
+      version: 0.1.0
+`
 	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
@@ -176,6 +218,9 @@ CAPABILITIES
 			}
 		}
 	}
+	if jobs {
+		wantChanges += 9
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -188,6 +233,9 @@ CAPABILITIES
 	if organizationTenancyVersion != "" &&
 		plannedData.CapabilityLock["organization-tenancy"] != organizationTenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
+	}
+	if jobs && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+		t.Fatalf("Plan() jobs lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

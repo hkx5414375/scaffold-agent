@@ -31,6 +31,8 @@ const (
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
 	tenancyLifecycleVersion = "0.3.0"
+	jobsOwner               = "background-jobs"
+	jobsVersion             = "0.1.0"
 )
 
 //go:embed all:templates
@@ -92,6 +94,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobsOwner, Version: jobsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Durable idempotent jobs with leases, bounded retry, and an independent worker.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var pythonKeywords = map[string]struct{}{
@@ -113,6 +125,7 @@ type templateData struct {
 	Tenancy               bool
 	TenancyMembers        bool
 	TenancyLifecycle      bool
+	Jobs                  bool
 	Files                 bool
 	JobAdmin              bool
 	Approvals             bool
@@ -241,6 +254,18 @@ var tenancyLifecycleTemplates = map[string]string{
 	"tests/test_tenancy_lifecycle_database.py":                   "templates/test_tenancy_lifecycle_database.py.tmpl",
 }
 
+var jobsTemplates = map[string]string{
+	"src/package/jobs/__init__.py":                             "templates/jobs_init.py.tmpl",
+	"src/package/jobs/models.py":                               "templates/jobs_models.py.tmpl",
+	"src/package/jobs/repository.py":                           "templates/jobs_repository.py.tmpl",
+	"src/package/jobs/service.py":                              "templates/jobs_service.py.tmpl",
+	"src/package/jobs/worker.py":                               "templates/jobs_worker.py.tmpl",
+	"src/package/migration/versions/000200_background_jobs.py": "templates/jobs_migration.py.tmpl",
+	"tests/test_jobs.py":                                       "templates/test_jobs.py.tmpl",
+	"tests/test_jobs_database.py":                              "templates/test_jobs_database.py.tmpl",
+	"tests/test_jobs_worker.py":                                "templates/test_jobs_worker.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -295,6 +320,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
 	tenancyLifecycleEnabled := false
+	jobsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -303,6 +329,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion ||
 				pack.Metadata.Version == tenancyLifecycleVersion
 			tenancyLifecycleEnabled = pack.Metadata.Version == tenancyLifecycleVersion
+		}
+		if pack.Metadata.Name == jobsOwner {
+			jobsEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -327,10 +356,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Tenancy:               tenancyEnabled,
 		TenancyMembers:        tenancyMembersEnabled,
 		TenancyLifecycle:      tenancyLifecycleEnabled,
+		Jobs:                  jobsEnabled,
 	}
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+2,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+2,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -382,6 +412,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[replacePackage(path, data.PackageName)] = renderTarget{
 				Template: templatePath,
 				Owner:    tenancyOwner,
+			}
+		}
+	}
+	if jobsEnabled {
+		for path, templatePath := range jobsTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    jobsOwner,
 			}
 		}
 	}
@@ -444,6 +482,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if tenancyEnabled {
 		capabilityLock[tenancyOwner] = selectedTenancyVersion
+	}
+	if jobsEnabled {
+		capabilityLock[jobsOwner] = jobsVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

@@ -1,0 +1,222 @@
+"""Durable background job validation, leasing, and retry use cases."""
+
+import json
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from uuid import uuid4
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.jobs.repository import JobLeaseLost, JobNotFound, JobRepository
+
+TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
+MAXIMUM_PAYLOAD_BYTES = 1 << 20
+DEFAULT_MAX_ATTEMPTS = 8
+MAXIMUM_RETRY_DELAY = timedelta(minutes=15)
+
+
+class JobErrorKind(StrEnum):
+    """Stable background job failure categories."""
+
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    LEASE_LOST = "lease_lost"
+
+
+@dataclass(frozen=True, slots=True)
+class JobError(Exception):
+    """Expected queue failure without payload disclosure."""
+
+    kind: JobErrorKind
+    message: str
+
+
+class JobService:
+    """Queue use cases independent from a worker loop and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: JobRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def enqueue(
+        self,
+        organization_id: str | None,
+        job_type: str,
+        payload: object,
+        idempotency_key: str = "",
+        priority: int = 0,
+        max_attempts: int = 0,
+    ) -> Job:
+        """Idempotently enqueue one bounded JSON job."""
+        normalized_organization = (organization_id or "").strip()
+{{- if .Tenancy}}
+        if (
+            not normalized_organization
+            or len(normalized_organization) > 191
+            or _has_control(normalized_organization)
+        ):
+            raise _invalid()
+{{- else}}
+        normalized_organization = ""
+{{- end}}
+        normalized_type = job_type.strip()
+        normalized_key = idempotency_key.strip()
+        if (
+            TYPE_PATTERN.fullmatch(normalized_type) is None
+            or len(normalized_key) > 128
+            or _has_control(normalized_key)
+            or priority < -100
+            or priority > 100
+        ):
+            raise _invalid()
+        attempts_limit = DEFAULT_MAX_ATTEMPTS if max_attempts == 0 else max_attempts
+        if attempts_limit < 1 or attempts_limit > 100:
+            raise _invalid()
+        try:
+            payload_json = json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError) as error:
+            raise _invalid() from error
+        if not payload_json or len(payload_json.encode("utf-8")) > MAXIMUM_PAYLOAD_BYTES:
+            raise _invalid()
+        now = self._clock()
+        job_id = str(uuid4())
+        scope_key = normalized_organization or "global"
+        dedupe_key = "key:" + normalized_key if normalized_key else "job:" + job_id
+        try:
+            return self._repository.enqueue(
+                Job(
+                    id=job_id,
+                    organization_id=normalized_organization or None,
+                    type=normalized_type,
+                    payload_json=payload_json,
+                    status="queued",
+                    priority=priority,
+                    attempts=0,
+                    max_attempts=attempts_limit,
+                    available_at=now,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_error=None,
+                    created_at=now,
+                    updated_at=now,
+                    completed_at=None,
+                    scope_key=scope_key,
+                    dedupe_key=dedupe_key,
+                )
+            )
+        except JobNotFound as error:
+            raise JobError(JobErrorKind.NOT_FOUND, "background job was not found") from error
+
+    def lease_next(self, worker_id: str, lease_duration: timedelta) -> Job:
+        """Claim the next available or expired job."""
+        normalized_worker = _lease_input(worker_id, lease_duration)
+        now = self._clock()
+        try:
+            return self._repository.lease_next(
+                normalized_worker,
+                now,
+                now + lease_duration,
+            )
+        except JobNotFound as error:
+            raise JobError(JobErrorKind.NOT_FOUND, "background job was not found") from error
+
+    def extend_lease(self, job_id: str, worker_id: str, lease_duration: timedelta) -> None:
+        """Renew one currently owned live lease."""
+        normalized_job, normalized_worker = _job_and_worker(job_id, worker_id)
+        _lease_input(normalized_worker, lease_duration)
+        now = self._clock()
+        try:
+            self._repository.extend_lease(
+                normalized_job,
+                normalized_worker,
+                now,
+                now + lease_duration,
+            )
+        except JobLeaseLost as error:
+            raise _lease_lost() from error
+
+    def complete(self, job_id: str, worker_id: str) -> None:
+        """Complete one currently owned live lease."""
+        normalized_job, normalized_worker = _job_and_worker(job_id, worker_id)
+        try:
+            self._repository.complete(normalized_job, normalized_worker, self._clock())
+        except JobLeaseLost as error:
+            raise _lease_lost() from error
+
+    def fail(self, job: Job, worker_id: str, cause: Exception) -> None:
+        """Retry or dead-letter one failed leased job without persisting payload details."""
+        normalized_job, normalized_worker = _job_and_worker(job.id, worker_id)
+        now = self._clock()
+        dead = job.attempts >= job.max_attempts
+        message = "background job handler failed: " + type(cause).__name__[:1900]
+        try:
+            self._repository.fail(
+                normalized_job,
+                normalized_worker,
+                message,
+                now + retry_delay(job.attempts),
+                dead,
+                now,
+            )
+        except JobLeaseLost as error:
+            raise _lease_lost() from error
+
+
+def retry_delay(attempt: int) -> timedelta:
+    """Return five-second exponential retry delay capped at fifteen minutes."""
+    if attempt >= 9:
+        return MAXIMUM_RETRY_DELAY
+    seconds = 5 * (2 ** max(0, attempt - 1))
+    return min(timedelta(seconds=seconds), MAXIMUM_RETRY_DELAY)
+
+
+def _lease_input(worker_id: str, duration: timedelta) -> str:
+    normalized = worker_id.strip()
+    if (
+        not normalized
+        or len(normalized) > 128
+        or _has_control(normalized)
+        or duration < timedelta(seconds=1)
+        or duration > timedelta(hours=1)
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _job_and_worker(job_id: str, worker_id: str) -> tuple[str, str]:
+    normalized_job = job_id.strip()
+    normalized_worker = worker_id.strip()
+    if (
+        not normalized_job
+        or len(normalized_job) > 191
+        or _has_control(normalized_job)
+        or not normalized_worker
+        or len(normalized_worker) > 128
+        or _has_control(normalized_worker)
+    ):
+        raise _invalid()
+    return normalized_job, normalized_worker
+
+
+def _invalid() -> JobError:
+    return JobError(JobErrorKind.INVALID, "background job input is invalid")
+
+
+def _lease_lost() -> JobError:
+    return JobError(JobErrorKind.LEASE_LOST, "background job lease was lost")
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)

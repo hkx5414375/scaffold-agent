@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}
 
 ## 环境要求
 
@@ -18,6 +18,17 @@ $env:COOKIE_SECURE = "false"
 uv sync --frozen --all-groups
 uv run uvicorn {{.PackageName}}.main:app --reload --port 8080
 ```
+{{if .Jobs}}
+另开一个终端启动独立任务 Worker：
+
+```powershell
+$env:DATABASE_URL = "{{.Database.ExampleURL}}"
+$env:WORKER_ID = "worker-local-1"
+uv run python -m {{.PackageName}}.jobs.worker
+```
+
+业务代码通过 `JobService.enqueue` 提交最大 1 MiB 的 JSON 载荷和稳定幂等键。Worker 会处理抢占、续租、指数退避、死信和过期租约回收；Handler 必须响应传入的取消事件，不得记录载荷。
+{{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
 
@@ -71,6 +82,9 @@ uv run pytest
 - `src/{{.PackageName}}/migration`：不可跳号的数据库迁移。
 {{if .Tenancy}}
 - `src/{{.PackageName}}/tenancy`：组织创建、成员范围授权和租户上下文。
+{{end}}
+{{if .Jobs}}
+- `src/{{.PackageName}}/jobs`：可靠任务领域、事务仓储、服务和独立 Worker。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

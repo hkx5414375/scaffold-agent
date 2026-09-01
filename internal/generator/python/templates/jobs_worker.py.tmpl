@@ -1,0 +1,143 @@
+"""Independent polling worker with lease heartbeat and cancellation signal."""
+
+import logging
+import os
+import socket
+import threading
+from collections.abc import Callable, Iterable
+from datetime import timedelta
+from time import sleep
+
+from {{.PackageName}}.config import get_settings
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
+from {{.PackageName}}.jobs.service import JobError, JobErrorKind, JobService
+from {{.PackageName}}.migrations import upgrade_database
+
+Handler = Callable[[Job, threading.Event], None]
+DEFAULT_LEASE_DURATION = timedelta(seconds=30)
+LOGGER = logging.getLogger(__name__)
+
+
+class JobWorker:
+    """Dispatch leased jobs while renewing ownership every third of the lease."""
+
+    def __init__(
+        self,
+        service: JobService,
+        worker_id: str,
+        handlers: Iterable[tuple[str, Handler]],
+        lease_duration: timedelta = DEFAULT_LEASE_DURATION,
+    ) -> None:
+        normalized_worker = worker_id.strip()
+        entries = list(handlers)
+        indexed = dict(entries)
+        if (
+            not normalized_worker
+            or len(normalized_worker) > 128
+            or not indexed
+            or len(indexed) != len(entries)
+            or any(not job_type or handler is None for job_type, handler in indexed.items())
+        ):
+            raise ValueError("background worker input is invalid")
+        self._service = service
+        self._worker_id = normalized_worker
+        self._handlers = indexed
+        self._lease_duration = lease_duration
+
+    def run_once(self) -> None:
+        """Lease and dispatch at most one job."""
+        job = self._service.lease_next(self._worker_id, self._lease_duration)
+        handler = self._handlers.get(job.type)
+        if handler is None:
+            self._service.fail(job, self._worker_id, LookupError("unregistered job type"))
+            return
+        failure = self._execute_with_heartbeat(job, handler)
+        if failure is None:
+            self._service.complete(job.id, self._worker_id)
+        else:
+            self._service.fail(job, self._worker_id, failure)
+
+    def _execute_with_heartbeat(self, job: Job, handler: Handler) -> Exception | None:
+        stop = threading.Event()
+        cancelled = threading.Event()
+        heartbeat_failure: list[Exception] = []
+
+        def heartbeat() -> None:
+            interval = max(self._lease_duration.total_seconds() / 3, 0.01)
+            while not stop.wait(interval):
+                try:
+                    self._service.extend_lease(job.id, self._worker_id, self._lease_duration)
+                except Exception as error:
+                    heartbeat_failure.append(error)
+                    cancelled.set()
+                    return
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name="job-heartbeat-" + self._worker_id,
+            daemon=True,
+        )
+        thread.start()
+        handler_failure: Exception | None = None
+        try:
+            handler(job, cancelled)
+        except Exception as error:
+            handler_failure = error
+        finally:
+            stop.set()
+            thread.join(timeout=max(self._lease_duration.total_seconds(), 1))
+        if heartbeat_failure:
+            return heartbeat_failure[0]
+        return handler_failure
+
+
+def noop_handler(_job: Job, _cancelled: threading.Event) -> None:
+    """Harmless extension example for worker wiring."""
+
+
+def worker_identifier() -> str:
+    """Return a bounded stable process worker identifier."""
+    configured = os.getenv("WORKER_ID", "").strip()
+    value = configured or f"{socket.gethostname() or 'worker'}-{os.getpid()}"
+    return value[:128]
+
+
+def run_forever(service: JobService) -> None:
+    """Poll until process interruption without logging job payloads."""
+    worker = JobWorker(service, worker_identifier(), [("system.noop", noop_handler)])
+    LOGGER.info("background worker started worker_id=%s", worker_identifier())
+    while True:
+        try:
+            worker.run_once()
+        except JobError as error:
+            if error.kind != JobErrorKind.NOT_FOUND:
+                LOGGER.error(
+                    "background job iteration failed worker_id=%s kind=%s",
+                    worker_identifier(),
+                    error.kind,
+                )
+            sleep(1)
+        except Exception as error:
+            LOGGER.error(
+                "background job iteration failed worker_id=%s type=%s",
+                worker_identifier(),
+                type(error).__name__,
+            )
+            sleep(1)
+
+
+def main() -> None:
+    """Migrate and run the worker independently from the HTTP process."""
+    settings = get_settings()
+    engine = create_database_engine(settings.database_url)
+    try:
+        upgrade_database(engine)
+        run_forever(JobService(SQLAlchemyJobRepository(engine)))
+    finally:
+        engine.dispose()
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,10 @@ from {{.PackageName}}.health import router as health_router
 from {{.PackageName}}.identity.http import router as identity_router
 from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
 from {{.PackageName}}.identity.service import IdentityService
+{{- if .Jobs}}
+from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
+from {{.PackageName}}.jobs.service import JobService
+{{- end}}
 from {{.PackageName}}.migrations import upgrade_database
 from {{.PackageName}}.tenancy.http import router as tenancy_router
 {{- if .TenancyLifecycle}}
@@ -45,6 +49,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
+{{- if .Jobs}}
+        app.state.job_service = JobService(SQLAlchemyJobRepository(engine))
+{{- end}}
         app.state.tenancy_service = TenancyService(SQLAlchemyTenancyRepository(engine))
 {{- if .TenancyLifecycle}}
         app.state.tenancy_lifecycle_service = TenancyLifecycleService(

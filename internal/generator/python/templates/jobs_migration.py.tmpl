@@ -1,0 +1,92 @@
+"""Create the durable background job queue."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000200_background_jobs"
+down_revision: str | None = {{if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create idempotency, lease, retry, and dead-letter persistence."""
+    op.create_table(
+        "background_jobs",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("organization_id", sa.String(length=191), nullable={{if .Tenancy}}False{{else}}True{{end}}),
+        sa.Column("scope_key", sa.String(length=191), nullable=False),
+        sa.Column("type", sa.String(length=128), nullable=False),
+        sa.Column("payload_json", sa.Text(), nullable=False),
+        sa.Column("dedupe_key", sa.String(length=191), nullable=False),
+        sa.Column("status", sa.String(length=16), nullable=False),
+        sa.Column("priority", sa.Integer(), nullable=False),
+        sa.Column("attempts", sa.Integer(), nullable=False),
+        sa.Column("max_attempts", sa.Integer(), nullable=False),
+        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("lease_owner", sa.String(length=128), nullable=True),
+        sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("last_error", sa.String(length=2000), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+{{- if .Tenancy}}
+        sa.ForeignKeyConstraint(
+            ["organization_id"],
+            ["organizations.id"],
+            name="fk_background_jobs_organization_id_organizations",
+            ondelete="CASCADE",
+        ),
+{{- end}}
+        sa.CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'retry', 'dead')",
+            name="ck_background_jobs_background_jobs_status",
+        ),
+        sa.CheckConstraint(
+            "attempts >= 0",
+            name="ck_background_jobs_background_jobs_attempts",
+        ),
+        sa.CheckConstraint(
+            "max_attempts > 0",
+            name="ck_background_jobs_background_jobs_max_attempts",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "scope_key",
+            "type",
+            "dedupe_key",
+            name="uq_background_jobs_scope_type_dedupe",
+        ),
+    )
+    op.create_index(
+        "ix_background_jobs_claim",
+        "background_jobs",
+        ["status", sa.text("priority DESC"), "available_at", "created_at", "id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_background_jobs_expired_lease",
+        "background_jobs",
+        ["status", "lease_until"],
+        unique=False,
+    )
+{{- if .Tenancy}}
+    op.create_index(
+        "ix_background_jobs_organization",
+        "background_jobs",
+        ["organization_id", sa.text("created_at DESC")],
+        unique=False,
+    )
+{{- end}}
+
+
+def downgrade() -> None:
+    """Remove the durable job queue."""
+{{- if .Tenancy}}
+    op.drop_index("ix_background_jobs_organization", table_name="background_jobs")
+{{- end}}
+    op.drop_index("ix_background_jobs_expired_lease", table_name="background_jobs")
+    op.drop_index("ix_background_jobs_claim", table_name="background_jobs")
+    op.drop_table("background_jobs")

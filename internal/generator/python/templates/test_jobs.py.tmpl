@@ -1,0 +1,140 @@
+"""Durable background job service contracts."""
+
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.jobs.repository import JobLeaseLost, JobNotFound
+from {{.PackageName}}.jobs.service import JobError, JobErrorKind, JobService, retry_delay
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.jobs: dict[tuple[str, str, str], Job] = {}
+        self.leased: Job | None = None
+        self.failure: Exception | None = None
+        self.failed: tuple[str, str, bool] | None = None
+
+    def enqueue(self, job: Job) -> Job:
+        key = (job.scope_key, job.type, job.dedupe_key)
+        return self.jobs.setdefault(key, job)
+
+    def lease_next(self, worker_id: str, now: datetime, lease_until: datetime) -> Job:
+        del now
+        if self.failure is not None:
+            raise self.failure
+        if not self.jobs:
+            raise JobNotFound()
+        job = next(iter(self.jobs.values()))
+        self.leased = replace(
+            job,
+            status="running",
+            attempts=job.attempts + 1,
+            lease_owner=worker_id,
+            lease_until=lease_until,
+        )
+        return self.leased
+
+    def extend_lease(
+        self,
+        job_id: str,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> None:
+        del job_id, worker_id, now, lease_until
+        if self.failure is not None:
+            raise self.failure
+
+    def complete(self, job_id: str, worker_id: str, now: datetime) -> None:
+        del job_id, worker_id, now
+        if self.failure is not None:
+            raise self.failure
+
+    def fail(
+        self,
+        job_id: str,
+        worker_id: str,
+        message: str,
+        retry_at: datetime,
+        dead: bool,
+        now: datetime,
+    ) -> None:
+        del worker_id, retry_at, now
+        if self.failure is not None:
+            raise self.failure
+        self.failed = (job_id, message, dead)
+
+
+def test_enqueue_is_scoped_bounded_and_idempotent() -> None:
+    repository = MemoryRepository()
+    service = JobService(repository, lambda: NOW)
+
+    first = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}},
+        "system.noop",
+        {"ok": True},
+        "request-1",
+        priority=10,
+    )
+    second = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}"ignored"{{end}},
+        "system.noop",
+        {"ok": True},
+        "request-1",
+        priority=10,
+    )
+
+    assert second.id == first.id
+    assert first.scope_key == {{if .Tenancy}}"organization-1"{{else}}"global"{{end}}
+{{- if .Tenancy}}
+    assert first.organization_id == "organization-1"
+{{- else}}
+    assert first.organization_id is None
+{{- end}}
+    assert first.payload_json == '{"ok":true}'
+    assert first.max_attempts == 8
+
+
+def test_leases_failures_and_retry_delay_are_stable() -> None:
+    repository = MemoryRepository()
+    service = JobService(repository, lambda: NOW)
+    job = service.enqueue(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        "system.noop",
+        {},
+        max_attempts=1,
+    )
+    leased = service.lease_next("worker-1", timedelta(seconds=30))
+    assert leased.attempts == 1
+    service.extend_lease(job.id, "worker-1", timedelta(seconds=30))
+    service.fail(leased, "worker-1", ValueError("secret payload detail"))
+    assert repository.failed == (job.id, "background job handler failed: ValueError", True)
+    assert retry_delay(1) == timedelta(seconds=5)
+    assert retry_delay(3) == timedelta(seconds=20)
+    assert retry_delay(100) == timedelta(minutes=15)
+
+    repository.failure = JobLeaseLost()
+    with pytest.raises(JobError) as lost:
+        service.complete(job.id, "worker-1")
+    assert lost.value.kind == JobErrorKind.LEASE_LOST
+
+
+def test_invalid_inputs_and_empty_queue_are_rejected() -> None:
+    repository = MemoryRepository()
+    service = JobService(repository, lambda: NOW)
+    with pytest.raises(JobError):
+        service.enqueue({{if .Tenancy}}None{{else}}"ignored"{{end}}, "Invalid Type", object())
+    with pytest.raises(JobError):
+        service.enqueue(
+            {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+            "system.noop",
+            {"large": "x" * (1 << 20)},
+        )
+    with pytest.raises(JobError) as empty:
+        service.lease_next("worker-1", timedelta(seconds=30))
+    assert empty.value.kind == JobErrorKind.NOT_FOUND
