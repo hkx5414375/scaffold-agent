@@ -184,23 +184,10 @@ func buildTarget(ctx context.Context, options Options, working string, target Ta
 	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
 		return Artifact{}, fmt.Errorf("create target staging directory: %w", err)
 	}
-	linkerFlags := strings.Join([]string{
-		"-s", "-w",
-		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.Version=" + options.Version,
-		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.Commit=" + options.Commit,
-		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.BuildDate=" + options.BuildDate.Format(time.RFC3339),
-	}, " ")
 	command := exec.CommandContext(
 		ctx,
 		"go",
-		"build",
-		"-trimpath",
-		"-buildvcs=true",
-		"-ldflags",
-		linkerFlags,
-		"-o",
-		binaryPath,
-		"./cmd/scaffold-agent",
+		releaseBuildArguments(options, binaryPath)...,
 	)
 	command.Dir = options.Root
 	command.Env = releaseEnvironment(os.Environ(), target)
@@ -231,6 +218,29 @@ func buildTarget(ctx context.Context, options Options, working string, target Ta
 		return Artifact{}, err
 	}
 	return Artifact{File: file, OS: target.OS, Arch: target.Arch}, nil
+}
+
+func releaseBuildArguments(options Options, binaryPath string) []string {
+	linkerFlags := strings.Join([]string{
+		"-s", "-w",
+		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.Version=" + options.Version,
+		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.Commit=" + options.Commit,
+		"-X", "github.com/hkx5414375/scaffold-agent/internal/version.BuildDate=" + options.BuildDate.Format(time.RFC3339),
+	}, " ")
+	return []string{
+		"build",
+		"-trimpath",
+		// The release output is intentionally inside the repository. Embedding
+		// ambient VCS dirty state would make the first target differ from later
+		// targets and from a second reproducibility build. Provenance is supplied
+		// explicitly through the immutable linker values above and the manifest.
+		"-buildvcs=false",
+		"-ldflags",
+		linkerFlags,
+		"-o",
+		binaryPath,
+		"./cmd/scaffold-agent",
+	}
 }
 
 type archiveEntry struct {

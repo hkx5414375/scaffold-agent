@@ -8,9 +8,33 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReleaseBuildUsesExplicitProvenanceWithoutAmbientVCSState(t *testing.T) {
+	options := Options{
+		Version:   "1.0.0",
+		Commit:    "0123456789abcdef0123456789abcdef01234567",
+		BuildDate: time.Date(2026, time.September, 2, 1, 2, 3, 0, time.UTC),
+	}
+	arguments := releaseBuildArguments(options, "scaffold-agent")
+	joined := strings.Join(arguments, " ")
+	for _, fragment := range []string{
+		"-buildvcs=false",
+		"internal/version.Version=1.0.0",
+		"internal/version.Commit=" + options.Commit,
+		"internal/version.BuildDate=2026-09-02T01:02:03Z",
+	} {
+		if !strings.Contains(joined, fragment) {
+			t.Errorf("release build arguments do not contain %q: %s", fragment, joined)
+		}
+	}
+	if strings.Contains(joined, "-buildvcs=true") {
+		t.Fatalf("release build arguments embed ambient VCS state: %s", joined)
+	}
+}
 
 func TestArchivesAreDeterministicAndContainOrderedFiles(t *testing.T) {
 	t.Parallel()
