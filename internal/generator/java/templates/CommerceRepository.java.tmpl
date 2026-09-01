@@ -1,0 +1,113 @@
+package {{.PackageName}}.commerce;
+
+import {{.PackageName}}.commerce.CommerceModels.Campaign;
+import {{.PackageName}}.commerce.CommerceModels.Cart;
+import {{.PackageName}}.commerce.CommerceModels.Coupon;
+import {{.PackageName}}.commerce.CommerceModels.Line;
+import {{.PackageName}}.commerce.CommerceModels.Order;
+import {{.PackageName}}.identity.AuditEvent;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface CommerceRepository {
+
+    Optional<Cart> cart(String scope, String customerId, String currency);
+
+    Cart putLine(CartLineCommand command);
+
+    Cart removeLine(
+            String scope,
+            String customerId,
+            String currency,
+            String productId,
+            long version,
+            Instant now);
+
+    Optional<Promotion> promotion(
+            String scope, String currency, String couponCode, long subtotalMinor, Instant now);
+
+    Optional<Order> replayCheckout(
+            String scope,
+            String customerId,
+            String key,
+            String currency,
+            String couponCode,
+            long cartVersion);
+
+    Order checkout(CheckoutCommand command);
+
+    Optional<Order> getOrder(String scope, String customerId, String id);
+
+    PageResult<Order> listOrders(
+            String scope, String customerId, String cursor, int limit);
+
+    Order applyPayment(String providerReference, String eventId, String status, Instant now);
+
+    Order transitionOrder(OrderTransition command);
+
+    Order refund(RefundCommand command);
+
+    void createCampaign(Campaign campaign, AuditEvent audit);
+
+    Campaign transitionCampaign(CampaignTransition command);
+
+    void createCoupon(Coupon coupon, AuditEvent audit);
+
+    PageResult<Campaign> listCampaigns(String scope, String cursor, int limit);
+
+    record PageResult<T>(List<T> items, String nextCursor) {
+
+        public PageResult {
+            items = List.copyOf(items);
+        }
+    }
+
+    record Promotion(Campaign campaign, Coupon coupon) {}
+
+    record CartLineCommand(
+            String cartId,
+            String scope,
+            String customerId,
+            String currency,
+            Line line,
+            long version,
+            Instant now) {}
+
+    record CheckoutCommand(
+            Order order,
+            String cartId,
+            long cartVersion,
+            String idempotencyKey,
+            Campaign campaign,
+            Coupon coupon,
+            AuditEvent audit) {}
+
+    record OrderTransition(
+            String scope,
+            String id,
+            long version,
+            String fromStatus,
+            String toStatus,
+            String reference,
+            Instant now,
+            AuditEvent audit) {}
+
+    record RefundCommand(
+            String scope,
+            String orderId,
+            long amountMinor,
+            String idempotencyKey,
+            String providerRefundReference,
+            Instant now,
+            AuditEvent audit) {}
+
+    record CampaignTransition(
+            String scope,
+            String id,
+            long version,
+            String fromStatus,
+            String toStatus,
+            Instant now,
+            AuditEvent audit) {}
+}

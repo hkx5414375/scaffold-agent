@@ -26,6 +26,9 @@ server:
   shutdown: graceful
 scaffold:
   cookie-secure: ${COOKIE_SECURE:true}
+{{- if .Commerce}}
+  commerce-sandbox-enabled: ${COMMERCE_SANDBOX_ENABLED:false}
+{{- end}}
 {{- if .Files}}
   files:
     root: ${FILE_STORAGE_ROOT}

@@ -1,0 +1,78 @@
+package {{.PackageName}}.commerce;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.stereotype.Component;
+
+@Component
+public final class SandboxPaymentGateway implements PaymentGateway {
+
+    public static final String REQUIRES_ACTION = "requires_action";
+    public static final String SUCCEEDED = "succeeded";
+    public static final String FAILED = "failed";
+
+    private final Map<String, String> states = new ConcurrentHashMap<>();
+
+    @Override
+    public Intent createIntent(
+            String orderId, long amountMinor, String currency, String idempotencyKey) {
+        String reference = "sandbox_" + digest(orderId + "|" + idempotencyKey).substring(0, 32);
+        states.putIfAbsent(reference, REQUIRES_ACTION);
+        return new Intent("sandbox", reference, states.get(reference));
+    }
+
+    @Override
+    public String lookup(String providerReference) {
+        String status = states.get(providerReference);
+        if (status == null) {
+            throw notFound();
+        }
+        return status;
+    }
+
+    @Override
+    public String refund(
+            String providerReference, long amountMinor, String idempotencyKey) {
+        if (!SUCCEEDED.equals(states.get(providerReference))) {
+            throw conflict();
+        }
+        return "sandbox_refund_"
+                + digest(providerReference + "|" + amountMinor + "|" + idempotencyKey)
+                        .substring(0, 32);
+    }
+
+    public void complete(String providerReference, String status) {
+        if (!SUCCEEDED.equals(status) && !FAILED.equals(status)) {
+            throw invalid();
+        }
+        if (!states.replace(providerReference, REQUIRES_ACTION, status)
+                && !status.equals(states.get(providerReference))) {
+            throw conflict();
+        }
+    }
+
+    private static String digest(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is required", exception);
+        }
+    }
+
+    private static CommerceException invalid() {
+        return new CommerceException(CommerceException.Kind.INVALID, "payment state is invalid");
+    }
+
+    private static CommerceException notFound() {
+        return new CommerceException(CommerceException.Kind.NOT_FOUND, "payment was not found");
+    }
+
+    private static CommerceException conflict() {
+        return new CommerceException(CommerceException.Kind.CONFLICT, "payment state conflicts");
+    }
+}

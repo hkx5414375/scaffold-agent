@@ -1,0 +1,12 @@
+package {{.PackageName}}.commerce;
+
+public interface PaymentGateway {
+
+    Intent createIntent(String orderId, long amountMinor, String currency, String idempotencyKey);
+
+    String lookup(String providerReference);
+
+    String refund(String providerReference, long amountMinor, String idempotencyKey);
+
+    record Intent(String provider, String providerReference, String status) {}
+}

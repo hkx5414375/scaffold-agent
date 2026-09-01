@@ -58,6 +58,8 @@ const (
 	crmVersion              = "0.1.0"
 	inventoryOwner          = "erp-inventory"
 	inventoryVersion        = "0.1.0"
+	commerceOwner           = "commerce-operations"
+	commerceVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -95,6 +97,7 @@ type databaseData struct {
 	CustomerMigrationTemplate         string
 	CRMMigrationTemplate              string
 	InventoryMigrationTemplate        string
+	CommerceMigrationTemplate         string
 }
 
 var databases = map[string]databaseData{
@@ -120,6 +123,7 @@ var databases = map[string]databaseData{
 		CustomerMigrationTemplate:         "templates/customer_accounts_postgresql.sql.tmpl",
 		CRMMigrationTemplate:              "templates/crm_postgresql.sql.tmpl",
 		InventoryMigrationTemplate:        "templates/inventory_postgresql.sql.tmpl",
+		CommerceMigrationTemplate:         "templates/commerce_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -143,6 +147,7 @@ var databases = map[string]databaseData{
 		CustomerMigrationTemplate:         "templates/customer_accounts_mysql.sql.tmpl",
 		CRMMigrationTemplate:              "templates/crm_mysql.sql.tmpl",
 		InventoryMigrationTemplate:        "templates/inventory_mysql.sql.tmpl",
+		CommerceMigrationTemplate:         "templates/commerce_mysql.sql.tmpl",
 	},
 }
 
@@ -299,6 +304,20 @@ var javaCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: commerceOwner, Version: commerceVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable carts, checkout, promotions, payments, orders, fulfillment, and returns.",
+			Requires: []spec.PackDependency{
+				{Name: catalogOwner, Constraint: "^0.1.0"},
+				{Name: customerOwner, Constraint: "^0.1.0"},
+			},
+			Backends:  []string{backend},
+			Databases: []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 type templateData struct {
@@ -431,6 +450,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	customerEnabled := false
 	crmEnabled := false
 	inventoryEnabled := false
+	commerceEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -476,6 +496,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == inventoryOwner {
 			inventoryEnabled = true
 		}
+		if pack.Metadata.Name == commerceOwner {
+			commerceEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -495,6 +518,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"erp-inventory with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if commerceEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"commerce-operations with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine, approvalsEnabled)
@@ -551,6 +579,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if inventoryEnabled {
 		migrationCount++
 	}
+	if commerceEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -575,6 +606,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		CustomerAccounts: customerEnabled,
 		CRM:              crmEnabled,
 		Inventory:        inventoryEnabled,
+		Commerce:         commerceEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+len(storefrontui.BaseTemplates)+20)
@@ -597,6 +629,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	customerPaths := make(map[string]struct{}, 16)
 	crmPaths := make(map[string]struct{}, 16)
 	inventoryPaths := make(map[string]struct{}, 14)
+	commercePaths := make(map[string]struct{}, 16)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -710,6 +743,20 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		adminPaths[path] = struct{}{}
 		inventoryPaths[path] = struct{}{}
+	}
+	addCommerceTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		commercePaths[path] = struct{}{}
+	}
+	addCommerceUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
+		commercePaths[path] = struct{}{}
+	}
+	addCommerceStorefront := func(path, templatePath string) {
+		targets[path] = templatePath
+		storefrontPaths[path] = struct{}{}
+		commercePaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -1091,6 +1138,35 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[inventoryOwner] = inventoryVersion
 	}
+	if commerceEnabled {
+		for path, templatePath := range map[string]string{
+			mainRoot + "/commerce/CommerceModels.java":                         "templates/CommerceModels.java.tmpl",
+			mainRoot + "/commerce/CommerceException.java":                      "templates/CommerceException.java.tmpl",
+			mainRoot + "/commerce/PaymentGateway.java":                         "templates/PaymentGateway.java.tmpl",
+			mainRoot + "/commerce/SandboxPaymentGateway.java":                  "templates/SandboxPaymentGateway.java.tmpl",
+			mainRoot + "/commerce/CommerceRepository.java":                     "templates/CommerceRepository.java.tmpl",
+			mainRoot + "/commerce/JdbcCommerceRepository.java":                 "templates/JdbcCommerceRepository.java.tmpl",
+			mainRoot + "/commerce/CommerceService.java":                        "templates/CommerceService.java.tmpl",
+			mainRoot + "/commerce/CommerceController.java":                     "templates/CommerceController.java.tmpl",
+			testRoot + "/commerce/CommerceServiceTest.java":                    "templates/CommerceServiceTest.java.tmpl",
+			testRoot + "/commerce/CommerceDatabaseIntegrationTest.java":        "templates/CommerceDatabaseIntegrationTest.java.tmpl",
+			"src/main/resources/db/migration/V000300__commerce_operations.sql": database.CommerceMigrationTemplate,
+		} {
+			addCommerceTarget(path, templatePath)
+		}
+		if adminEnabled {
+			addCommerceUI(
+				"web/admin/src/views/CommerceView.vue",
+				"templates/src/views/CommerceView.vue.tmpl",
+			)
+		}
+		if storefrontEnabled {
+			for path, templatePath := range storefrontui.CommerceTemplates {
+				addCommerceStorefront(path, templatePath)
+			}
+		}
+		capabilityLock[commerceOwner] = commerceVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -1139,6 +1215,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			storefrontData := storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName)
 			storefrontData.Catalog = catalogEnabled
 			storefrontData.CustomerAccounts = customerEnabled
+			storefrontData.Commerce = commerceEnabled
 			storefrontData.Tenancy = tenancyEnabled
 			content, err = storefrontui.Render(
 				targets[path],
@@ -1198,6 +1275,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isInventoryPath := inventoryPaths[path]; isInventoryPath {
 			owner = inventoryOwner
+		}
+		if _, isCommercePath := commercePaths[path]; isCommercePath {
+			owner = commerceOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

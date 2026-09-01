@@ -1,0 +1,641 @@
+package {{.PackageName}}.commerce;
+
+import {{.PackageName}}.catalog.CatalogProduct;
+import {{.PackageName}}.catalog.CatalogRepository;
+import {{.PackageName}}.commerce.CommerceModels.Campaign;
+import {{.PackageName}}.commerce.CommerceModels.CampaignPage;
+import {{.PackageName}}.commerce.CommerceModels.Cart;
+import {{.PackageName}}.commerce.CommerceModels.Coupon;
+import {{.PackageName}}.commerce.CommerceModels.Line;
+import {{.PackageName}}.commerce.CommerceModels.Order;
+import {{.PackageName}}.commerce.CommerceModels.OrderPage;
+import {{.PackageName}}.commerce.CommerceModels.PaymentIntent;
+import {{.PackageName}}.customeraccounts.CustomerAccount;
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.math.BigInteger;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class CommerceService {
+
+    public static final String PENDING_PAYMENT = "pending_payment";
+    public static final String CONFIRMED = "confirmed";
+    public static final String FULFILLING = "fulfilling";
+    public static final String FULFILLED = "fulfilled";
+    public static final String RETURN_REQUESTED = "return_requested";
+    public static final String RETURNED = "returned";
+    public static final String CANCELLED = "cancelled";
+    public static final String REQUIRES_ACTION = "requires_action";
+    public static final String SUCCEEDED = "succeeded";
+    public static final String FAILED = "failed";
+    public static final String DRAFT = "draft";
+    public static final String ACTIVE = "active";
+    public static final String ARCHIVED = "archived";
+
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final Pattern CODE_PATTERN =
+            Pattern.compile("^[A-Z0-9][A-Z0-9_-]{0,63}$");
+    private static final Pattern CURRENCY_PATTERN = Pattern.compile("^[A-Z]{3}$");
+
+    private final CommerceRepository repository;
+    private final CatalogRepository catalogRepository;
+    private final PaymentGateway paymentGateway;
+    private final Clock clock;
+
+    public CommerceService(
+            CommerceRepository repository,
+            CatalogRepository catalogRepository,
+            PaymentGateway paymentGateway) {
+        this(repository, catalogRepository, paymentGateway, Clock.systemUTC());
+    }
+
+    CommerceService(
+            CommerceRepository repository,
+            CatalogRepository catalogRepository,
+            PaymentGateway paymentGateway,
+            Clock clock) {
+        this.repository = repository;
+        this.catalogRepository = catalogRepository;
+        this.paymentGateway = paymentGateway;
+        this.clock = clock;
+    }
+
+    public Cart cart(CustomerAccount customer, String currency) {
+        String normalizedCurrency = currency(currency);
+        requireCustomer(customer);
+        return repository
+                .cart(scope(customer), customer.id(), normalizedCurrency)
+                .orElseGet(
+                        () ->
+                                new Cart(
+                                        null,
+                                        emptyToNull(scope(customer)),
+                                        customer.id(),
+                                        normalizedCurrency,
+                                        "active",
+                                        List.of(),
+                                        0L,
+                                        0L,
+                                        null,
+                                        null));
+    }
+
+    public Cart putLine(
+            CustomerAccount customer, String productId, LineInput input) {
+        requireCustomer(customer);
+        if (input == null || input.quantity() == null || input.version() == null) {
+            throw invalid();
+        }
+        String normalizedCurrency = currency(input.currency());
+        long quantity = input.quantity();
+        long version = input.version();
+        if (quantity < 1L || quantity > 999L || version < 0L) {
+            throw invalid();
+        }
+        String normalizedProductId = identifier(productId);
+        CatalogProduct product =
+                catalogRepository
+                        .getPublic(scope(customer), normalizedProductId)
+                        .orElseThrow(CommerceService::notFound);
+        if (!normalizedCurrency.equals(product.currency())) {
+            throw conflict();
+        }
+        long lineMinor;
+        try {
+            lineMinor = Math.multiplyExact(product.priceMinor(), quantity);
+        } catch (ArithmeticException exception) {
+            throw conflict();
+        }
+        Line line =
+                new Line(
+                        product.id(),
+                        product.sku(),
+                        product.name(),
+                        product.priceMinor(),
+                        quantity,
+                        lineMinor);
+        return repository.putLine(
+                new CommerceRepository.CartLineCommand(
+                        newId(),
+                        scope(customer),
+                        customer.id(),
+                        normalizedCurrency,
+                        line,
+                        version,
+                        clock.instant()));
+    }
+
+    public Cart removeLine(
+            CustomerAccount customer,
+            String productId,
+            String currency,
+            Long version) {
+        requireCustomer(customer);
+        if (version == null || version < 1L) {
+            throw invalid();
+        }
+        return repository.removeLine(
+                scope(customer),
+                customer.id(),
+                currency(currency),
+                identifier(productId),
+                version,
+                clock.instant());
+    }
+
+    public Order checkout(CustomerAccount customer, CheckoutInput input) {
+        requireCustomer(customer);
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        String normalizedCurrency = currency(input.currency());
+        String key = required(input.idempotencyKey(), MAXIMUM_IDENTIFIER_LENGTH);
+        String couponCode = optionalCode(input.couponCode());
+        Optional<Order> replay =
+                repository.replayCheckout(
+                        scope(customer),
+                        customer.id(),
+                        key,
+                        normalizedCurrency,
+                        couponCode,
+                        input.version());
+        if (replay.isPresent()) {
+            return replay.get();
+        }
+        Cart cart =
+                repository
+                        .cart(scope(customer), customer.id(), normalizedCurrency)
+                        .orElseThrow(CommerceService::conflict);
+        if (!"active".equals(cart.status())
+                || cart.version() != input.version()
+                || cart.lines().isEmpty()) {
+            throw conflict();
+        }
+        Instant now = clock.instant();
+        Optional<CommerceRepository.Promotion> promotion =
+                repository.promotion(
+                        scope(customer),
+                        normalizedCurrency,
+                        couponCode,
+                        cart.subtotalMinor(),
+                        now);
+        Campaign campaign = promotion.map(CommerceRepository.Promotion::campaign).orElse(null);
+        Coupon coupon = promotion.map(CommerceRepository.Promotion::coupon).orElse(null);
+        long discount = discount(cart.subtotalMinor(), campaign);
+        String orderId = newId();
+        PaymentGateway.Intent intent =
+                paymentGateway.createIntent(
+                        orderId, cart.subtotalMinor() - discount, normalizedCurrency, key);
+        List<Line> snapshots = new ArrayList<>(cart.lines());
+        Order order =
+                new Order(
+                        orderId,
+                        emptyToNull(scope(customer)),
+                        customer.id(),
+                        PENDING_PAYMENT,
+                        normalizedCurrency,
+                        cart.subtotalMinor(),
+                        discount,
+                        cart.subtotalMinor() - discount,
+                        campaign == null ? null : campaign.id(),
+                        coupon == null ? null : coupon.code(),
+                        snapshots,
+                        new PaymentIntent(
+                                newId(),
+                                intent.provider(),
+                                intent.providerReference(),
+                                intent.status(),
+                                cart.subtotalMinor() - discount,
+                                0L,
+                                normalizedCurrency,
+                                now),
+                        "",
+                        "",
+                        1L,
+                        now,
+                        now);
+        return repository.checkout(
+                new CommerceRepository.CheckoutCommand(
+                        order,
+                        cart.id(),
+                        cart.version(),
+                        key,
+                        campaign,
+                        coupon,
+                        customerAudit("commerce.checkout", order.id(), now)));
+    }
+
+    public Order customerOrder(CustomerAccount customer, String id) {
+        requireCustomer(customer);
+        return repository
+                .getOrder(scope(customer), customer.id(), identifier(id))
+                .orElseThrow(CommerceService::notFound);
+    }
+
+    public OrderPage customerOrders(
+            CustomerAccount customer, String cursor, int limit) {
+        requireCustomer(customer);
+        validatePage(cursor, limit);
+        CommerceRepository.PageResult<Order> result =
+                repository.listOrders(
+                        scope(customer), customer.id(), text(cursor), limit);
+        return new OrderPage(result.items(), result.nextCursor());
+    }
+
+    public Order requestReturn(
+            CustomerAccount customer, String id, ReturnInput input) {
+        requireCustomer(customer);
+        if (input == null || input.version() == null) {
+            throw invalid();
+        }
+        String normalizedId = identifier(id);
+        String reason = required(input.reason(), 500);
+        Order current = customerOrder(customer, normalizedId);
+        if (!FULFILLED.equals(current.status()) || current.version() != input.version()) {
+            throw conflict();
+        }
+        Instant now = clock.instant();
+        return repository.transitionOrder(
+                new CommerceRepository.OrderTransition(
+                        scope(customer),
+                        normalizedId,
+                        input.version(),
+                        FULFILLED,
+                        RETURN_REQUESTED,
+                        reason,
+                        now,
+                        customerAudit("commerce.return.request", normalizedId, now)));
+    }
+
+    public Order completePayment(
+            String providerReference, PaymentEventInput input) {
+        if (input == null
+                || (!SUCCEEDED.equals(input.status()) && !FAILED.equals(input.status()))) {
+            throw invalid();
+        }
+        return repository.applyPayment(
+                identifier(providerReference),
+                required(input.eventId(), MAXIMUM_IDENTIFIER_LENGTH),
+                input.status(),
+                clock.instant());
+    }
+
+    public Order listOrder(String id, Principal actor) {
+        String scope = actorScope(actor);
+        return repository
+                .getOrder(scope, "", identifier(id))
+                .orElseThrow(CommerceService::notFound);
+    }
+
+    public OrderPage listOrders(String cursor, int limit, Principal actor) {
+        validatePage(cursor, limit);
+        CommerceRepository.PageResult<Order> result =
+                repository.listOrders(actorScope(actor), "", text(cursor), limit);
+        return new OrderPage(result.items(), result.nextCursor());
+    }
+
+    public Order startFulfillment(String id, TransitionInput input, Principal actor) {
+        return staffTransition(id, input, CONFIRMED, FULFILLING, "", actor);
+    }
+
+    public Order completeFulfillment(String id, TransitionInput input, Principal actor) {
+        if (input == null) {
+            throw invalid();
+        }
+        return staffTransition(
+                id,
+                input,
+                FULFILLING,
+                FULFILLED,
+                required(input.reference(), MAXIMUM_IDENTIFIER_LENGTH),
+                actor);
+    }
+
+    public Order completeReturn(String id, TransitionInput input, Principal actor) {
+        return staffTransition(id, input, RETURN_REQUESTED, RETURNED, "", actor);
+    }
+
+    private Order staffTransition(
+            String id,
+            TransitionInput input,
+            String from,
+            String to,
+            String reference,
+            Principal actor) {
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.transitionOrder(
+                new CommerceRepository.OrderTransition(
+                        actorScope(actor),
+                        normalizedId,
+                        input.version(),
+                        from,
+                        to,
+                        reference,
+                        now,
+                        audit(actor, "commerce.order." + to, normalizedId, now)));
+    }
+
+    public Order reconcile(String id, Principal actor) {
+        Order order = listOrder(id, actor);
+        String status = paymentGateway.lookup(order.payment().providerRef());
+        if (status.equals(order.payment().status())) {
+            return order;
+        }
+        return repository.applyPayment(
+                order.payment().providerRef(),
+                "reconcile-" + order.id() + "-" + status,
+                status,
+                clock.instant());
+    }
+
+    public Order refund(String id, RefundInput input, Principal actor) {
+        if (input == null || input.amountMinor() == null || input.amountMinor() < 1L) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        String normalizedId = identifier(id);
+        String key = required(input.idempotencyKey(), MAXIMUM_IDENTIFIER_LENGTH);
+        Order order =
+                repository
+                        .getOrder(scope, "", normalizedId)
+                        .orElseThrow(CommerceService::notFound);
+        String providerRefund =
+                paymentGateway.refund(
+                        order.payment().providerRef(), input.amountMinor(), key);
+        Instant now = clock.instant();
+        return repository.refund(
+                new CommerceRepository.RefundCommand(
+                        scope,
+                        normalizedId,
+                        input.amountMinor(),
+                        key,
+                        providerRefund,
+                        now,
+                        audit(actor, "commerce.payment.refund", normalizedId, now)));
+    }
+
+    public Campaign createCampaign(CampaignInput input, Principal actor) {
+        if (input == null
+                || input.value() == null
+                || input.minimumMinor() == null
+                || input.startsAt() == null
+                || input.endsAt() == null) {
+            throw invalid();
+        }
+        String kind = text(input.kind()).toLowerCase(Locale.ROOT);
+        long value = input.value();
+        long minimum = input.minimumMinor();
+        if ((!"fixed".equals(kind) && !"percent".equals(kind))
+                || value < 1L
+                || minimum < 0L
+                || ("percent".equals(kind) && value > 10_000L)
+                || input.priority() < -1000
+                || input.priority() > 1000
+                || !input.startsAt().isBefore(input.endsAt())) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        Campaign campaign =
+                new Campaign(
+                        newId(),
+                        emptyToNull(scope),
+                        required(input.name(), 160),
+                        kind,
+                        value,
+                        minimum,
+                        currency(input.currency()),
+                        input.priority(),
+                        input.couponRequired(),
+                        DRAFT,
+                        input.startsAt(),
+                        input.endsAt(),
+                        1L,
+                        now,
+                        now);
+        repository.createCampaign(
+                campaign,
+                audit(actor, "commerce.campaign.create", campaign.id(), now));
+        return campaign;
+    }
+
+    public Campaign activateCampaign(
+            String id, TransitionInput input, Principal actor) {
+        return transitionCampaign(id, input, DRAFT, ACTIVE, actor);
+    }
+
+    public Campaign archiveCampaign(
+            String id, TransitionInput input, Principal actor) {
+        return transitionCampaign(id, input, ACTIVE, ARCHIVED, actor);
+    }
+
+    private Campaign transitionCampaign(
+            String id,
+            TransitionInput input,
+            String from,
+            String to,
+            Principal actor) {
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        String normalizedId = identifier(id);
+        Instant now = clock.instant();
+        return repository.transitionCampaign(
+                new CommerceRepository.CampaignTransition(
+                        actorScope(actor),
+                        normalizedId,
+                        input.version(),
+                        from,
+                        to,
+                        now,
+                        audit(actor, "commerce.campaign." + to, normalizedId, now)));
+    }
+
+    public Coupon createCoupon(CouponInput input, Principal actor) {
+        if (input == null || input.maximumUses() == null || input.maximumUses() < 1L) {
+            throw invalid();
+        }
+        String scope = actorScope(actor);
+        Instant now = clock.instant();
+        Coupon coupon =
+                new Coupon(
+                        newId(),
+                        emptyToNull(scope),
+                        identifier(input.campaignId()),
+                        requiredCode(input.code()),
+                        input.maximumUses(),
+                        0L,
+                        now);
+        repository.createCoupon(
+                coupon, audit(actor, "commerce.coupon.create", coupon.id(), now));
+        return coupon;
+    }
+
+    public CampaignPage listCampaigns(String cursor, int limit, Principal actor) {
+        validatePage(cursor, limit);
+        CommerceRepository.PageResult<Campaign> result =
+                repository.listCampaigns(actorScope(actor), text(cursor), limit);
+        return new CampaignPage(result.items(), result.nextCursor());
+    }
+
+    private static long discount(long subtotal, Campaign campaign) {
+        if (campaign == null) {
+            return 0L;
+        }
+        long amount;
+        if ("fixed".equals(campaign.kind())) {
+            amount = campaign.value();
+        } else {
+            amount =
+                    BigInteger.valueOf(subtotal)
+                            .multiply(BigInteger.valueOf(campaign.value()))
+                            .divide(BigInteger.valueOf(10_000L))
+                            .longValueExact();
+        }
+        return Math.min(subtotal, amount);
+    }
+
+    private static void requireCustomer(CustomerAccount customer) {
+        if (customer == null || text(customer.id()).isEmpty()) {
+            throw invalid();
+        }
+    }
+
+    private static String scope(CustomerAccount customer) {
+        return customer.organizationId() == null ? "" : customer.organizationId();
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || text(actor.userId()).isEmpty()) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        return identifier(actor.organizationId());
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static void validatePage(String cursor, int limit) {
+        if (limit < 1 || limit > 100 || text(cursor).length() > MAXIMUM_IDENTIFIER_LENGTH) {
+            throw invalid();
+        }
+        if (!safe(text(cursor))) {
+            throw invalid();
+        }
+    }
+
+    private static String identifier(String value) {
+        return required(value, MAXIMUM_IDENTIFIER_LENGTH);
+    }
+
+    private static String currency(String value) {
+        String normalized = text(value).toUpperCase(Locale.ROOT);
+        if (!CURRENCY_PATTERN.matcher(normalized).matches()) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String requiredCode(String value) {
+        String normalized = text(value).toUpperCase(Locale.ROOT);
+        if (!CODE_PATTERN.matcher(normalized).matches()) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String optionalCode(String value) {
+        String normalized = text(value);
+        return normalized.isEmpty() ? "" : requiredCode(normalized);
+    }
+
+    private static String required(String value, int maximumLength) {
+        String normalized = text(value);
+        if (normalized.isEmpty()
+                || normalized.codePointCount(0, normalized.length()) > maximumLength
+                || !safe(normalized)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static boolean safe(String value) {
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static AuditEvent customerAudit(String action, String target, Instant now) {
+        return new AuditEvent(newId(), "", action, "succeeded", target, "", "", now);
+    }
+
+    private static CommerceException invalid() {
+        return new CommerceException(
+                CommerceException.Kind.INVALID, "commerce input is invalid");
+    }
+
+    private static CommerceException notFound() {
+        return new CommerceException(
+                CommerceException.Kind.NOT_FOUND, "commerce record was not found");
+    }
+
+    private static CommerceException conflict() {
+        return new CommerceException(
+                CommerceException.Kind.CONFLICT, "commerce state conflicts");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record LineInput(String currency, Long quantity, Long version) {}
+
+    public record CheckoutInput(
+            String currency, String couponCode, String idempotencyKey, Long version) {}
+
+    public record ReturnInput(Long version, String reason) {}
+
+    public record PaymentEventInput(String eventId, String status) {}
+
+    public record RefundInput(Long amountMinor, String idempotencyKey) {}
+
+    public record TransitionInput(Long version, String reference) {}
+
+    public record CampaignInput(
+            String name,
+            String kind,
+            Long value,
+            Long minimumMinor,
+            String currency,
+            int priority,
+            boolean couponRequired,
+            Instant startsAt,
+            Instant endsAt) {}
+
+    public record CouponInput(String campaignId, String code, Long maximumUses) {}
+}

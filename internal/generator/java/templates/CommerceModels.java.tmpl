@@ -1,0 +1,115 @@
+package {{.PackageName}}.commerce;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+import java.util.List;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+public final class CommerceModels {
+
+    private CommerceModels() {}
+
+    public record Line(
+            String productId,
+            String sku,
+            String name,
+            @JsonSerialize(using = ToStringSerializer.class) long unitMinor,
+            @JsonSerialize(using = ToStringSerializer.class) long quantity,
+            @JsonSerialize(using = ToStringSerializer.class) long lineMinor) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Cart(
+            String id,
+            String organizationId,
+            String customerId,
+            String currency,
+            String status,
+            List<Line> lines,
+            @JsonSerialize(using = ToStringSerializer.class) long subtotalMinor,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        public Cart {
+            lines = List.copyOf(lines);
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Campaign(
+            String id,
+            String organizationId,
+            String name,
+            String kind,
+            @JsonSerialize(using = ToStringSerializer.class) long value,
+            @JsonSerialize(using = ToStringSerializer.class) long minimumMinor,
+            String currency,
+            int priority,
+            boolean couponRequired,
+            String status,
+            Instant startsAt,
+            Instant endsAt,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Coupon(
+            String id,
+            String organizationId,
+            String campaignId,
+            String code,
+            @JsonSerialize(using = ToStringSerializer.class) long maximumUses,
+            @JsonSerialize(using = ToStringSerializer.class) long redeemedUses,
+            Instant createdAt) {}
+
+    public record PaymentIntent(
+            String id,
+            String provider,
+            String providerRef,
+            String status,
+            @JsonSerialize(using = ToStringSerializer.class) long amountMinor,
+            @JsonSerialize(using = ToStringSerializer.class) long refundedMinor,
+            String currency,
+            Instant updatedAt) {}
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Order(
+            String id,
+            String organizationId,
+            String customerId,
+            String status,
+            String currency,
+            @JsonSerialize(using = ToStringSerializer.class) long subtotalMinor,
+            @JsonSerialize(using = ToStringSerializer.class) long discountMinor,
+            @JsonSerialize(using = ToStringSerializer.class) long totalMinor,
+            String campaignId,
+            String couponCode,
+            List<Line> lines,
+            PaymentIntent payment,
+            String fulfillmentRef,
+            String returnReason,
+            @JsonSerialize(using = ToStringSerializer.class) long version,
+            Instant createdAt,
+            Instant updatedAt) {
+
+        public Order {
+            lines = List.copyOf(lines);
+        }
+    }
+
+    public record OrderPage(List<Order> items, String nextCursor) {
+
+        public OrderPage {
+            items = List.copyOf(items);
+        }
+    }
+
+    public record CampaignPage(List<Campaign> items, String nextCursor) {
+
+        public CampaignPage {
+            items = List.copyOf(items);
+        }
+    }
+}

@@ -1,0 +1,1083 @@
+package {{.PackageName}}.commerce;
+
+import {{.PackageName}}.commerce.CommerceModels.Campaign;
+import {{.PackageName}}.commerce.CommerceModels.Cart;
+import {{.PackageName}}.commerce.CommerceModels.Coupon;
+import {{.PackageName}}.commerce.CommerceModels.Line;
+import {{.PackageName}}.commerce.CommerceModels.Order;
+import {{.PackageName}}.commerce.CommerceModels.PaymentIntent;
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcCommerceRepository implements CommerceRepository {
+
+    private static final String ORDER_COLUMNS =
+            "order_value.id, order_value.organization_id, order_value.customer_id, "
+                    + "order_value.status, order_value.currency, order_value.subtotal_minor, "
+                    + "order_value.discount_minor, order_value.total_minor, "
+                    + "order_value.campaign_id, order_value.coupon_code, "
+                    + "order_value.fulfillment_ref, order_value.return_reason, "
+                    + "order_value.version, order_value.created_at, order_value.updated_at, "
+                    + "payment.id payment_id, payment.provider, payment.provider_ref, "
+                    + "payment.status payment_status, payment.amount_minor, "
+                    + "payment.refunded_minor, payment.currency payment_currency, "
+                    + "payment.updated_at payment_updated_at";
+
+    private static final String CAMPAIGN_COLUMNS =
+            "campaign.id, campaign.organization_id, campaign.name, campaign.kind, "
+                    + "campaign.value, campaign.minimum_minor, campaign.currency, "
+                    + "campaign.priority, campaign.coupon_required, campaign.status, "
+                    + "campaign.starts_at, campaign.ends_at, campaign.version, "
+                    + "campaign.created_at, campaign.updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcCommerceRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public Optional<Cart> cart(String scope, String customerId, String currency) {
+        return loadCart(scope, customerId, currency);
+    }
+
+    @Override
+    public Cart putLine(CartLineCommand command) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                Optional<Cart> current =
+                                        lockCart(
+                                                command.scope(),
+                                                command.customerId(),
+                                                command.currency());
+                                String cartId;
+                                if (current.isEmpty()) {
+                                    if (command.version() != 0L) {
+                                        throw conflict();
+                                    }
+                                    cartId = command.cartId();
+                                    jdbcTemplate.update(
+                                            "insert into commerce_carts "
+                                                    + "(id, organization_id, customer_id, "
+                                                    + "currency, status, version, created_at, "
+                                                    + "updated_at) values (?, ?, ?, ?, "
+                                                    + "'active', 1, ?, ?)",
+                                            cartId,
+                                            emptyToNull(command.scope()),
+                                            command.customerId(),
+                                            command.currency(),
+                                            timestamp(command.now()),
+                                            timestamp(command.now()));
+                                } else {
+                                    Cart value = current.get();
+                                    if (value.version() != command.version()) {
+                                        throw conflict();
+                                    }
+                                    cartId = value.id();
+                                    requireOne(
+                                            jdbcTemplate.update(
+                                                    "update commerce_carts set version = "
+                                                            + "version + 1, updated_at = ? "
+                                                            + "where id = ? and status = 'active' "
+                                                            + "and version = ?",
+                                                    timestamp(command.now()),
+                                                    cartId,
+                                                    command.version()));
+                                }
+{{- if eq .Database.Engine "postgresql"}}
+                                jdbcTemplate.update(
+                                        "insert into commerce_cart_lines "
+                                                + "(cart_id, product_id, sku, name, unit_minor, "
+                                                + "quantity) values (?, ?, ?, ?, ?, ?) "
+                                                + "on conflict (cart_id, product_id) do update set "
+                                                + "sku = excluded.sku, name = excluded.name, "
+                                                + "unit_minor = excluded.unit_minor, "
+                                                + "quantity = excluded.quantity",
+                                        cartId,
+                                        command.line().productId(),
+                                        command.line().sku(),
+                                        command.line().name(),
+                                        command.line().unitMinor(),
+                                        command.line().quantity());
+{{- else}}
+                                jdbcTemplate.update(
+                                        "insert into commerce_cart_lines "
+                                                + "(cart_id, product_id, sku, name, unit_minor, "
+                                                + "quantity) values (?, ?, ?, ?, ?, ?) "
+                                                + "on duplicate key update sku = values(sku), "
+                                                + "name = values(name), unit_minor = values(unit_minor), "
+                                                + "quantity = values(quantity)",
+                                        cartId,
+                                        command.line().productId(),
+                                        command.line().sku(),
+                                        command.line().name(),
+                                        command.line().unitMinor(),
+                                        command.line().quantity());
+{{- end}}
+                                return loadCart(
+                                                command.scope(),
+                                                command.customerId(),
+                                                command.currency())
+                                        .orElseThrow(JdbcCommerceRepository::notFound);
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Cart removeLine(
+            String scope,
+            String customerId,
+            String currency,
+            String productId,
+            long version,
+            Instant now) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            Cart cart =
+                                    lockCart(scope, customerId, currency)
+                                            .orElseThrow(JdbcCommerceRepository::notFound);
+                            if (cart.version() != version) {
+                                throw conflict();
+                            }
+                            requireOne(
+                                    jdbcTemplate.update(
+                                            "delete from commerce_cart_lines "
+                                                    + "where cart_id = ? and product_id = ?",
+                                            cart.id(),
+                                            productId));
+                            requireOne(
+                                    jdbcTemplate.update(
+                                            "update commerce_carts set version = version + 1, "
+                                                    + "updated_at = ? where id = ? "
+                                                    + "and status = 'active' and version = ?",
+                                            timestamp(now),
+                                            cart.id(),
+                                            version));
+                            return loadCart(scope, customerId, currency)
+                                    .orElseThrow(JdbcCommerceRepository::notFound);
+                        }));
+    }
+
+    @Override
+    public Optional<Promotion> promotion(
+            String scope,
+            String currency,
+            String couponCode,
+            long subtotalMinor,
+            Instant now) {
+        if (!couponCode.isEmpty()) {
+            List<Promotion> values =
+                    jdbcTemplate.query(
+                            "select "
+                                    + CAMPAIGN_COLUMNS
+                                    + ", coupon.id coupon_id, coupon.organization_id coupon_org, "
+                                    + "coupon.campaign_id coupon_campaign, coupon.code coupon_code, "
+                                    + "coupon.maximum_uses, coupon.redeemed_uses, "
+                                    + "coupon.created_at coupon_created "
+                                    + "from commerce_campaigns campaign join commerce_coupons coupon "
+                                    + "on coupon.campaign_id = campaign.id "
+                                    + "and coalesce(coupon.organization_id, '') = "
+                                    + "coalesce(campaign.organization_id, '') "
+                                    + "where coalesce(campaign.organization_id, '') = ? "
+                                    + "and campaign.currency = ? and campaign.status = 'active' "
+                                    + "and campaign.starts_at <= ? and campaign.ends_at > ? "
+                                    + "and campaign.minimum_minor <= ? and coupon.code = ? "
+                                    + "and coupon.redeemed_uses < coupon.maximum_uses "
+                                    + "order by campaign.priority desc, campaign.id limit 1",
+                            JdbcCommerceRepository::mapPromotion,
+                            scope,
+                            currency,
+                            timestamp(now),
+                            timestamp(now),
+                            subtotalMinor,
+                            couponCode);
+            return values.stream().findFirst();
+        }
+        List<Campaign> values =
+                jdbcTemplate.query(
+                        "select "
+                                + CAMPAIGN_COLUMNS
+                                + " from commerce_campaigns campaign "
+                                + "where coalesce(campaign.organization_id, '') = ? "
+                                + "and campaign.currency = ? and campaign.status = 'active' "
+                                + "and campaign.coupon_required = false "
+                                + "and campaign.starts_at <= ? and campaign.ends_at > ? "
+                                + "and campaign.minimum_minor <= ? "
+                                + "order by campaign.priority desc, campaign.id limit 1",
+                        JdbcCommerceRepository::mapCampaign,
+                        scope,
+                        currency,
+                        timestamp(now),
+                        timestamp(now),
+                        subtotalMinor);
+        return values.stream().findFirst().map(value -> new Promotion(value, null));
+    }
+
+    @Override
+    public Optional<Order> replayCheckout(
+            String scope,
+            String customerId,
+            String key,
+            String currency,
+            String couponCode,
+            long cartVersion) {
+        List<Replay> values =
+                jdbcTemplate.query(
+                        "select idempotency.order_id, order_value.currency, "
+                                + "idempotency.coupon_code, idempotency.cart_version "
+                                + "from commerce_checkout_idempotency idempotency "
+                                + "join commerce_orders order_value "
+                                + "on order_value.id = idempotency.order_id "
+                                + "where idempotency.organization_scope = ? "
+                                + "and idempotency.customer_id = ? "
+                                + "and idempotency.idempotency_key = ?",
+                        (resultSet, rowNumber) ->
+                                new Replay(
+                                        resultSet.getString("order_id"),
+                                        resultSet.getString("currency"),
+                                        resultSet.getString("coupon_code"),
+                                        resultSet.getLong("cart_version")),
+                        scope,
+                        customerId,
+                        key);
+        if (values.isEmpty()) {
+            return Optional.empty();
+        }
+        Replay replay = values.getFirst();
+        if (!currency.equals(replay.currency())
+                || !couponCode.equals(replay.couponCode())
+                || cartVersion != replay.cartVersion()) {
+            throw conflict();
+        }
+        return getOrder(scope, customerId, replay.orderId());
+    }
+
+    @Override
+    public Order checkout(CheckoutCommand command) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                Optional<Order> replay =
+                                        replayCheckout(
+                                                scope(command.order().organizationId()),
+                                                command.order().customerId(),
+                                                command.idempotencyKey(),
+                                                command.order().currency(),
+                                                command.coupon() == null
+                                                        ? ""
+                                                        : command.coupon().code(),
+                                                command.cartVersion());
+                                if (replay.isPresent()) {
+                                    return replay.get();
+                                }
+                                requireOne(
+                                        jdbcTemplate.update(
+                                                "update commerce_carts set status = "
+                                                        + "'checked_out', version = version + 1, "
+                                                        + "updated_at = ? where id = ? "
+                                                        + "and coalesce(organization_id, '') = ? "
+                                                        + "and customer_id = ? and status = 'active' "
+                                                        + "and version = ?",
+                                                timestamp(command.order().updatedAt()),
+                                                command.cartId(),
+                                                scope(command.order().organizationId()),
+                                                command.order().customerId(),
+                                                command.cartVersion()));
+                                reservePromotion(command);
+                                insertOrder(command.order());
+                                jdbcTemplate.update(
+                                        "insert into commerce_checkout_idempotency "
+                                                + "(organization_scope, customer_id, "
+                                                + "idempotency_key, cart_id, cart_version, "
+                                                + "coupon_code, order_id) values (?, ?, ?, ?, ?, ?, ?)",
+                                        scope(command.order().organizationId()),
+                                        command.order().customerId(),
+                                        command.idempotencyKey(),
+                                        command.cartId(),
+                                        command.cartVersion(),
+                                        command.coupon() == null ? "" : command.coupon().code(),
+                                        command.order().id());
+                                appendOrderEvent(
+                                        command.order().id(),
+                                        "",
+                                        command.order().status(),
+                                        "",
+                                        command.order().createdAt());
+                                appendAudit(command.audit());
+                                return command.order();
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Optional<Order> getOrder(String scope, String customerId, String id) {
+        List<Order> values =
+                jdbcTemplate.query(
+                        "select "
+                                + ORDER_COLUMNS
+                                + " from commerce_orders order_value "
+                                + "join commerce_payment_intents payment "
+                                + "on payment.order_id = order_value.id "
+                                + "where order_value.id = ? "
+                                + "and (? = '' or coalesce(order_value.organization_id, '') = ?) "
+                                + "and (? = '' or order_value.customer_id = ?)",
+                        JdbcCommerceRepository::mapOrder,
+                        id,
+                        scope,
+                        scope,
+                        customerId,
+                        customerId);
+        if (values.isEmpty()) {
+            return Optional.empty();
+        }
+        Order order = values.getFirst();
+        List<Line> lines =
+                jdbcTemplate.query(
+                        "select product_id, sku, name, unit_minor, quantity, line_minor "
+                                + "from commerce_order_lines where order_id = ? "
+                                + "order by product_id",
+                        JdbcCommerceRepository::mapLine,
+                        id);
+        return Optional.of(withLines(order, lines));
+    }
+
+    @Override
+    public PageResult<Order> listOrders(
+            String scope, String customerId, String cursor, int limit) {
+        List<String> ids =
+                new ArrayList<>(
+                        jdbcTemplate.queryForList(
+                                "select id from commerce_orders "
+                                        + "where coalesce(organization_id, '') = ? "
+                                        + "and (? = '' or customer_id = ?) "
+                                        + "and (? = '' or id > ?) order by id limit ?",
+                                String.class,
+                                scope,
+                                customerId,
+                                customerId,
+                                cursor,
+                                cursor,
+                                limit + 1));
+        String nextCursor = "";
+        if (ids.size() > limit) {
+            nextCursor = ids.get(limit - 1);
+            ids = new ArrayList<>(ids.subList(0, limit));
+        }
+        List<Order> orders = new ArrayList<>(ids.size());
+        for (String id : ids) {
+            orders.add(getOrder(scope, customerId, id).orElseThrow(JdbcCommerceRepository::notFound));
+        }
+        return new PageResult<>(orders, nextCursor);
+    }
+
+    @Override
+    public Order applyPayment(
+            String providerReference, String eventId, String status, Instant now) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            transaction -> {
+                                List<PaymentReplay> replay =
+                                        jdbcTemplate.query(
+                                                "select provider_ref, status, order_id "
+                                                        + "from commerce_payment_events "
+                                                        + "where provider = 'sandbox' "
+                                                        + "and event_id = ?",
+                                                (resultSet, rowNumber) ->
+                                                        new PaymentReplay(
+                                                                resultSet.getString("provider_ref"),
+                                                                resultSet.getString("status"),
+                                                                resultSet.getString("order_id")),
+                                                eventId);
+                                if (!replay.isEmpty()) {
+                                    PaymentReplay value = replay.getFirst();
+                                    if (!providerReference.equals(value.providerReference())
+                                            || !status.equals(value.status())) {
+                                        throw conflict();
+                                    }
+                                    return getOrder("", "", value.orderId())
+                                            .orElseThrow(JdbcCommerceRepository::notFound);
+                                }
+                                List<PaymentState> states =
+                                        jdbcTemplate.query(
+                                                "select payment.order_id, "
+                                                        + "coalesce(order_value.organization_id, '') "
+                                                        + "organization_scope, payment.status "
+                                                        + "from commerce_payment_intents payment "
+                                                        + "join commerce_orders order_value "
+                                                        + "on order_value.id = payment.order_id "
+                                                        + "where payment.provider_ref = ? for update",
+                                                (resultSet, rowNumber) ->
+                                                        new PaymentState(
+                                                                resultSet.getString("order_id"),
+                                                                resultSet.getString("organization_scope"),
+                                                                resultSet.getString("status")),
+                                                providerReference);
+                                if (states.isEmpty()) {
+                                    throw notFound();
+                                }
+                                PaymentState current = states.getFirst();
+                                if (!REQUIRES_ACTION.equals(current.status())
+                                        && !status.equals(current.status())) {
+                                    throw conflict();
+                                }
+                                if (REQUIRES_ACTION.equals(current.status())) {
+                                    requireOne(
+                                            jdbcTemplate.update(
+                                                    "update commerce_payment_intents set status = ?, "
+                                                            + "updated_at = ? where provider_ref = ? "
+                                                            + "and status = 'requires_action'",
+                                                    status,
+                                                    timestamp(now),
+                                                    providerReference));
+                                    String orderStatus =
+                                            SUCCEEDED.equals(status) ? CONFIRMED : CANCELLED;
+                                    requireOne(
+                                            jdbcTemplate.update(
+                                                    "update commerce_orders set status = ?, "
+                                                            + "version = version + 1, updated_at = ? "
+                                                            + "where id = ? and status = 'pending_payment'",
+                                                    orderStatus,
+                                                    timestamp(now),
+                                                    current.orderId()));
+                                    appendOrderEvent(
+                                            current.orderId(),
+                                            PENDING_PAYMENT,
+                                            orderStatus,
+                                            providerReference,
+                                            now);
+                                }
+                                jdbcTemplate.update(
+                                        "insert into commerce_payment_events "
+                                                + "(provider, event_id, provider_ref, status, "
+                                                + "order_id, created_at) values "
+                                                + "('sandbox', ?, ?, ?, ?, ?)",
+                                        eventId,
+                                        providerReference,
+                                        status,
+                                        current.orderId(),
+                                        timestamp(now));
+                                return getOrder(current.scope(), "", current.orderId())
+                                        .orElseThrow(JdbcCommerceRepository::notFound);
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Order transitionOrder(OrderTransition command) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            String fulfillment =
+                                    FULFILLED.equals(command.toStatus())
+                                            ? command.reference()
+                                            : "";
+                            String returnReason =
+                                    RETURN_REQUESTED.equals(command.toStatus())
+                                            ? command.reference()
+                                            : "";
+                            requireOne(
+                                    jdbcTemplate.update(
+                                            "update commerce_orders set status = ?, "
+                                                    + "fulfillment_ref = case when ? <> '' "
+                                                    + "then ? else fulfillment_ref end, "
+                                                    + "return_reason = case when ? <> '' "
+                                                    + "then ? else return_reason end, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? and "
+                                                    + "coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = ?",
+                                            command.toStatus(),
+                                            fulfillment,
+                                            fulfillment,
+                                            returnReason,
+                                            returnReason,
+                                            timestamp(command.now()),
+                                            command.id(),
+                                            command.scope(),
+                                            command.version(),
+                                            command.fromStatus()));
+                            appendOrderEvent(
+                                    command.id(),
+                                    command.fromStatus(),
+                                    command.toStatus(),
+                                    command.reference(),
+                                    command.now());
+                            appendAudit(command.audit());
+                            return getOrder(command.scope(), "", command.id())
+                                    .orElseThrow(JdbcCommerceRepository::notFound);
+                        }));
+    }
+
+    @Override
+    public Order refund(RefundCommand command) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                List<RefundReplay> replays =
+                                        jdbcTemplate.query(
+                                                "select payment_id, provider_ref, amount_minor "
+                                                        + "from commerce_refunds "
+                                                        + "where organization_scope = ? "
+                                                        + "and idempotency_key = ?",
+                                                (resultSet, rowNumber) ->
+                                                        new RefundReplay(
+                                                                resultSet.getString("payment_id"),
+                                                                resultSet.getString("provider_ref"),
+                                                                resultSet.getLong("amount_minor")),
+                                                command.scope(),
+                                                command.idempotencyKey());
+                                List<String> paymentIds =
+                                        jdbcTemplate.queryForList(
+                                                "select payment.id "
+                                                        + "from commerce_payment_intents payment "
+                                                        + "join commerce_orders order_value "
+                                                        + "on order_value.id = payment.order_id "
+                                                        + "where payment.order_id = ? and "
+                                                        + "coalesce(order_value.organization_id, '') = ?",
+                                                String.class,
+                                                command.orderId(),
+                                                command.scope());
+                                if (paymentIds.isEmpty()) {
+                                    throw notFound();
+                                }
+                                String paymentId = paymentIds.getFirst();
+                                if (!replays.isEmpty()) {
+                                    RefundReplay replay = replays.getFirst();
+                                    if (!paymentId.equals(replay.paymentId())
+                                            || !command.providerRefundReference()
+                                                    .equals(replay.providerReference())
+                                            || command.amountMinor() != replay.amountMinor()) {
+                                        throw conflict();
+                                    }
+                                    return getOrder(command.scope(), "", command.orderId())
+                                            .orElseThrow(JdbcCommerceRepository::notFound);
+                                }
+                                requireOne(
+                                        jdbcTemplate.update(
+                                                "update commerce_payment_intents set "
+                                                        + "refunded_minor = refunded_minor + ?, "
+                                                        + "updated_at = ? where id = ? "
+                                                        + "and status = 'succeeded' and "
+                                                        + "refunded_minor + ? <= amount_minor",
+                                                command.amountMinor(),
+                                                timestamp(command.now()),
+                                                paymentId,
+                                                command.amountMinor()));
+                                jdbcTemplate.update(
+                                        "insert into commerce_refunds "
+                                                + "(organization_scope, payment_id, "
+                                                + "idempotency_key, provider_ref, amount_minor, "
+                                                + "created_at) values (?, ?, ?, ?, ?, ?)",
+                                        command.scope(),
+                                        paymentId,
+                                        command.idempotencyKey(),
+                                        command.providerRefundReference(),
+                                        command.amountMinor(),
+                                        timestamp(command.now()));
+                                appendAudit(command.audit());
+                                return getOrder(command.scope(), "", command.orderId())
+                                        .orElseThrow(JdbcCommerceRepository::notFound);
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public void createCampaign(Campaign campaign, AuditEvent audit) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        jdbcTemplate.update(
+                                "insert into commerce_campaigns "
+                                        + "(id, organization_id, name, kind, value, "
+                                        + "minimum_minor, currency, priority, coupon_required, "
+                                        + "status, starts_at, ends_at, version, created_at, "
+                                        + "updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                                        + "?, ?, ?, ?, ?)",
+                                campaign.id(),
+                                campaign.organizationId(),
+                                campaign.name(),
+                                campaign.kind(),
+                                campaign.value(),
+                                campaign.minimumMinor(),
+                                campaign.currency(),
+                                campaign.priority(),
+                                campaign.couponRequired(),
+                                campaign.status(),
+                                timestamp(campaign.startsAt()),
+                                timestamp(campaign.endsAt()),
+                                campaign.version(),
+                                timestamp(campaign.createdAt()),
+                                timestamp(campaign.updatedAt()));
+                        appendAudit(audit);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Campaign transitionCampaign(CampaignTransition command) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            requireOne(
+                                    jdbcTemplate.update(
+                                            "update commerce_campaigns set status = ?, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? and "
+                                                    + "coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = ?",
+                                            command.toStatus(),
+                                            timestamp(command.now()),
+                                            command.id(),
+                                            command.scope(),
+                                            command.version(),
+                                            command.fromStatus()));
+                            appendAudit(command.audit());
+                            return getCampaign(command.scope(), command.id())
+                                    .orElseThrow(JdbcCommerceRepository::notFound);
+                        }));
+    }
+
+    @Override
+    public void createCoupon(Coupon coupon, AuditEvent audit) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        requireOne(
+                                jdbcTemplate.update(
+                                        "insert into commerce_coupons "
+                                                + "(id, organization_id, campaign_id, code, "
+                                                + "maximum_uses, redeemed_uses, created_at) "
+                                                + "select ?, ?, ?, ?, ?, 0, ? "
+                                                + "from commerce_campaigns where id = ? "
+                                                + "and coalesce(organization_id, '') = ? "
+                                                + "and coupon_required = true "
+                                                + "and status <> 'archived'",
+                                        coupon.id(),
+                                        coupon.organizationId(),
+                                        coupon.campaignId(),
+                                        coupon.code(),
+                                        coupon.maximumUses(),
+                                        timestamp(coupon.createdAt()),
+                                        coupon.campaignId(),
+                                        scope(coupon.organizationId())));
+                        appendAudit(audit);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public PageResult<Campaign> listCampaigns(String scope, String cursor, int limit) {
+        List<Campaign> values =
+                new ArrayList<>(
+                        jdbcTemplate.query(
+                                "select "
+                                        + CAMPAIGN_COLUMNS
+                                        + " from commerce_campaigns campaign "
+                                        + "where coalesce(campaign.organization_id, '') = ? "
+                                        + "and (? = '' or campaign.id > ?) "
+                                        + "order by campaign.id limit ?",
+                                JdbcCommerceRepository::mapCampaign,
+                                scope,
+                                cursor,
+                                cursor,
+                                limit + 1));
+        String nextCursor = "";
+        if (values.size() > limit) {
+            nextCursor = values.get(limit - 1).id();
+            values = new ArrayList<>(values.subList(0, limit));
+        }
+        return new PageResult<>(values, nextCursor);
+    }
+
+    private Optional<Cart> lockCart(String scope, String customerId, String currency) {
+        return loadCart(scope, customerId, currency, " for update");
+    }
+
+    private Optional<Cart> loadCart(String scope, String customerId, String currency) {
+        return loadCart(scope, customerId, currency, "");
+    }
+
+    private Optional<Cart> loadCart(
+            String scope, String customerId, String currency, String suffix) {
+        List<Cart> values =
+                jdbcTemplate.query(
+                        "select cart.id, cart.organization_id, cart.customer_id, "
+                                + "cart.currency, cart.status, cart.version, "
+                                + "cart.created_at, cart.updated_at "
+                                + "from commerce_carts cart "
+{{- if .Tenancy}}
+                                + "join organizations organization "
+                                + "on organization.id = cart.organization_id "
+                                + "and organization.status = 'active' "
+{{- end}}
+                                + "where coalesce(cart.organization_id, '') = ? "
+                                + "and cart.customer_id = ? and cart.currency = ? "
+                                + "and cart.status = 'active'"
+                                + suffix,
+                        (resultSet, rowNumber) -> mapCart(resultSet),
+                        scope,
+                        customerId,
+                        currency);
+        if (values.isEmpty()) {
+            return Optional.empty();
+        }
+        Cart cart = values.getFirst();
+        List<Line> lines =
+                jdbcTemplate.query(
+                        "select product_id, sku, name, unit_minor, quantity, "
+                                + "unit_minor * quantity line_minor "
+                                + "from commerce_cart_lines where cart_id = ? "
+                                + "order by product_id",
+                        JdbcCommerceRepository::mapLine,
+                        cart.id());
+        long subtotal = 0L;
+        try {
+            for (Line line : lines) {
+                subtotal = Math.addExact(subtotal, line.lineMinor());
+            }
+        } catch (ArithmeticException exception) {
+            throw conflict();
+        }
+        return Optional.of(
+                new Cart(
+                        cart.id(),
+                        cart.organizationId(),
+                        cart.customerId(),
+                        cart.currency(),
+                        cart.status(),
+                        lines,
+                        subtotal,
+                        cart.version(),
+                        cart.createdAt(),
+                        cart.updatedAt()));
+    }
+
+    private void reservePromotion(CheckoutCommand command) {
+        if (command.campaign() != null) {
+            requireOne(
+                    jdbcTemplate.update(
+                            "update commerce_campaigns set updated_at = updated_at "
+                                    + "where id = ? and coalesce(organization_id, '') = ? "
+                                    + "and status = 'active' and starts_at <= ? "
+                                    + "and ends_at > ? and minimum_minor <= ?",
+                            command.campaign().id(),
+                            scope(command.order().organizationId()),
+                            timestamp(command.order().createdAt()),
+                            timestamp(command.order().createdAt()),
+                            command.order().subtotalMinor()));
+        }
+        if (command.coupon() != null) {
+            requireOne(
+                    jdbcTemplate.update(
+                            "update commerce_coupons set redeemed_uses = redeemed_uses + 1 "
+                                    + "where id = ? and campaign_id = ? "
+                                    + "and coalesce(organization_id, '') = ? and code = ? "
+                                    + "and redeemed_uses < maximum_uses",
+                            command.coupon().id(),
+                            command.campaign().id(),
+                            scope(command.order().organizationId()),
+                            command.coupon().code()));
+        }
+    }
+
+    private void insertOrder(Order order) {
+        jdbcTemplate.update(
+                "insert into commerce_orders "
+                        + "(id, organization_id, customer_id, status, currency, "
+                        + "subtotal_minor, discount_minor, total_minor, campaign_id, "
+                        + "coupon_code, fulfillment_ref, return_reason, version, "
+                        + "created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        + "'', '', 1, ?, ?)",
+                order.id(),
+                order.organizationId(),
+                order.customerId(),
+                order.status(),
+                order.currency(),
+                order.subtotalMinor(),
+                order.discountMinor(),
+                order.totalMinor(),
+                order.campaignId(),
+                order.couponCode(),
+                timestamp(order.createdAt()),
+                timestamp(order.updatedAt()));
+        for (Line line : order.lines()) {
+            jdbcTemplate.update(
+                    "insert into commerce_order_lines "
+                            + "(order_id, product_id, sku, name, unit_minor, quantity, "
+                            + "line_minor) values (?, ?, ?, ?, ?, ?, ?)",
+                    order.id(),
+                    line.productId(),
+                    line.sku(),
+                    line.name(),
+                    line.unitMinor(),
+                    line.quantity(),
+                    line.lineMinor());
+        }
+        PaymentIntent payment = order.payment();
+        jdbcTemplate.update(
+                "insert into commerce_payment_intents "
+                        + "(id, order_id, provider, provider_ref, status, amount_minor, "
+                        + "refunded_minor, currency, updated_at) "
+                        + "values (?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                payment.id(),
+                order.id(),
+                payment.provider(),
+                payment.providerRef(),
+                payment.status(),
+                payment.amountMinor(),
+                payment.currency(),
+                timestamp(payment.updatedAt()));
+    }
+
+    private Optional<Campaign> getCampaign(String scope, String id) {
+        List<Campaign> values =
+                jdbcTemplate.query(
+                        "select "
+                                + CAMPAIGN_COLUMNS
+                                + " from commerce_campaigns campaign "
+                                + "where campaign.id = ? "
+                                + "and coalesce(campaign.organization_id, '') = ?",
+                        JdbcCommerceRepository::mapCampaign,
+                        id,
+                        scope);
+        return values.stream().findFirst();
+    }
+
+    private void appendOrderEvent(
+            String orderId, String from, String to, String reference, Instant now) {
+        jdbcTemplate.update(
+                "insert into commerce_order_events "
+                        + "(id, order_id, from_status, to_status, reference, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?)",
+                orderId + ":" + UUID.randomUUID(),
+                orderId,
+                from,
+                to,
+                reference,
+                timestamp(now));
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, "
+                        + "user_agent, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                timestamp(event.createdAt()));
+    }
+
+    private static Cart mapCart(ResultSet resultSet) throws SQLException {
+        return new Cart(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("customer_id"),
+                resultSet.getString("currency"),
+                resultSet.getString("status"),
+                List.of(),
+                0L,
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static Line mapLine(ResultSet resultSet, int rowNumber) throws SQLException {
+        return new Line(
+                resultSet.getString("product_id"),
+                resultSet.getString("sku"),
+                resultSet.getString("name"),
+                resultSet.getLong("unit_minor"),
+                resultSet.getLong("quantity"),
+                resultSet.getLong("line_minor"));
+    }
+
+    private static Order mapOrder(ResultSet resultSet, int rowNumber) throws SQLException {
+        PaymentIntent payment =
+                new PaymentIntent(
+                        resultSet.getString("payment_id"),
+                        resultSet.getString("provider"),
+                        resultSet.getString("provider_ref"),
+                        resultSet.getString("payment_status"),
+                        resultSet.getLong("amount_minor"),
+                        resultSet.getLong("refunded_minor"),
+                        resultSet.getString("payment_currency"),
+                        instant(resultSet.getTimestamp("payment_updated_at")));
+        return new Order(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("customer_id"),
+                resultSet.getString("status"),
+                resultSet.getString("currency"),
+                resultSet.getLong("subtotal_minor"),
+                resultSet.getLong("discount_minor"),
+                resultSet.getLong("total_minor"),
+                resultSet.getString("campaign_id"),
+                resultSet.getString("coupon_code"),
+                List.of(),
+                payment,
+                resultSet.getString("fulfillment_ref"),
+                resultSet.getString("return_reason"),
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static Order withLines(Order order, List<Line> lines) {
+        return new Order(
+                order.id(),
+                order.organizationId(),
+                order.customerId(),
+                order.status(),
+                order.currency(),
+                order.subtotalMinor(),
+                order.discountMinor(),
+                order.totalMinor(),
+                order.campaignId(),
+                order.couponCode(),
+                lines,
+                order.payment(),
+                order.fulfillmentRef(),
+                order.returnReason(),
+                order.version(),
+                order.createdAt(),
+                order.updatedAt());
+    }
+
+    private static Campaign mapCampaign(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new Campaign(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("name"),
+                resultSet.getString("kind"),
+                resultSet.getLong("value"),
+                resultSet.getLong("minimum_minor"),
+                resultSet.getString("currency"),
+                resultSet.getInt("priority"),
+                resultSet.getBoolean("coupon_required"),
+                resultSet.getString("status"),
+                instant(resultSet.getTimestamp("starts_at")),
+                instant(resultSet.getTimestamp("ends_at")),
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static Promotion mapPromotion(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        Campaign campaign = mapCampaign(resultSet, rowNumber);
+        Coupon coupon =
+                new Coupon(
+                        resultSet.getString("coupon_id"),
+                        resultSet.getString("coupon_org"),
+                        resultSet.getString("coupon_campaign"),
+                        resultSet.getString("coupon_code"),
+                        resultSet.getLong("maximum_uses"),
+                        resultSet.getLong("redeemed_uses"),
+                        instant(resultSet.getTimestamp("coupon_created")));
+        return new Promotion(campaign, coupon);
+    }
+
+    private static void requireOne(int changed) {
+        if (changed != 1) {
+            throw conflict();
+        }
+    }
+
+    private static Timestamp timestamp(Instant value) {
+        return Timestamp.from(value);
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String scope(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static CommerceException notFound() {
+        return new CommerceException(
+                CommerceException.Kind.NOT_FOUND, "commerce record was not found");
+    }
+
+    private static CommerceException conflict() {
+        return conflict(null);
+    }
+
+    private static CommerceException conflict(Throwable cause) {
+        CommerceException exception =
+                new CommerceException(
+                        CommerceException.Kind.CONFLICT, "commerce state conflicts");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+
+    private record Replay(
+            String orderId, String currency, String couponCode, long cartVersion) {}
+
+    private record PaymentReplay(
+            String providerReference, String status, String orderId) {}
+
+    private record PaymentState(String orderId, String scope, String status) {}
+
+    private record RefundReplay(
+            String paymentId, String providerReference, long amountMinor) {}
+
+    private static final String REQUIRES_ACTION = "requires_action";
+    private static final String SUCCEEDED = "succeeded";
+    private static final String CONFIRMED = "confirmed";
+    private static final String CANCELLED = "cancelled";
+    private static final String PENDING_PAYMENT = "pending_payment";
+    private static final String FULFILLED = "fulfilled";
+    private static final String RETURN_REQUESTED = "return_requested";
+}

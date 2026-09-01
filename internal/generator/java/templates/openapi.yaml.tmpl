@@ -2096,8 +2096,178 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReceipt"}}}}
       responses: {"200": {description: Purchase line atomically received, content: {application/json: {schema: {$ref: "#/components/schemas/InventoryReceiptResult"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
 {{- end}}
+{{if .Commerce}}
+  /api/v1/storefront/cart:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: getCommerceCart
+      x-customer-auth: true
+      parameters: [{name: currency, in: query, required: true, schema: {type: string, pattern: "^[A-Z]{3}$"}}]
+      responses: {"200": {description: Current customer cart, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCart"}}}}, "401": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/cart/lines/{product_id}:
+    parameters:
+      - {name: product_id, in: path, required: true, schema: {type: string}}
+{{- if .Tenancy}}
+      - {$ref: "#/components/parameters/OrganizationHeader"}
+{{- end}}
+    put:
+      operationId: putCommerceCartLine
+      x-customer-auth: true
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceLineWrite"}}}}
+      responses: {"200": {description: Cart line replaced, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCart"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/cart/lines/{product_id}/remove:
+    parameters:
+      - {name: product_id, in: path, required: true, schema: {type: string}}
+{{- if .Tenancy}}
+      - {$ref: "#/components/parameters/OrganizationHeader"}
+{{- end}}
+    post:
+      operationId: removeCommerceCartLine
+      x-customer-auth: true
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCartTransition"}}}}
+      responses: {"200": {description: Cart line removed, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCart"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/checkout:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: checkoutCommerceCart
+      x-customer-auth: true
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCheckout"}}}}
+      responses: {"201": {description: Idempotent order and payment intent created, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/orders:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: listCustomerCommerceOrders
+      x-customer-auth: true
+      parameters: [{$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Customer order page, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrderPage"}}}}}
+  /api/v1/storefront/orders/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+{{- if .Tenancy}}
+      - {$ref: "#/components/parameters/OrganizationHeader"}
+{{- end}}
+    get:
+      operationId: getCustomerCommerceOrder
+      x-customer-auth: true
+      responses: {"200": {description: Customer order, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "404": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/orders/{id}/return:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+{{- if .Tenancy}}
+      - {$ref: "#/components/parameters/OrganizationHeader"}
+{{- end}}
+    post:
+      operationId: requestCommerceReturn
+      x-customer-auth: true
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceReturnWrite"}}}}
+      responses: {"200": {description: Whole-order return requested, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/storefront/sandbox/payments/{provider_ref}/complete:
+    parameters: [{name: provider_ref, in: path, required: true, schema: {type: string}}]
+    post:
+      operationId: completeSandboxCommercePayment
+      x-development-only: true
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommercePaymentEvent"}}}}
+      responses: {"200": {description: Sandbox payment completed idempotently, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/orders:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: listCommerceOrders
+      x-required-permission: commerce:orders:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Administration order page, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrderPage"}}}}}
+  /api/v1/commerce/orders/{id}/fulfillment/start:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: startCommerceFulfillment
+      x-required-permission: commerce:fulfillment:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceTransition"}}}}
+      responses: {"200": {description: Fulfillment started, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/orders/{id}/fulfillment/complete:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: completeCommerceFulfillment
+      x-required-permission: commerce:fulfillment:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceTransition"}}}}
+      responses: {"200": {description: Fulfillment completed, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/orders/{id}/return/complete:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: completeCommerceReturn
+      x-required-permission: commerce:fulfillment:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceTransition"}}}}
+      responses: {"200": {description: Return completed, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/orders/{id}/refund:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: refundCommercePayment
+      x-required-permission: commerce:payments:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceRefundWrite"}}}}
+      responses: {"200": {description: Payment refunded idempotently, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/orders/{id}/reconcile:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: reconcileCommercePayment
+      x-required-permission: commerce:payments:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses: {"200": {description: Payment reconciled, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceOrder"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/campaigns:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    get:
+      operationId: listCommerceCampaigns
+      x-required-permission: commerce:marketing:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters: [{$ref: "#/components/parameters/PageCursor"}, {$ref: "#/components/parameters/PageLimit"}]
+      responses: {"200": {description: Campaign page, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCampaignPage"}}}}}
+    post:
+      operationId: createCommerceCampaign
+      x-required-permission: commerce:marketing:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCampaignWrite"}}}}
+      responses: {"201": {description: Campaign created, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCampaign"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/campaigns/{id}/activate:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: activateCommerceCampaign
+      x-required-permission: commerce:marketing:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceTransition"}}}}
+      responses: {"200": {description: Campaign activated, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCampaign"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/campaigns/{id}/archive:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}}{{if .Tenancy}}, {$ref: "#/components/parameters/OrganizationHeader"}{{end}}]
+    post:
+      operationId: archiveCommerceCampaign
+      x-required-permission: commerce:marketing:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceTransition"}}}}
+      responses: {"200": {description: Campaign archived, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCampaign"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+  /api/v1/commerce/coupons:
+{{- if .Tenancy}}
+    parameters: [{$ref: "#/components/parameters/OrganizationHeader"}]
+{{- end}}
+    post:
+      operationId: createCommerceCoupon
+      x-required-permission: commerce:marketing:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCouponWrite"}}}}
+      responses: {"201": {description: Coupon created, content: {application/json: {schema: {$ref: "#/components/schemas/CommerceCoupon"}}}}, "409": {$ref: "#/components/responses/ErrorResponse"}}
+{{end}}
 components:
-{{- if or .Tenancy .Approvals .Catalog .CustomerAccounts .CRM .Inventory}}
+{{- if or .Tenancy .Approvals .Catalog .CustomerAccounts .CRM .Inventory .Commerce}}
   parameters:
 {{- if .CRM}}
     CRMRecordStatus:
@@ -2181,7 +2351,7 @@ components:
         minLength: 1
         maxLength: 191
 {{- end}}
-{{- if or .Approvals .Catalog .CustomerAccounts .CRM .Inventory}}
+{{- if or .Approvals .Catalog .CustomerAccounts .CRM .Inventory .Commerce}}
     PageCursor:
       name: cursor
       in: query
@@ -3463,6 +3633,187 @@ components:
         next_cursor:
           type: string
 {{- end}}
+{{if .Commerce}}
+    CommerceCartLine:
+      type: object
+      required: [product_id, sku, name, unit_minor, quantity, line_minor]
+      properties:
+        product_id: {type: string}
+        sku: {type: string}
+        name: {type: string}
+        unit_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        quantity: {type: string, pattern: "^[1-9][0-9]{0,2}$"}
+        line_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+    CommerceCart:
+      type: object
+      required: [customer_id, currency, status, lines, subtotal_minor, version{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        customer_id: {type: string}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        status: {type: string, enum: [active, checked_out]}
+        lines: {type: array, items: {$ref: "#/components/schemas/CommerceCartLine"}}
+        subtotal_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        version: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CommerceLineWrite:
+      type: object
+      additionalProperties: false
+      required: [currency, quantity, version]
+      properties:
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        quantity: {type: string, pattern: "^[1-9][0-9]{0,2}$"}
+        version: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+    CommerceCartTransition:
+      type: object
+      additionalProperties: false
+      required: [currency, version]
+      properties:
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CommerceCheckout:
+      type: object
+      additionalProperties: false
+      required: [currency, idempotency_key, version]
+      properties:
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        coupon_code: {type: string, pattern: "^[A-Z0-9][A-Z0-9_-]{0,63}$"}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CommerceOrderLine:
+      allOf: [{$ref: "#/components/schemas/CommerceCartLine"}]
+    CommercePaymentIntent:
+      type: object
+      required: [id, provider, provider_ref, status, amount_minor, refunded_minor, currency, updated_at]
+      properties:
+        id: {type: string}
+        provider: {type: string}
+        provider_ref: {type: string}
+        status: {type: string, enum: [requires_action, succeeded, failed]}
+        amount_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        refunded_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        updated_at: {type: string, format: date-time}
+    CommerceOrder:
+      type: object
+      required: [id, customer_id, status, currency, subtotal_minor, discount_minor, total_minor, lines, payment, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        customer_id: {type: string}
+        status: {type: string, enum: [pending_payment, confirmed, fulfilling, fulfilled, return_requested, returned, cancelled]}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        subtotal_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        discount_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        total_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        campaign_id: {type: string}
+        coupon_code: {type: string}
+        lines: {type: array, minItems: 1, items: {$ref: "#/components/schemas/CommerceOrderLine"}}
+        payment: {$ref: "#/components/schemas/CommercePaymentIntent"}
+        fulfillment_ref: {type: string}
+        return_reason: {type: string}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CommerceOrderPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/CommerceOrder"}}, next_cursor: {type: string}}
+    CommerceReturnWrite:
+      type: object
+      additionalProperties: false
+      required: [version, reason]
+      properties:
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        reason: {type: string, minLength: 1, maxLength: 500}
+    CommercePaymentEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, status]
+      properties:
+        event_id: {type: string, minLength: 1, maxLength: 191}
+        status: {type: string, enum: [succeeded, failed]}
+    CommerceTransition:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        reference: {type: string, maxLength: 191}
+    CommerceRefundWrite:
+      type: object
+      additionalProperties: false
+      required: [amount_minor, idempotency_key]
+      properties:
+        amount_minor: {type: string, pattern: "^[1-9][0-9]{0,18}$"}
+        idempotency_key: {type: string, minLength: 1, maxLength: 191}
+    CommerceCampaign:
+      type: object
+      required: [id, name, kind, value, minimum_minor, currency, priority, coupon_required, status, starts_at, ends_at, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        name: {type: string, minLength: 1, maxLength: 160}
+        kind: {type: string, enum: [fixed, percent]}
+        value: {type: string, pattern: "^[1-9][0-9]{0,18}$"}
+        minimum_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        priority: {type: integer, minimum: -1000, maximum: 1000}
+        coupon_required: {type: boolean}
+        status: {type: string, enum: [draft, active, archived]}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CommerceCampaignWrite:
+      type: object
+      additionalProperties: false
+      required: [name, kind, value, minimum_minor, currency, priority, coupon_required, starts_at, ends_at]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        kind: {type: string, enum: [fixed, percent]}
+        value: {type: string, pattern: "^[1-9][0-9]{0,18}$"}
+        minimum_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        priority: {type: integer, minimum: -1000, maximum: 1000}
+        coupon_required: {type: boolean}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: string, format: date-time}
+    CommerceCampaignPage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: "#/components/schemas/CommerceCampaign"}}, next_cursor: {type: string}}
+    CommerceCoupon:
+      type: object
+      required: [id, campaign_id, code, maximum_uses, redeemed_uses, created_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        campaign_id: {type: string}
+        code: {type: string, pattern: "^[A-Z0-9][A-Z0-9_-]{0,63}$"}
+        maximum_uses: {type: string, pattern: "^[1-9][0-9]*$"}
+        redeemed_uses: {type: string, pattern: "^(0|[1-9][0-9]*)$"}
+        created_at: {type: string, format: date-time}
+    CommerceCouponWrite:
+      type: object
+      additionalProperties: false
+      required: [campaign_id, code, maximum_uses]
+      properties:
+        campaign_id: {type: string}
+        code: {type: string, pattern: "^[A-Z0-9][A-Z0-9_-]{0,63}$"}
+        maximum_uses: {type: string, pattern: "^[1-9][0-9]*$"}
+{{end}}
     ApiError:
       type: object
       additionalProperties: false

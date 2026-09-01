@@ -373,6 +373,80 @@ func TestERPInventoryRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateCommerceOperationsAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: catalogOwner, Version: catalogVersion},
+				{Name: customerOwner, Version: customerVersion},
+				{Name: commerceOwner, Version: commerceVersion},
+			}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if result.CapabilityLock[commerceOwner] != commerceVersion {
+				t.Fatalf("Generate() capability lock = %#v", result.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/commerce/CommerceService.java",
+				"src/main/java/com/scaffold/generated/demoservice/commerce/JdbcCommerceRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/commerce/CommerceController.java",
+				"src/main/java/com/scaffold/generated/demoservice/commerce/SandboxPaymentGateway.java",
+				"src/test/java/com/scaffold/generated/demoservice/commerce/CommerceServiceTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/commerce/CommerceDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000300__commerce_operations.sql",
+				"web/admin/src/views/CommerceView.vue",
+				"web/storefront/app/pages/cart.vue",
+				"web/storefront/app/pages/checkout.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != commerceOwner {
+					t.Errorf("commerce output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated commerce OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/storefront/checkout:") ||
+				!strings.Contains(string(openAPI), "commerce:payments:manage") ||
+				!strings.Contains(string(openAPI), "CommerceCampaignWrite:") ||
+				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")),
+					"CommerceView") {
+				t.Fatal("generated Java commerce lacks contract or surface wiring")
+			}
+		})
+	}
+}
+
+func TestCommerceOperationsRequiresLifecycleTenancy(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: catalogOwner, Version: catalogVersion},
+			{Name: customerOwner, Version: customerVersion},
+			{Name: commerceOwner, Version: commerceVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 	t.Parallel()
 

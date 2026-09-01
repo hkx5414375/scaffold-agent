@@ -1,0 +1,91 @@
+package {{.PackageName}}.commerce;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
+class CommerceDatabaseIntegrationTest {
+
+    @Test
+    @Timeout(60)
+    void migratesCommerceSchemaAndInstallsDenyByDefaultPermissions() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String namespace =
+                "scaffold_java_commerce_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + namespace);
+        applicationUrl =
+                adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + namespace;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + namespace + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, namespace);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            Integer permissionCount =
+                    jdbc.queryForObject(
+                            "select count(*) from identity_permissions "
+                                    + "where code like 'commerce:%'",
+                            Integer.class);
+            Integer userGrantCount =
+                    jdbc.queryForObject(
+                            "select count(*) from identity_role_permissions "
+                                    + "where role_code = 'user' and permission_code like 'commerce:%'",
+                            Integer.class);
+            assertThat(permissionCount).isEqualTo(4);
+            assertThat(userGrantCount).isZero();
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + namespace + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + namespace + "`");
+{{- end}}
+        }
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

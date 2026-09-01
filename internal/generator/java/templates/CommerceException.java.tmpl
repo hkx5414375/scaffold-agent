@@ -1,0 +1,21 @@
+package {{.PackageName}}.commerce;
+
+public final class CommerceException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        CONFLICT
+    }
+
+    private final Kind kind;
+
+    public CommerceException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

@@ -1,0 +1,40 @@
+package {{.PackageName}}.commerce;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import org.junit.jupiter.api.Test;
+
+class CommerceServiceTest {
+
+    @Test
+    void sandboxIntentRefundAndCompletionAreDeterministic() {
+        SandboxPaymentGateway gateway = new SandboxPaymentGateway();
+        PaymentGateway.Intent first = gateway.createIntent("order-1", 2500L, "USD", "checkout-1");
+        PaymentGateway.Intent replay = gateway.createIntent("order-1", 2500L, "USD", "checkout-1");
+
+        assertThat(replay).isEqualTo(first);
+        assertThat(first.status()).isEqualTo(SandboxPaymentGateway.REQUIRES_ACTION);
+        gateway.complete(first.providerReference(), SandboxPaymentGateway.SUCCEEDED);
+        gateway.complete(first.providerReference(), SandboxPaymentGateway.SUCCEEDED);
+        assertThat(gateway.lookup(first.providerReference()))
+                .isEqualTo(SandboxPaymentGateway.SUCCEEDED);
+        assertThat(gateway.refund(first.providerReference(), 100L, "refund-1"))
+                .isEqualTo(gateway.refund(first.providerReference(), 100L, "refund-1"));
+    }
+
+    @Test
+    void sandboxRejectsConflictingTerminalTransitions() {
+        SandboxPaymentGateway gateway = new SandboxPaymentGateway();
+        PaymentGateway.Intent intent = gateway.createIntent("order-2", 100L, "USD", "checkout-2");
+        gateway.complete(intent.providerReference(), SandboxPaymentGateway.FAILED);
+
+        assertThatThrownBy(
+                        () ->
+                                gateway.complete(
+                                        intent.providerReference(),
+                                        SandboxPaymentGateway.SUCCEEDED))
+                .isInstanceOf(CommerceException.class)
+                .hasFieldOrPropertyWithValue("kind", CommerceException.Kind.CONFLICT);
+    }
+}

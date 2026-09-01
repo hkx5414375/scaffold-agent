@@ -1,0 +1,200 @@
+insert ignore into identity_permissions (code, description) values
+    ('commerce:orders:read', 'Read commerce orders'),
+    ('commerce:fulfillment:manage', 'Manage fulfillment and returns'),
+    ('commerce:marketing:manage', 'Manage campaigns and coupons'),
+    ('commerce:payments:manage', 'Reconcile and refund payments');
+
+insert ignore into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'commerce:orders:read'),
+    ('admin', 'commerce:fulfillment:manage'),
+    ('admin', 'commerce:marketing:manage'),
+    ('admin', 'commerce:payments:manage');
+
+create table commerce_carts (
+    id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- else}}
+    organization_id varchar(191) null,
+{{- end}}
+    customer_id varchar(191) not null,
+    currency varchar(3) not null,
+    status varchar(16) not null,
+    active_key tinyint generated always as (case when status = 'active' then 1 else null end) stored,
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+    organization_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
+    constraint commerce_cart_customer_fk foreign key (customer_id) references customer_accounts (id),
+{{- if .Tenancy}}
+    constraint commerce_cart_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+{{- end}}
+    constraint commerce_cart_status_check check (status in ('active', 'checked_out')),
+    constraint commerce_cart_version_check check (version > 0),
+    unique key commerce_active_cart_unique (organization_scope, customer_id, currency, active_key)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_cart_lines (
+    cart_id varchar(191) not null,
+    product_id varchar(191) not null,
+    sku varchar(64) not null,
+    name varchar(160) not null,
+    unit_minor bigint not null,
+    quantity bigint not null,
+    primary key (cart_id, product_id),
+    constraint commerce_cart_line_cart_fk foreign key (cart_id) references commerce_carts (id) on delete cascade,
+    constraint commerce_cart_line_product_fk foreign key (product_id) references catalog_products (id),
+    constraint commerce_cart_line_money_check check (unit_minor >= 0 and quantity between 1 and 999)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_campaigns (
+    id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- else}}
+    organization_id varchar(191) null,
+{{- end}}
+    name varchar(160) not null,
+    kind varchar(16) not null,
+    value bigint not null,
+    minimum_minor bigint not null,
+    currency varchar(3) not null,
+    priority integer not null,
+    coupon_required boolean not null,
+    status varchar(16) not null,
+    starts_at timestamp(6) not null,
+    ends_at timestamp(6) not null,
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+{{- if .Tenancy}}
+    constraint commerce_campaign_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+{{- end}}
+    constraint commerce_campaign_check check (kind in ('fixed', 'percent') and status in ('draft', 'active', 'archived') and value > 0 and minimum_minor >= 0 and starts_at < ends_at and version > 0 and (kind <> 'percent' or value <= 10000)),
+    index commerce_campaign_evaluation_idx (organization_id, currency, status, priority desc, id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_coupons (
+    id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- else}}
+    organization_id varchar(191) null,
+{{- end}}
+    campaign_id varchar(191) not null,
+    code varchar(64) not null,
+    maximum_uses bigint not null,
+    redeemed_uses bigint not null default 0,
+    created_at timestamp(6) not null,
+    organization_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
+    constraint commerce_coupon_campaign_fk foreign key (campaign_id) references commerce_campaigns (id),
+{{- if .Tenancy}}
+    constraint commerce_coupon_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+{{- end}}
+    constraint commerce_coupon_uses_check check (maximum_uses > 0 and redeemed_uses between 0 and maximum_uses),
+    unique key commerce_coupon_scope_code_unique (organization_scope, code)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_orders (
+    id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- else}}
+    organization_id varchar(191) null,
+{{- end}}
+    customer_id varchar(191) not null,
+    status varchar(24) not null,
+    currency varchar(3) not null,
+    subtotal_minor bigint not null,
+    discount_minor bigint not null,
+    total_minor bigint not null,
+    campaign_id varchar(191) null,
+    coupon_code varchar(64) null,
+    fulfillment_ref varchar(191) not null default '',
+    return_reason varchar(500) not null default '',
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+    constraint commerce_order_customer_fk foreign key (customer_id) references customer_accounts (id),
+{{- if .Tenancy}}
+    constraint commerce_order_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+{{- end}}
+    constraint commerce_order_campaign_fk foreign key (campaign_id) references commerce_campaigns (id),
+    constraint commerce_order_status_check check (status in ('pending_payment', 'confirmed', 'fulfilling', 'fulfilled', 'return_requested', 'returned', 'cancelled')),
+    constraint commerce_order_money_check check (subtotal_minor >= 0 and discount_minor >= 0 and discount_minor <= subtotal_minor and total_minor = subtotal_minor - discount_minor and version > 0),
+    index commerce_order_customer_idx (organization_id, customer_id, id),
+    index commerce_order_admin_idx (organization_id, id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_order_lines (
+    order_id varchar(191) not null,
+    product_id varchar(191) not null,
+    sku varchar(64) not null,
+    name varchar(160) not null,
+    unit_minor bigint not null,
+    quantity bigint not null,
+    line_minor bigint not null,
+    primary key (order_id, product_id),
+    constraint commerce_order_line_order_fk foreign key (order_id) references commerce_orders (id) on delete cascade,
+    constraint commerce_order_line_check check (unit_minor >= 0 and quantity between 1 and 999 and line_minor = unit_minor * quantity)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_payment_intents (
+    id varchar(191) primary key,
+    order_id varchar(191) not null unique,
+    provider varchar(32) not null,
+    provider_ref varchar(191) not null unique,
+    status varchar(24) not null,
+    amount_minor bigint not null,
+    refunded_minor bigint not null default 0,
+    currency varchar(3) not null,
+    updated_at timestamp(6) not null,
+    constraint commerce_payment_order_fk foreign key (order_id) references commerce_orders (id),
+    constraint commerce_payment_check check (status in ('requires_action', 'succeeded', 'failed') and amount_minor >= 0 and refunded_minor between 0 and amount_minor)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_checkout_idempotency (
+    organization_scope varchar(191) not null,
+    customer_id varchar(191) not null,
+    idempotency_key varchar(191) not null,
+    cart_id varchar(191) not null,
+    cart_version bigint not null,
+    coupon_code varchar(64) not null default '',
+    order_id varchar(191) not null,
+    primary key (organization_scope, customer_id, idempotency_key),
+    constraint commerce_checkout_order_fk foreign key (order_id) references commerce_orders (id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_payment_events (
+    provider varchar(32) not null,
+    event_id varchar(191) not null,
+    provider_ref varchar(191) not null,
+    status varchar(24) not null,
+    order_id varchar(191) not null,
+    created_at timestamp(6) not null,
+    primary key (provider, event_id),
+    constraint commerce_event_order_fk foreign key (order_id) references commerce_orders (id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_refunds (
+    organization_scope varchar(191) not null,
+    payment_id varchar(191) not null,
+    idempotency_key varchar(191) not null,
+    provider_ref varchar(191) not null,
+    amount_minor bigint not null,
+    created_at timestamp(6) not null,
+    primary key (organization_scope, idempotency_key),
+    constraint commerce_refund_payment_fk foreign key (payment_id) references commerce_payment_intents (id),
+    constraint commerce_refund_amount_check check (amount_minor > 0)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;
+
+create table commerce_order_events (
+    id varchar(191) primary key,
+    order_id varchar(191) not null,
+    from_status varchar(24) not null,
+    to_status varchar(24) not null,
+    reference varchar(500) not null default '',
+    created_at timestamp(6) not null,
+    constraint commerce_order_event_order_fk foreign key (order_id) references commerce_orders (id) on delete cascade,
+    index commerce_order_events_order_idx (order_id, created_at, id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

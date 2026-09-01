@@ -1,0 +1,272 @@
+package {{.PackageName}}.commerce;
+
+import {{.PackageName}}.commerce.CommerceModels.Campaign;
+import {{.PackageName}}.commerce.CommerceModels.CampaignPage;
+import {{.PackageName}}.commerce.CommerceModels.Cart;
+import {{.PackageName}}.commerce.CommerceModels.Coupon;
+import {{.PackageName}}.commerce.CommerceModels.Order;
+import {{.PackageName}}.commerce.CommerceModels.OrderPage;
+import {{.PackageName}}.customeraccounts.CustomerAccount;
+import {{.PackageName}}.customeraccounts.CustomerAccountService;
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import java.util.Arrays;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class CommerceController {
+
+    private static final String CUSTOMER_SESSION_COOKIE = "scaffold_customer_session";
+    private static final String ORGANIZATION_HEADER = "X-Organization-ID";
+    private static final String STOREFRONT_PATH = "/api/v1/storefront";
+    private static final String ADMIN_PATH = "/api/v1/commerce";
+
+    private final CommerceService service;
+    private final CustomerAccountService customerAccountService;
+    private final SandboxPaymentGateway sandboxGateway;
+    private final boolean sandboxEnabled;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring service collaborators are process-scoped dependencies")
+    public CommerceController(
+            CommerceService service,
+            CustomerAccountService customerAccountService,
+            SandboxPaymentGateway sandboxGateway,
+            @Value("${scaffold.commerce-sandbox-enabled:false}") boolean sandboxEnabled) {
+        this.service = service;
+        this.customerAccountService = customerAccountService;
+        this.sandboxGateway = sandboxGateway;
+        this.sandboxEnabled = sandboxEnabled;
+    }
+
+    @GetMapping(STOREFRONT_PATH + "/cart")
+    public Cart cart(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestParam String currency,
+            HttpServletRequest request) {
+        return service.cart(currentCustomer(organizationId, request), currency);
+    }
+
+    @PutMapping(STOREFRONT_PATH + "/cart/lines/{productId}")
+    public Cart putLine(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @PathVariable String productId,
+            @RequestBody CommerceService.LineInput input,
+            HttpServletRequest request) {
+        return service.putLine(currentCustomer(organizationId, request), productId, input);
+    }
+
+    @PostMapping(STOREFRONT_PATH + "/cart/lines/{productId}/remove")
+    public Cart removeLine(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @PathVariable String productId,
+            @RequestBody CartTransition input,
+            HttpServletRequest request) {
+        if (input == null) {
+            throw invalid();
+        }
+        return service.removeLine(
+                currentCustomer(organizationId, request),
+                productId,
+                input.currency(),
+                input.version());
+    }
+
+    @PostMapping(STOREFRONT_PATH + "/checkout")
+    public ResponseEntity<Order> checkout(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CommerceService.CheckoutInput input,
+            HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.checkout(currentCustomer(organizationId, request), input));
+    }
+
+    @GetMapping(STOREFRONT_PATH + "/orders")
+    public OrderPage customerOrders(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            HttpServletRequest request) {
+        return service.customerOrders(
+                currentCustomer(organizationId, request), cursor, limit);
+    }
+
+    @GetMapping(STOREFRONT_PATH + "/orders/{id}")
+    public Order customerOrder(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @PathVariable String id,
+            HttpServletRequest request) {
+        return service.customerOrder(currentCustomer(organizationId, request), id);
+    }
+
+    @PostMapping(STOREFRONT_PATH + "/orders/{id}/return")
+    public Order requestReturn(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @PathVariable String id,
+            @RequestBody CommerceService.ReturnInput input,
+            HttpServletRequest request) {
+        return service.requestReturn(
+                currentCustomer(organizationId, request), id, input);
+    }
+
+    @PostMapping(STOREFRONT_PATH + "/sandbox/payments/{providerReference}/complete")
+    public Order completeSandboxPayment(
+            @PathVariable String providerReference,
+            @RequestBody CommerceService.PaymentEventInput input) {
+        if (!sandboxEnabled || input == null) {
+            throw notFound();
+        }
+        sandboxGateway.complete(providerReference, input.status());
+        return service.completePayment(providerReference, input);
+    }
+
+    @GetMapping(ADMIN_PATH + "/orders")
+    @RequirePermission(value = "commerce:orders:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public OrderPage orders(
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listOrders(cursor, limit, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/orders/{id}/fulfillment/start")
+    @RequirePermission(value = "commerce:fulfillment:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Order startFulfillment(
+            @PathVariable String id,
+            @RequestBody CommerceService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.startFulfillment(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/orders/{id}/fulfillment/complete")
+    @RequirePermission(value = "commerce:fulfillment:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Order completeFulfillment(
+            @PathVariable String id,
+            @RequestBody CommerceService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.completeFulfillment(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/orders/{id}/return/complete")
+    @RequirePermission(value = "commerce:fulfillment:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Order completeReturn(
+            @PathVariable String id,
+            @RequestBody CommerceService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.completeReturn(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/orders/{id}/refund")
+    @RequirePermission(value = "commerce:payments:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Order refund(
+            @PathVariable String id,
+            @RequestBody CommerceService.RefundInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.refund(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/orders/{id}/reconcile")
+    @RequirePermission(value = "commerce:payments:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Order reconcile(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reconcile(id, actor);
+    }
+
+    @GetMapping(ADMIN_PATH + "/campaigns")
+    @RequirePermission(value = "commerce:marketing:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CampaignPage campaigns(
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.listCampaigns(cursor, limit, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/campaigns")
+    @RequirePermission(value = "commerce:marketing:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<Campaign> createCampaign(
+            @RequestBody CommerceService.CampaignInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createCampaign(input, actor));
+    }
+
+    @PostMapping(ADMIN_PATH + "/campaigns/{id}/activate")
+    @RequirePermission(value = "commerce:marketing:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Campaign activateCampaign(
+            @PathVariable String id,
+            @RequestBody CommerceService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.activateCampaign(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/campaigns/{id}/archive")
+    @RequirePermission(value = "commerce:marketing:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public Campaign archiveCampaign(
+            @PathVariable String id,
+            @RequestBody CommerceService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archiveCampaign(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/coupons")
+    @RequirePermission(value = "commerce:marketing:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<Coupon> createCoupon(
+            @RequestBody CommerceService.CouponInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(service.createCoupon(input, actor));
+    }
+
+    private CustomerAccount currentCustomer(
+            String organizationId, HttpServletRequest request) {
+        return customerAccountService.authenticate(
+                organizationId, sessionToken(request.getCookies()));
+    }
+
+    private static String sessionToken(Cookie[] cookies) {
+        if (cookies == null) {
+            return "";
+        }
+        return Arrays.stream(cookies)
+                .filter(cookie -> CUSTOMER_SESSION_COOKIE.equals(cookie.getName()))
+                .map(Cookie::getValue)
+                .findFirst()
+                .orElse("");
+    }
+
+    private static CommerceException invalid() {
+        return new CommerceException(
+                CommerceException.Kind.INVALID, "commerce input is invalid");
+    }
+
+    private static CommerceException notFound() {
+        return new CommerceException(
+                CommerceException.Kind.NOT_FOUND, "sandbox endpoint is disabled");
+    }
+
+    public record CartTransition(String currency, Long version) {}
+}

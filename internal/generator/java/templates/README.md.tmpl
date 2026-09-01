@@ -41,6 +41,21 @@ cookie, while automation uses `Authorization: Bearer <token>`. Raw session and A
 tokens are returned only to their owners and only SHA-256 digests are persisted.
 Database errors are never returned to clients. The HTTP contract is
 `api/openapi.yaml`.
+{{if .Commerce}}
+
+## Commerce operations
+
+The `commerce-operations` capability composes the catalog and customer account
+capabilities into carts, deterministic single-promotion checkout, immutable order
+snapshots, payment intents, idempotent callbacks and refunds, fulfillment, and
+whole-order returns. Monetary values remain decimal strings in minor units.
+
+The bundled payment gateway is local and performs no network requests. Its payment
+completion endpoint is disabled by default; set `COMMERCE_SANDBOX_ENABLED=true`
+only for local demonstrations. Implement `PaymentGateway` for a real provider while
+preserving the same idempotency and reconciliation contract. Never put provider
+credentials in the Blueprint or AI context.
+{{end}}
 {{if .Jobs}}
 
 ## Background worker
