@@ -1,0 +1,141 @@
+"""Payload-free scoped background job administration use cases."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.jobadmin.models import (
+    JobAdministrationError,
+    JobAdministrationErrorKind,
+    JobAdministrationItem,
+    JobAdministrationPage,
+)
+from {{.PackageName}}.jobadmin.repository import (
+    JobAdministrationConflict,
+    JobAdministrationNotFound,
+    JobAdministrationRepository,
+)
+
+STATUSES = frozenset({"queued", "running", "succeeded", "retry", "dead"})
+
+
+class JobAdministrationService:
+    """Bounded listing and dead-only retry independent from HTTP and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: JobAdministrationRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def list(
+        self,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> JobAdministrationPage:
+        """List one descending payload-free metadata page."""
+        organization_id = _scope(actor)
+        normalized_status = _optional(status, 16)
+        normalized_cursor = _optional(cursor, 191)
+        if (normalized_status and normalized_status not in STATUSES) or limit < 1 or limit > 100:
+            raise _invalid()
+        try:
+            page = self._repository.list(
+                organization_id,
+                normalized_status,
+                normalized_cursor,
+                limit,
+            )
+        except JobAdministrationError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return JobAdministrationPage(items=page.items, next_cursor=page.next_cursor)
+
+    def retry(self, job_id: str, actor: Principal) -> JobAdministrationItem:
+        """Atomically queue one scoped dead job and append audit evidence."""
+        organization_id = _scope(actor)
+        normalized_id = _required(job_id, 191)
+        now = self._clock()
+        try:
+            return self._repository.retry_dead(
+                organization_id,
+                normalized_id,
+                now,
+                AuditEvent(
+                    id=str(uuid4()),
+                    user_id=actor.user_id,
+                    action="jobs:retry",
+                    outcome="succeeded",
+                    target=normalized_id,
+                    ip_address=None,
+                    user_agent=None,
+                    created_at=now,
+                ),
+            )
+        except JobAdministrationNotFound as error:
+            raise _not_found() from error
+        except JobAdministrationConflict as error:
+            raise _conflict() from error
+        except JobAdministrationError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+
+def _scope(actor: Principal) -> str:
+    _required(actor.user_id, 191)
+{{- if .Tenancy}}
+    return _required(actor.organization_id or "", 191)
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _required(value: str, maximum: int) -> str:
+    normalized = _optional(value, maximum)
+    if not normalized:
+        raise _invalid()
+    return normalized
+
+
+def _optional(value: str, maximum: int) -> str:
+    if any(not character.isprintable() for character in value):
+        raise _invalid()
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise _invalid()
+    return normalized
+
+
+def _invalid() -> JobAdministrationError:
+    return JobAdministrationError(
+        JobAdministrationErrorKind.INVALID,
+        "job administration input is invalid",
+    )
+
+
+def _not_found() -> JobAdministrationError:
+    return JobAdministrationError(
+        JobAdministrationErrorKind.NOT_FOUND,
+        "background job was not found",
+    )
+
+
+def _conflict() -> JobAdministrationError:
+    return JobAdministrationError(
+        JobAdministrationErrorKind.CONFLICT,
+        "only dead background jobs can be retried",
+    )
+
+
+def _storage() -> JobAdministrationError:
+    return JobAdministrationError(
+        JobAdministrationErrorKind.STORAGE,
+        "job administration storage is unavailable",
+    )

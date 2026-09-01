@@ -23,6 +23,14 @@ from {{.PackageName}}.health import router as health_router
 from {{.PackageName}}.identity.http import router as identity_router
 from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
 from {{.PackageName}}.identity.service import IdentityService
+{{- if .JobAdmin}}
+from {{.PackageName}}.jobadmin.http import (
+    install_error_handlers as install_job_administration_error_handlers,
+)
+from {{.PackageName}}.jobadmin.http import router as job_administration_router
+from {{.PackageName}}.jobadmin.repository import SQLAlchemyJobAdministrationRepository
+from {{.PackageName}}.jobadmin.service import JobAdministrationService
+{{- end}}
 {{- if .Jobs}}
 from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
 from {{.PackageName}}.jobs.service import JobService
@@ -94,6 +102,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.notification_service = NotificationService(job_service)
 {{- end}}
 {{- end}}
+{{- if .JobAdmin}}
+        app.state.job_administration_service = JobAdministrationService(
+            SQLAlchemyJobAdministrationRepository(engine)
+        )
+{{- end}}
         app.state.tenancy_service = TenancyService(SQLAlchemyTenancyRepository(engine))
 {{- if .TenancyLifecycle}}
         app.state.tenancy_lifecycle_service = TenancyLifecycleService(
@@ -123,6 +136,9 @@ def create_app() -> FastAPI:
 {{- if .Files}}
     install_file_error_handlers(application)
 {{- end}}
+{{- if .JobAdmin}}
+    install_job_administration_error_handlers(application)
+{{- end}}
 {{- if .TenancyLifecycle}}
     install_lifecycle_error_handlers(application)
 {{- end}}
@@ -136,6 +152,9 @@ def create_app() -> FastAPI:
     application.include_router(identity_router)
 {{- if .Files}}
     application.include_router(file_router)
+{{- end}}
+{{- if .JobAdmin}}
+    application.include_router(job_administration_router)
 {{- end}}
     application.include_router(tenancy_router)
 {{- if .TenancyLifecycle}}

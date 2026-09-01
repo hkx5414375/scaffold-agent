@@ -627,6 +627,87 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 {{end}}
+{{if .JobAdmin}}
+  /api/v1/jobs:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: listBackgroundJobs
+      summary: List bounded background job metadata without payloads or internal keys
+      x-required-permission: jobs:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, retry, dead]
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 191
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Payload-free background job metadata page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAdministrationPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/jobs/{job_id}/retry:
+    parameters:
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 191
+    post:
+      operationId: retryDeadBackgroundJob
+      summary: Reset one dead job to queued without changing its payload
+      x-required-permission: jobs:manage
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Dead background job returned to the queue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAdministrationItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -1109,6 +1190,79 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/FileAsset"
+        next_cursor:
+          type: string
+          maxLength: 191
+{{end}}
+{{if .JobAdmin}}
+    JobAdministrationItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - type
+        - status
+        - priority
+        - attempts
+        - max_attempts
+        - available_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          maxLength: 191
+        organization_id:
+          type: string
+          maxLength: 191
+        type:
+          type: string
+          maxLength: 128
+        status:
+          type: string
+          enum: [queued, running, succeeded, retry, dead]
+        priority:
+          type: integer
+          minimum: -100
+          maximum: 100
+        attempts:
+          type: integer
+          minimum: 0
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 100
+        available_at:
+          type: string
+          format: date-time
+        lease_owner:
+          type: string
+          maxLength: 128
+        lease_until:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+          maxLength: 2000
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    JobAdministrationPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/JobAdministrationItem"
         next_cursor:
           type: string
           maxLength: 191

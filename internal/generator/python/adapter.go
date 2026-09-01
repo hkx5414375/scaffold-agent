@@ -39,6 +39,8 @@ const (
 	filesVersion            = "0.1.0"
 	cacheOwner              = "application-cache"
 	cacheVersion            = "0.1.0"
+	jobAdminOwner           = "job-administration"
+	jobAdminVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -137,6 +139,17 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: cacheOwner, Version: cacheVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Cross-instance bounded JSON cache with tenant-aware database storage.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobAdminOwner, Version: jobAdminVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Payload-free job metadata listing and dead-letter retry administration.",
+			Requires:    []spec.PackDependency{{Name: jobsOwner, Constraint: "^0.1.0"}},
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -343,6 +356,18 @@ var cacheTemplates = map[string]string{
 	"tests/test_application_cache_database.py":                   "templates/test_application_cache_database.py.tmpl",
 }
 
+var jobAdminTemplates = map[string]string{
+	"src/package/jobadmin/__init__.py":                            "templates/jobadmin_init.py.tmpl",
+	"src/package/jobadmin/http.py":                                "templates/jobadmin_http.py.tmpl",
+	"src/package/jobadmin/models.py":                              "templates/jobadmin_models.py.tmpl",
+	"src/package/jobadmin/repository.py":                          "templates/jobadmin_repository.py.tmpl",
+	"src/package/jobadmin/service.py":                             "templates/jobadmin_service.py.tmpl",
+	"src/package/migration/versions/000230_job_administration.py": "templates/jobadmin_migration.py.tmpl",
+	"tests/test_job_administration.py":                            "templates/test_job_administration.py.tmpl",
+	"tests/test_job_administration_database.py":                   "templates/test_job_administration_database.py.tmpl",
+	"tests/test_job_administration_http.py":                       "templates/test_job_administration_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -401,6 +426,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	notificationsEnabled := false
 	filesEnabled := false
 	cacheEnabled := false
+	jobAdminEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -421,6 +447,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == cacheOwner {
 			cacheEnabled = true
+		}
+		if pack.Metadata.Name == jobAdminOwner {
+			jobAdminEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -449,11 +478,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Notifications:         notificationsEnabled,
 		Files:                 filesEnabled,
 		Cache:                 cacheEnabled,
+		JobAdmin:              jobAdminEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+3,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+4,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -540,6 +570,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if jobAdminEnabled {
+		for path, templatePath := range jobAdminTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    jobAdminOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -569,6 +607,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets["web/admin/src/views/FilesView.vue"] = renderTarget{
 				Template:    "templates/src/views/FilesView.vue",
 				Owner:       filesOwner,
+				SharedAdmin: true,
+			}
+		}
+		if jobAdminEnabled {
+			targets["web/admin/src/views/JobsView.vue"] = renderTarget{
+				Template:    "templates/src/views/JobsView.vue",
+				Owner:       jobAdminOwner,
 				SharedAdmin: true,
 			}
 		}
@@ -618,6 +663,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if cacheEnabled {
 		capabilityLock[cacheOwner] = cacheVersion
+	}
+	if jobAdminEnabled {
+		capabilityLock[jobAdminOwner] = jobAdminVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

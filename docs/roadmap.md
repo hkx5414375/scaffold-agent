@@ -73,6 +73,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Python notifications 0.1 with normalized idempotent enqueue, worker-only SMTP initialization, mandatory TLS, bounded delivery, and generic secret-free failures.
 - [x] Python file-assets 0.1 with tenant-scoped metadata, bounded multipart streaming, atomic local publication, safe downloads, mutation compensation, and shared administration UI.
 - [x] Python application-cache 0.1 with tenant-scoped bounded JSON, dialect-native atomic upsert, strict TTL, idempotent invalidation, and bounded cleanup.
+- [x] Python job-administration 0.1 with payload-free metadata, tenant-scoped listing, dead-only retry, atomic audit, and shared administration UI.
 - [ ] Remaining Python M5 platform capability parity.
 
 ## M7 — General business suite and storefront

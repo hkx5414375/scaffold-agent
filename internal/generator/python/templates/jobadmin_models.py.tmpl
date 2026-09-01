@@ -1,0 +1,54 @@
+"""Safe public job metadata and administration failures."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict
+
+
+class JobAdministrationErrorKind(StrEnum):
+    """Stable job administration failure categories."""
+
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    STORAGE = "storage"
+
+
+@dataclass(frozen=True, slots=True)
+class JobAdministrationError(Exception):
+    """Expected administration failure without job payload disclosure."""
+
+    kind: JobAdministrationErrorKind
+    message: str
+
+
+class JobAdministrationItem(BaseModel):
+    """Payload-free operational metadata for one job."""
+
+    id: str
+    organization_id: str | None = None
+    type: str
+    status: str
+    priority: int
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class JobAdministrationPage(BaseModel):
+    """One bounded descending job metadata page."""
+
+    items: list[JobAdministrationItem]
+    next_cursor: str
+
+    model_config = ConfigDict(extra="forbid")

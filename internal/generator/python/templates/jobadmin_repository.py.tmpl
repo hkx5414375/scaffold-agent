@@ -1,0 +1,183 @@
+"""Scoped transactional background job administration persistence."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Protocol, cast
+
+from sqlalchemy import select, update
+from sqlalchemy.engine import Engine, RowMapping
+
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.jobadmin.models import JobAdministrationItem
+from {{.PackageName}}.jobs.models import background_jobs
+
+
+class JobAdministrationNotFound(Exception):
+    """No job exists inside the requested organization scope."""
+
+
+class JobAdministrationConflict(Exception):
+    """The scoped job is not dead and cannot be retried."""
+
+
+@dataclass(frozen=True, slots=True)
+class PageResult:
+    """Internal keyset page result."""
+
+    items: list[JobAdministrationItem]
+    next_cursor: str
+
+
+class JobAdministrationRepository(Protocol):
+    """Payload-free listing and dead-only retry persistence seam."""
+
+    def list(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> PageResult: ...
+
+    def retry_dead(
+        self,
+        organization_id: str,
+        job_id: str,
+        now: datetime,
+        audit: AuditEvent,
+    ) -> JobAdministrationItem: ...
+
+
+class SQLAlchemyJobAdministrationRepository:
+    """SQLAlchemy adapter with scope predicates and row-locked retry."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def list(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> PageResult:
+        statement = (
+            select(*_public_columns())
+            .where(*_scope(organization_id))
+            .order_by(background_jobs.c.id.desc())
+            .limit(limit + 1)
+        )
+        if status:
+            statement = statement.where(background_jobs.c.status == status)
+        if cursor:
+            statement = statement.where(background_jobs.c.id < cursor)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        items = [_map_item(row) for row in rows]
+        next_cursor = items[limit - 1].id if len(items) > limit else ""
+        return PageResult(items[:limit], next_cursor)
+
+    def retry_dead(
+        self,
+        organization_id: str,
+        job_id: str,
+        now: datetime,
+        audit: AuditEvent,
+    ) -> JobAdministrationItem:
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(background_jobs.c.status)
+                .where(
+                    *_scope(organization_id),
+                    background_jobs.c.id == job_id,
+                )
+                .with_for_update()
+            ).first()
+            if row is None:
+                raise JobAdministrationNotFound()
+            if str(row[0]) != "dead":
+                raise JobAdministrationConflict()
+            changed = connection.execute(
+                update(background_jobs)
+                .where(
+                    *_scope(organization_id),
+                    background_jobs.c.id == job_id,
+                    background_jobs.c.status == "dead",
+                )
+                .values(
+                    status="queued",
+                    attempts=0,
+                    available_at=now,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_error=None,
+                    completed_at=None,
+                    updated_at=now,
+                )
+            ).rowcount
+            if changed != 1:
+                raise JobAdministrationNotFound()
+            append_audit(connection, audit)
+            updated_row = (
+                connection.execute(
+                    select(*_public_columns()).where(
+                        *_scope(organization_id),
+                        background_jobs.c.id == job_id,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        return _map_item(updated_row)
+
+
+def _scope(organization_id: str) -> tuple[Any, ...]:
+{{- if .Tenancy}}
+    return (background_jobs.c.organization_id == organization_id,)
+{{- else}}
+    del organization_id
+    return (
+        background_jobs.c.organization_id.is_(None),
+        background_jobs.c.scope_key == "global",
+    )
+{{- end}}
+
+
+def _public_columns() -> tuple[Any, ...]:
+    return (
+        background_jobs.c.id,
+        background_jobs.c.organization_id,
+        background_jobs.c.type,
+        background_jobs.c.status,
+        background_jobs.c.priority,
+        background_jobs.c.attempts,
+        background_jobs.c.max_attempts,
+        background_jobs.c.available_at,
+        background_jobs.c.lease_owner,
+        background_jobs.c.lease_until,
+        background_jobs.c.last_error,
+        background_jobs.c.created_at,
+        background_jobs.c.updated_at,
+        background_jobs.c.completed_at,
+    )
+
+
+def _map_item(row: RowMapping) -> JobAdministrationItem:
+    organization_id = row["organization_id"]
+    return JobAdministrationItem(
+        id=str(row["id"]),
+        organization_id=str(organization_id) if organization_id is not None else None,
+        type=str(row["type"]),
+        status=str(row["status"]),
+        priority=int(row["priority"]),
+        attempts=int(row["attempts"]),
+        max_attempts=int(row["max_attempts"]),
+        available_at=cast(datetime, row["available_at"]),
+        lease_owner=cast(str | None, row["lease_owner"]),
+        lease_until=cast(datetime | None, row["lease_until"]),
+        last_error=cast(str | None, row["last_error"]),
+        created_at=cast(datetime, row["created_at"]),
+        updated_at=cast(datetime, row["updated_at"]),
+        completed_at=cast(datetime | None, row["completed_at"]),
+    )

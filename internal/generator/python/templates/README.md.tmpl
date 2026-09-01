@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}
 
 ## 环境要求
 
@@ -52,6 +52,9 @@ $env:SMTP_PASSWORD = "replace-me"
 `CacheService` 在 {{.Database.DisplayName}} 中保存跨进程一致的 JSON，租户项目按组织隔离，非租户项目固定使用 `global` 范围。键最多 191 字节，值最多 256 KiB，TTL 必须大于零且不超过 30 天；不存在、过期和跨租户读取统一返回 `CacheErrorKind.MISS`。`purge_expired` 每次最多清理 10,000 行。
 
 业务代码应使用稳定命名空间并在权威数据变更后主动失效，不得缓存凭据或生成通用缓存 HTTP 接口。需要 Redis 时只替换仓储适配器，并保留范围、大小、过期、Miss 和有界清理契约。
+{{end}}
+{{if .JobAdmin}}
+管理员使用 `jobs:read` 查看最多 100 条任务元数据，使用 `jobs:manage` 把当前组织内的死信任务重新放回队列。API、OpenAPI 和管理端都不暴露任务载荷、作用域键或幂等键；重试会在一个数据库事务中清理租约和错误状态并写入 `jobs:retry` 审计事件。不得通过管理接口查看或修改载荷、接管运行中任务或绕过组织范围。
 {{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
@@ -118,6 +121,9 @@ uv run pytest
 {{end}}
 {{if .Cache}}
 - `src/{{.PackageName}}/cache`：跨实例 JSON 缓存用例、原子方言 Upsert 和有界过期清理。
+{{end}}
+{{if .JobAdmin}}
+- `src/{{.PackageName}}/jobadmin`：不暴露载荷与幂等键的任务元数据查询，以及仅死信可用的审计重试。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

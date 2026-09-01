@@ -50,6 +50,10 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/files/{asset_id}", "delete"),
         ("/api/v1/files/{asset_id}/content", "get"),
 {{- end}}
+{{- if .JobAdmin}}
+        ("/api/v1/jobs", "get"),
+        ("/api/v1/jobs/{job_id}/retry", "post"),
+{{- end}}
     }
     runtime_operations = {
         (path, method)
@@ -138,6 +142,18 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert cache_imports.isdisjoint({"fastapi", "sqlalchemy", "redis"})
+{{- end}}
+{{- if .JobAdmin}}
+
+    job_administration_tree = ast.parse(
+        (PACKAGE / "jobadmin" / "service.py").read_text(encoding="utf-8")
+    )
+    job_administration_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(job_administration_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert job_administration_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

@@ -1,0 +1,192 @@
+"""Job administration contracts for SQLite and the selected database."""
+
+import os
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, insert, select{{if .Tenancy}}, update{{end}}
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    role_permissions,
+    users,
+)
+from {{.PackageName}}.jobadmin.models import JobAdministrationError, JobAdministrationErrorKind
+from {{.PackageName}}.jobadmin.repository import SQLAlchemyJobAdministrationRepository
+from {{.PackageName}}.jobadmin.service import JobAdministrationService
+from {{.PackageName}}.jobs.models import background_jobs
+from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
+from {{.PackageName}}.jobs.service import JobService
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    user_id = "jobadmin-user-" + suffix
+    email = suffix + "-jobadmin@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    login_actor = Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+    organization_id: str | None = None
+    actor = login_actor
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization_id = tenancy.create("Job Administration " + suffix, login_actor).id
+    actor = login_actor.model_copy(update={"organization_id": organization_id})
+{{- end}}
+    jobs = JobService(SQLAlchemyJobRepository(engine), lambda: now)
+    dead = jobs.enqueue(
+        organization_id,
+        "reports.export",
+        {"secret": True},
+        "dead-" + suffix,
+        max_attempts=1,
+    )
+    leased = jobs.lease_next("worker-" + suffix, timedelta(seconds=30))
+    assert leased.id == dead.id
+    jobs.fail(leased, "worker-" + suffix, RuntimeError("private failure"))
+    queued = jobs.enqueue(
+        organization_id,
+        "reports.export",
+        {"queued": True},
+        "queued-" + suffix,
+    )
+{{- if .Tenancy}}
+    other = tenancy.create("Other Job Administration " + suffix, login_actor)
+    hidden = jobs.enqueue(
+        other.id,
+        "reports.export",
+        {"hidden": True},
+        "hidden-" + suffix,
+        max_attempts=1,
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            update(background_jobs)
+            .where(background_jobs.c.id == hidden.id)
+            .values(
+                status="dead",
+                attempts=1,
+                last_error="background job handler failed: RuntimeError",
+                completed_at=now,
+                updated_at=now,
+            )
+        )
+{{- end}}
+
+    service = JobAdministrationService(SQLAlchemyJobAdministrationRepository(engine), lambda: now)
+    page = service.list("dead", "", 20, actor)
+    assert [item.id for item in page.items] == [dead.id]
+    assert page.items[0].last_error == "background job handler failed: RuntimeError"
+    assert set(page.items[0].model_dump()).isdisjoint(
+        {"payload", "payload_json", "scope_key", "dedupe_key"}
+    )
+{{- if .Tenancy}}
+    with pytest.raises(JobAdministrationError) as hidden_failure:
+        service.retry(hidden.id, actor)
+    assert hidden_failure.value.kind == JobAdministrationErrorKind.NOT_FOUND
+{{- end}}
+
+    retried = service.retry(dead.id, actor)
+    assert retried.status == "queued"
+    assert retried.attempts == 0
+    assert retried.lease_owner is None
+    assert retried.lease_until is None
+    assert retried.last_error is None
+    assert retried.completed_at is None
+    with pytest.raises(JobAdministrationError) as conflict:
+        service.retry(dead.id, actor)
+    assert conflict.value.kind == JobAdministrationErrorKind.CONFLICT
+    with pytest.raises(JobAdministrationError) as queued_conflict:
+        service.retry(queued.id, actor)
+    assert queued_conflict.value.kind == JobAdministrationErrorKind.CONFLICT
+
+    with engine.connect() as connection:
+        audit_count = connection.execute(
+            select(audit_events.c.id).where(
+                audit_events.c.action == "jobs:retry",
+                audit_events.c.target == dead.id,
+            )
+        ).all()
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(["jobs:read", "jobs:manage"])
+                )
+            ).all()
+        )
+    assert len(audit_count) == 1
+    assert grants == {("admin", "jobs:read"), ("admin", "jobs:manage")}
+
+    job_ids = [dead.id, queued.id]
+{{- if .Tenancy}}
+    job_ids.append(hidden.id)
+{{- end}}
+    with engine.begin() as connection:
+        connection.execute(delete(background_jobs).where(background_jobs.c.id.in_(job_ids)))
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id.in_([organization_id, other.id])
+            )
+        )
+        connection.execute(
+            delete(organizations).where(organizations.c.id.in_([organization_id, other.id]))
+        )
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

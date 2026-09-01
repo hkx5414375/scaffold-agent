@@ -1,0 +1,177 @@
+"""Payload-free job administration validation and failure contracts."""
+
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.jobadmin.models import (
+    JobAdministrationError,
+    JobAdministrationErrorKind,
+    JobAdministrationItem,
+)
+from {{.PackageName}}.jobadmin.repository import (
+    JobAdministrationConflict,
+    JobAdministrationNotFound,
+    PageResult,
+)
+from {{.PackageName}}.jobadmin.service import JobAdministrationService
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.item = JobAdministrationItem(
+            id="job-1",
+            organization_id={{if .Tenancy}}"organization-1"{{else}}None{{end}},
+            type="reports.export",
+            status="dead",
+            priority=10,
+            attempts=3,
+            max_attempts=3,
+            available_at=NOW,
+            lease_owner=None,
+            lease_until=None,
+            last_error="background job handler failed: RuntimeError",
+            created_at=NOW,
+            updated_at=NOW,
+            completed_at=NOW,
+        )
+        self.audit: AuditEvent | None = None
+        self.failure: Exception | None = None
+        self.scope = ""
+
+    def list(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> PageResult:
+        self._fail()
+        self.scope = organization_id
+        assert status == "dead"
+        assert cursor == ""
+        assert limit == 20
+        return PageResult([self.item], "next-job")
+
+    def retry_dead(
+        self,
+        organization_id: str,
+        job_id: str,
+        now: datetime,
+        audit: AuditEvent,
+    ) -> JobAdministrationItem:
+        self._fail()
+        self.scope = organization_id
+        if job_id == "missing":
+            raise JobAdministrationNotFound()
+        if self.item.status != "dead":
+            raise JobAdministrationConflict()
+        self.audit = audit
+        self.item = self.item.model_copy(
+            update={
+                "status": "queued",
+                "attempts": 0,
+                "available_at": now,
+                "last_error": None,
+                "completed_at": None,
+                "updated_at": now,
+            }
+        )
+        return self.item
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+def _actor(organization_id: str | None = {{if .Tenancy}}"organization-1"{{else}}None{{end}}) -> Principal:
+    return Principal(
+        user_id="user-1",
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=organization_id,
+{{- end}}
+    )
+
+
+def test_list_and_retry_preserve_scope_and_audit() -> None:
+    repository = MemoryRepository()
+    service = JobAdministrationService(repository, lambda: NOW)
+
+    page = service.list(" dead ", "", 20, _actor())
+    retried = service.retry(" job-1 ", _actor())
+
+    assert [item.id for item in page.items] == ["job-1"]
+    assert page.next_cursor == "next-job"
+    assert retried.status == "queued"
+    assert retried.attempts == 0
+    assert retried.last_error is None
+    assert retried.completed_at is None
+    assert repository.scope == {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+    assert repository.audit is not None
+    assert repository.audit.action == "jobs:retry"
+    assert repository.audit.target == "job-1"
+    assert repository.audit.user_id == "user-1"
+
+
+@pytest.mark.parametrize(
+    ("status", "cursor", "limit"),
+    [
+        ("unknown", "", 20),
+        ("dead\n", "", 20),
+        ("dead", "unsafe\ncursor", 20),
+        ("dead", "x" * 192, 20),
+        ("dead", "", 0),
+        ("dead", "", 101),
+    ],
+)
+def test_invalid_list_input_is_rejected(status: str, cursor: str, limit: int) -> None:
+    with pytest.raises(JobAdministrationError) as failure:
+        JobAdministrationService(MemoryRepository()).list(status, cursor, limit, _actor())
+    assert failure.value.kind == JobAdministrationErrorKind.INVALID
+
+
+def test_invalid_actor_and_job_id_are_rejected() -> None:
+    service = JobAdministrationService(MemoryRepository())
+    with pytest.raises(JobAdministrationError) as job_id_failure:
+        service.retry("unsafe\nid", _actor())
+    assert job_id_failure.value.kind == JobAdministrationErrorKind.INVALID
+{{- if .Tenancy}}
+    with pytest.raises(JobAdministrationError) as scope_failure:
+        service.list("", "", 20, _actor(None))
+    assert scope_failure.value.kind == JobAdministrationErrorKind.INVALID
+{{- end}}
+
+
+def test_not_found_conflict_and_storage_failures_are_stable() -> None:
+    repository = MemoryRepository()
+    service = JobAdministrationService(repository)
+    with pytest.raises(JobAdministrationError) as missing:
+        service.retry("missing", _actor())
+    assert missing.value.kind == JobAdministrationErrorKind.NOT_FOUND
+
+    repository.item = repository.item.model_copy(update={"status": "queued"})
+    with pytest.raises(JobAdministrationError) as conflict:
+        service.retry("job-1", _actor())
+    assert conflict.value.kind == JobAdministrationErrorKind.CONFLICT
+
+    repository.failure = RuntimeError("database password")
+    with pytest.raises(JobAdministrationError) as storage:
+        service.list("dead", "", 20, _actor())
+    assert storage.value.kind == JobAdministrationErrorKind.STORAGE
+    assert "database password" not in storage.value.message
+
+    repository.failure = JobAdministrationError(JobAdministrationErrorKind.INVALID, "known")
+    with pytest.raises(JobAdministrationError) as expected:
+        service.list("dead", "", 20, _actor())
+    assert expected.value.message == "known"
+
+
+def test_public_model_has_no_payload_or_idempotency_coordinates() -> None:
+    fields = set(JobAdministrationItem.model_fields)
+    assert fields.isdisjoint({"payload", "payload_json", "scope_key", "dedupe_key"})

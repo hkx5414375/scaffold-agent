@@ -113,5 +113,8 @@ def test_application_lifecycle_migrates_bootstraps_and_disposes(
         async with application_main.lifespan(application):
             assert application.state.cookie_secure is False
             assert application.state.database_probe.is_ready()
+{{- if .JobAdmin}}
+            assert application.state.job_administration_service is not None
+{{- end}}
 
     asyncio.run(exercise())

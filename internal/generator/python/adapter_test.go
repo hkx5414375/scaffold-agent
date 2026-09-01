@@ -610,6 +610,117 @@ func TestGenerateApplicationCacheComposesAfterFileAssets(t *testing.T) {
 	}
 }
 
+func TestGenerateJobAdministrationForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: jobAdminOwner, Version: jobAdminVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[jobsOwner] != jobsVersion ||
+				generated.CapabilityLock[jobAdminOwner] != jobAdminVersion ||
+				len(generated.Outputs) != 47 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/jobadmin/http.py",
+				"src/demo_service/jobadmin/models.py",
+				"src/demo_service/jobadmin/repository.py",
+				"src/demo_service/jobadmin/service.py",
+				"src/demo_service/migration/versions/000230_job_administration.py",
+				"tests/test_job_administration.py",
+				"tests/test_job_administration_database.py",
+				"tests/test_job_administration_http.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != jobAdminOwner {
+					t.Errorf("Generate(%s) did not produce job-administration-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			if !strings.Contains(mainSource, "JobAdministrationService(") ||
+				!strings.Contains(mainSource, "application.include_router(job_administration_router)") {
+				t.Errorf("Generate(%s) does not compose job administration", database)
+			}
+			publicSource := string(outputContent(generated, "src/demo_service/jobadmin/models.py"))
+			contract := string(outputContent(generated, "api/openapi.yaml"))
+			for _, sensitive := range []string{"payload_json", "scope_key", "dedupe_key"} {
+				if strings.Contains(publicSource, sensitive) || strings.Contains(contract, sensitive) {
+					t.Errorf("Generate(%s) exposes sensitive job field %q", database, sensitive)
+				}
+			}
+			var openAPI map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &openAPI); err != nil {
+				t.Fatalf("generated job administration OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenerateJobAdministrationComposesWithTenantAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: jobAdminOwner, Version: jobAdminVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 100 ||
+		generated.CapabilityLock[jobAdminOwner] != jobAdminVersion ||
+		generated.CapabilityLock[jobsOwner] != jobsVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	viewPath := "web/admin/src/views/JobsView.vue"
+	if outputContent(generated, viewPath) == nil || outputOwner(generated, viewPath) != jobAdminOwner {
+		t.Fatalf("Generate() did not produce the shared job administration view")
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000230_job_administration.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000200_background_jobs"`) ||
+		!strings.Contains(migration, `"role_code": "admin"`) {
+		t.Fatalf("generated job administration migration is invalid:\n%s", migration)
+	}
+	if strings.Contains(migration, `"role_code": "user"`) {
+		t.Fatalf("generated job administration permissions are not administrator-only:\n%s", migration)
+	}
+}
+
+func TestGenerateJobAdministrationFollowsCacheMigration(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: cacheOwner, Version: cacheVersion},
+		{Name: jobAdminOwner, Version: jobAdminVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000230_job_administration.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000220_application_cache"`) {
+		t.Fatalf("generated job administration migration does not follow cache:\n%s", migration)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

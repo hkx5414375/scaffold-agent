@@ -1,0 +1,75 @@
+"""Authenticated background job administration transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.jobadmin.models import (
+    JobAdministrationError,
+    JobAdministrationErrorKind,
+    JobAdministrationItem,
+    JobAdministrationPage,
+)
+from {{.PackageName}}.jobadmin.service import JobAdministrationService
+
+router = APIRouter(prefix="/api/v1/jobs", tags=["job-administration"])
+
+
+def job_administration_service(request: Request) -> JobAdministrationService:
+    """Resolve the process-scoped administration service."""
+    service: JobAdministrationService = request.app.state.job_administration_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable administration error responses."""
+
+    @app.exception_handler(JobAdministrationError)
+    async def job_administration_error(
+        _request: Request,
+        error: JobAdministrationError,
+    ) -> JSONResponse:
+        status, code = {
+            JobAdministrationErrorKind.INVALID: (400, "jobs.invalid"),
+            JobAdministrationErrorKind.NOT_FOUND: (404, "jobs.not_found"),
+            JobAdministrationErrorKind.CONFLICT: (409, "jobs.conflict"),
+            JobAdministrationErrorKind.STORAGE: (503, "jobs.storage_unavailable"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.get("", response_model=JobAdministrationPage, response_model_exclude_none=True)
+def list_jobs(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("jobs:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[JobAdministrationService, Depends(job_administration_service)],
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> JobAdministrationPage:
+    """List bounded payload-free job metadata."""
+    return service.list(status, cursor, limit, principal)
+
+
+@router.post(
+    "/{job_id}/retry", response_model=JobAdministrationItem, response_model_exclude_none=True
+)
+def retry_job(
+    job_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("jobs:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[JobAdministrationService, Depends(job_administration_service)],
+) -> JobAdministrationItem:
+    """Retry one scoped dead job without exposing its payload."""
+    return service.retry(job_id, principal)

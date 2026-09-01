@@ -1,0 +1,41 @@
+"""Job administration HTTP mapping and direct transport contracts."""
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from test_job_administration import MemoryRepository, _actor
+
+from {{.PackageName}}.jobadmin.http import install_error_handlers, list_jobs, retry_job
+from {{.PackageName}}.jobadmin.models import (
+    JobAdministrationError,
+    JobAdministrationErrorKind,
+)
+from {{.PackageName}}.jobadmin.service import JobAdministrationService
+
+
+def test_direct_transport_lists_and_retries_dead_jobs() -> None:
+    service = JobAdministrationService(MemoryRepository())
+
+    page = list_jobs(_actor(), service, "dead", "", 20)
+    retried = retry_job("job-1", _actor(), service)
+
+    assert [item.id for item in page.items] == ["job-1"]
+    assert retried.status == "queued"
+
+
+def test_job_administration_errors_use_stable_public_mapping() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise JobAdministrationError(
+            JobAdministrationErrorKind.CONFLICT,
+            "only dead background jobs can be retried",
+        )
+
+    response = TestClient(application).get("/failure")
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "jobs.conflict",
+        "message": "only dead background jobs can be retried",
+    }
