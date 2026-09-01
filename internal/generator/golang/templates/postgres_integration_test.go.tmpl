@@ -41,6 +41,10 @@ import (
 	"{{.ModulePath}}/internal/crm"
 	crmpostgres "{{.ModulePath}}/internal/crm/postgres"
 	{{- end}}
+	{{- if .Inventory}}
+	"{{.ModulePath}}/internal/inventory"
+	inventorypostgres "{{.ModulePath}}/internal/inventory/postgres"
+	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
 	{{- if .Cache}}
@@ -547,6 +551,64 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select count(*) from audit_events where action like 'crm:%'`).Scan(&crmAuditCount); err != nil || crmAuditCount < 7 {
 		t.Fatalf("CRM audit count = %d, %v, want at least 7", crmAuditCount, err)
 	}
+{{- end}}
+
+{{- if .Inventory}}
+	for _, permission := range []string{"inventory:read", "inventory:catalog:write", "inventory:stock:manage", "inventory:procurement:manage"} {
+		allowed, err := identityStore.HasPermission(ctx, "admin", permission)
+		if err != nil || !allowed { t.Fatalf("HasPermission(admin, %s) = %t, %v", permission, allowed, err) }
+		allowed, err = identityStore.HasPermission(ctx, "user", permission)
+		if err != nil || allowed { t.Fatalf("HasPermission(user, %s) = %t, %v, want denied", permission, allowed, err) }
+	}
+	inventoryStore := inventorypostgres.New(pool)
+	inventoryService := inventory.NewService(inventoryStore)
+	inventoryActor := identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID}
+	rolledBackItem := inventory.Item{ID:"inventory-rolled-back",OrganizationID:organizationID,SKU:"ROLLBACK",Name:"Rolled back",Unit:"EA",Status:inventory.StatusActive,Version:1,CreatedAt:now,UpdatedAt:now}
+	if err := inventoryStore.CreateItem(ctx, rolledBackItem, duplicateAudit); err == nil { t.Fatal("inventory CreateItem(duplicate audit) error = nil, want transaction failure") }
+	if _, err := inventoryStore.GetItem(ctx, organizationID, rolledBackItem.ID); !errors.Is(err, inventory.ErrNotFound) { t.Fatalf("inventory GetItem(rolled-back) error = %v", err) }
+	item, err := inventoryService.CreateItem(ctx, inventory.ItemWrite{SKU:" sku-1 ",Name:" Integration Widget ",Unit:" ea "}, inventoryActor)
+	if err != nil || item.SKU != "SKU-1" || item.Unit != "EA" { t.Fatalf("inventory CreateItem() = %#v, %v", item, err) }
+	warehouse, err := inventoryService.CreateWarehouse(ctx, inventory.WarehouseWrite{Code:" main ",Name:" Main Warehouse "}, inventoryActor)
+	if err != nil || warehouse.Code != "MAIN" { t.Fatalf("inventory CreateWarehouse() = %#v, %v", warehouse, err) }
+	adjustmentInput := inventory.AdjustmentInput{ItemID:item.ID,WarehouseID:warehouse.ID,QuantityDelta:"100",Reason:"opening stock",IdempotencyKey:"adjust-opening"}
+	adjusted, err := inventoryService.AdjustStock(ctx, adjustmentInput, inventoryActor)
+	if err != nil || adjusted.Balance.OnHand != 100 || adjusted.Balance.Available != 100 { t.Fatalf("inventory AdjustStock() = %#v, %v", adjusted, err) }
+	adjustedReplay, err := inventoryService.AdjustStock(ctx, adjustmentInput, inventoryActor)
+	if err != nil || !reflect.DeepEqual(adjustedReplay, adjusted) { t.Fatalf("inventory AdjustStock(replay) = %#v, %v, want %#v", adjustedReplay, err, adjusted) }
+	conflictingAdjustment := adjustmentInput; conflictingAdjustment.QuantityDelta = "1"
+	if _, err := inventoryService.AdjustStock(ctx, conflictingAdjustment, inventoryActor); !errors.Is(err, inventory.ErrConflict) { t.Fatalf("inventory AdjustStock(conflicting replay) error = %v", err) }
+	reservationInput := inventory.ReservationWrite{ExternalReference:"order-1",ItemID:item.ID,WarehouseID:warehouse.ID,Quantity:"30",IdempotencyKey:"reserve-order-1"}
+	reserved, err := inventoryService.CreateReservation(ctx, reservationInput, inventoryActor)
+	if err != nil || reserved.Balance.Reserved != 30 || reserved.Balance.Available != 70 { t.Fatalf("inventory CreateReservation() = %#v, %v", reserved, err) }
+	reservedReplay, err := inventoryService.CreateReservation(ctx, reservationInput, inventoryActor)
+	if err != nil || !reflect.DeepEqual(reservedReplay, reserved) { t.Fatalf("inventory CreateReservation(replay) = %#v, %v", reservedReplay, err) }
+	if _, err := inventoryService.CreateReservation(ctx, inventory.ReservationWrite{ExternalReference:"order-too-large",ItemID:item.ID,WarehouseID:warehouse.ID,Quantity:"71",IdempotencyKey:"reserve-too-large"}, inventoryActor); !errors.Is(err, inventory.ErrConflict) { t.Fatalf("inventory CreateReservation(over available) error = %v", err) }
+	consumed, err := inventoryService.ConsumeReservation(ctx, reserved.Reservation.ID, inventory.ReservationTransition{Version:reserved.Reservation.Version,IdempotencyKey:"consume-order-1"}, inventoryActor)
+	if err != nil || consumed.Balance.OnHand != 70 || consumed.Balance.Reserved != 0 { t.Fatalf("inventory ConsumeReservation() = %#v, %v", consumed, err) }
+	purchase, err := inventoryService.CreatePurchaseOrder(ctx, inventory.PurchaseOrderWrite{Number:" po-1 ",SupplierName:" Integration Supplier ",Lines:[]inventory.PurchaseOrderLineWrite{ {ItemID:item.ID,OrderedQuantity:"50"} }}, inventoryActor)
+	if err != nil || purchase.Status != inventory.PurchaseDraft { t.Fatalf("inventory CreatePurchaseOrder() = %#v, %v", purchase, err) }
+	purchase, err = inventoryService.SubmitPurchaseOrder(ctx, purchase.ID, inventory.TransitionInput{Version:purchase.Version}, inventoryActor)
+	if err != nil || purchase.Status != inventory.PurchaseSubmitted { t.Fatalf("inventory SubmitPurchaseOrder() = %#v, %v", purchase, err) }
+	firstReceiptInput := inventory.ReceiptInput{LineID:purchase.Lines[0].ID,WarehouseID:warehouse.ID,Quantity:"20",IdempotencyKey:"receive-po-1-a",Version:purchase.Version}
+	firstReceipt, err := inventoryService.ReceivePurchaseOrder(ctx, purchase.ID, firstReceiptInput, inventoryActor)
+	if err != nil || firstReceipt.PurchaseOrder.Status != inventory.PurchasePartiallyReceived || firstReceipt.Balance.OnHand != 90 { t.Fatalf("inventory ReceivePurchaseOrder(partial) = %#v, %v", firstReceipt, err) }
+	firstReceiptReplay, err := inventoryService.ReceivePurchaseOrder(ctx, purchase.ID, firstReceiptInput, inventoryActor)
+	if err != nil || !reflect.DeepEqual(firstReceiptReplay, firstReceipt) { t.Fatalf("inventory ReceivePurchaseOrder(replay) = %#v, %v", firstReceiptReplay, err) }
+	finalReceipt, err := inventoryService.ReceivePurchaseOrder(ctx, purchase.ID, inventory.ReceiptInput{LineID:purchase.Lines[0].ID,WarehouseID:warehouse.ID,Quantity:"30",IdempotencyKey:"receive-po-1-b",Version:firstReceipt.PurchaseOrder.Version}, inventoryActor)
+	if err != nil || finalReceipt.PurchaseOrder.Status != inventory.PurchaseReceived || finalReceipt.Balance.OnHand != 120 { t.Fatalf("inventory ReceivePurchaseOrder(final) = %#v, %v", finalReceipt, err) }
+	if _, err := inventoryService.AdjustStock(ctx, inventory.AdjustmentInput{ItemID:item.ID,WarehouseID:warehouse.ID,QuantityDelta:"-121",Reason:"invalid negative",IdempotencyKey:"adjust-invalid"}, inventoryActor); !errors.Is(err, inventory.ErrConflict) { t.Fatalf("inventory AdjustStock(below zero) error = %v", err) }
+	movements, _, err := inventoryStore.ListMovements(ctx, organizationID, item.ID, warehouse.ID, "", 20)
+	if err != nil || len(movements) != 5 { t.Fatalf("inventory ListMovements() = %d, %v, want 5", len(movements), err) }
+{{- if .Tenancy}}
+	if _, err := inventoryStore.GetItem(ctx, "different-organization", item.ID); !errors.Is(err, inventory.ErrNotFound) { t.Fatalf("inventory GetItem(cross-organization) error = %v", err) }
+{{- end}}
+{{- if .TenancyLifecycle}}
+	if _, err := lifecycle.Deactivate(ctx, organizationID, ownerPrincipal); err != nil { t.Fatalf("inventory Deactivate() error = %v", err) }
+	if _, err := inventoryService.AdjustStock(ctx, adjustmentInput, inventoryActor); !errors.Is(err, inventory.ErrNotFound) { t.Fatalf("inventory AdjustStock(replay inactive organization) error = %v", err) }
+	if _, err := lifecycle.Reactivate(ctx, organizationID, ownerPrincipal); err != nil { t.Fatalf("inventory Reactivate organization() error = %v", err) }
+{{- end}}
+	var inventoryAuditCount int
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where action like 'inventory:%'`).Scan(&inventoryAuditCount); err != nil || inventoryAuditCount < 9 { t.Fatalf("inventory audit count = %d, %v, want at least 9", inventoryAuditCount, err) }
 {{- end}}
 
 {{- if .Files}}

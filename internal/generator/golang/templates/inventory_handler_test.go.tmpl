@@ -1,0 +1,14 @@
+package httpapi
+
+import (
+	"net/http/httptest"
+	"testing"
+)
+
+func TestPageLimitRejectsNonInteger(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/api/v1/inventory/items?limit=not-a-number", nil)
+	if _, ok := pageLimit(response, request); ok || response.Code != 400 {
+		t.Fatalf("pageLimit() status = %d, ok = %t", response.Code, ok)
+	}
+}

@@ -1,0 +1,59 @@
+package inventory
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestServiceNormalizesMasterDataAndStockCommands(t *testing.T) {
+	store := &recordingStore{}
+	service := NewService(store)
+	service.now = func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "org-1"{{end}}}
+
+	item, err := service.CreateItem(context.Background(), ItemWrite{SKU: " sku-1 ", Name: " Widget ", Unit: " ea "}, actor)
+	if err != nil { t.Fatalf("CreateItem() error = %v", err) }
+	if item.SKU != "SKU-1" || item.Unit != "EA" || item.Version != 1 || store.audit.Action != "inventory:item:create" { t.Fatalf("CreateItem() = %#v, audit = %#v", item, store.audit) }
+
+	result, err := service.AdjustStock(context.Background(), AdjustmentInput{ItemID:item.ID,WarehouseID:"warehouse-1",QuantityDelta:"12",Reason:"opening stock",IdempotencyKey:"adjust-1"}, actor)
+	if err != nil { t.Fatalf("AdjustStock() error = %v", err) }
+	if store.stock.Movement.QuantityDelta != 12 || store.stock.Fingerprint == "" || result.Balance.Available != 12 { t.Fatalf("AdjustStock() = %#v, command = %#v", result, store.stock) }
+}
+
+func TestServiceRejectsNonCanonicalQuantityAndDuplicatePurchaseLines(t *testing.T) {
+	service := NewService(&recordingStore{})
+	actor := identity.Principal{UserID:"user-1"{{if .Tenancy}},OrganizationID:"org-1"{{end}}}
+	if _,err:=service.AdjustStock(context.Background(),AdjustmentInput{ItemID:"item-1",WarehouseID:"warehouse-1",QuantityDelta:"01",Reason:"bad",IdempotencyKey:"key"},actor);!errors.Is(err,ErrInvalidInput){t.Fatalf("AdjustStock() error = %v, want invalid",err)}
+	_,err:=service.CreatePurchaseOrder(context.Background(),PurchaseOrderWrite{Number:"po-1",SupplierName:"Supplier",Lines:[]PurchaseOrderLineWrite{ {ItemID:"item-1",OrderedQuantity:"2"}, {ItemID:"item-1",OrderedQuantity:"3"} }},actor)
+	if !errors.Is(err,ErrInvalidInput){t.Fatalf("CreatePurchaseOrder() error = %v, want invalid",err)}
+}
+
+type recordingStore struct { audit identity.AuditEvent; stock StockCommand }
+func(s *recordingStore)CreateItem(_ context.Context,_ Item,a identity.AuditEvent)error{s.audit=a;return nil}
+func(*recordingStore)GetItem(context.Context,string,string)(Item,error){return Item{},ErrNotFound}
+func(*recordingStore)ListItems(context.Context,string,RecordStatus,string,int)([]Item,string,error){return nil,"",nil}
+func(*recordingStore)UpdateItem(context.Context,string,Item,int64,identity.AuditEvent)(Item,error){return Item{},nil}
+func(*recordingStore)TransitionItem(context.Context,string,string,int64,RecordStatus,time.Time,identity.AuditEvent)(Item,error){return Item{},nil}
+func(*recordingStore)CreateWarehouse(context.Context,Warehouse,identity.AuditEvent)error{return nil}
+func(*recordingStore)GetWarehouse(context.Context,string,string)(Warehouse,error){return Warehouse{},ErrNotFound}
+func(*recordingStore)ListWarehouses(context.Context,string,RecordStatus,string,int)([]Warehouse,string,error){return nil,"",nil}
+func(*recordingStore)UpdateWarehouse(context.Context,string,Warehouse,int64,identity.AuditEvent)(Warehouse,error){return Warehouse{},nil}
+func(*recordingStore)TransitionWarehouse(context.Context,string,string,int64,RecordStatus,time.Time,identity.AuditEvent)(Warehouse,error){return Warehouse{},nil}
+func(*recordingStore)ListBalances(context.Context,string,string,string,int)([]Balance,string,error){return nil,"",nil}
+func(s *recordingStore)ApplyStock(_ context.Context,c StockCommand)(StockResult,error){s.stock=c;return StockResult{Balance:Balance{OnHand:c.Movement.QuantityDelta},Movement:c.Movement},nil}
+func(*recordingStore)CreateReservation(_ context.Context,c ReservationCommand)(ReservationResult,error){return ReservationResult{Reservation:c.Reservation,Balance:Balance{OnHand:c.Reservation.Quantity,Reserved:c.Reservation.Quantity},Movement:c.Movement},nil}
+func(*recordingStore)GetReservation(context.Context,string,string)(Reservation,error){return Reservation{},ErrNotFound}
+func(*recordingStore)ListReservations(context.Context,string,ReservationStatus,string,int)([]Reservation,string,error){return nil,"",nil}
+func(*recordingStore)TransitionReservation(context.Context,ReservationTransitionCommand)(ReservationResult,error){return ReservationResult{},nil}
+func(s *recordingStore)CreatePurchaseOrder(_ context.Context,_ PurchaseOrder,a identity.AuditEvent)error{s.audit=a;return nil}
+func(*recordingStore)GetPurchaseOrder(context.Context,string,string)(PurchaseOrder,error){return PurchaseOrder{},ErrNotFound}
+func(*recordingStore)ListPurchaseOrders(context.Context,string,PurchaseOrderStatus,string,int)([]PurchaseOrder,string,error){return nil,"",nil}
+func(*recordingStore)TransitionPurchaseOrder(context.Context,string,string,int64,PurchaseOrderStatus,time.Time,identity.AuditEvent)(PurchaseOrder,error){return PurchaseOrder{},nil}
+func(*recordingStore)ReceivePurchaseOrder(context.Context,ReceiptCommand)(ReceiptResult,error){return ReceiptResult{},nil}
+func(*recordingStore)ListMovements(context.Context,string,string,string,string,int)([]Movement,string,error){return nil,"",nil}
+
+var _ Store=(*recordingStore)(nil)

@@ -311,6 +311,22 @@ func TestGoCRMCoreWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", crmSelection, "", 55, false)
 }
 
+func TestGoTenantERPInventoryPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyInventorySelection, "0.3.0", 74, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantERPInventoryMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyInventorySelection, "0.3.0", 75, false)
+}
+
+func TestGoERPInventoryWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", inventorySelection, "", 54, false)
+}
+
+func TestGoERPInventoryWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", inventorySelection, "", 55, false)
+}
+
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
@@ -863,6 +879,18 @@ const crmSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyInventorySelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: erp-inventory
+      version: 0.1.0
+`
+
+const inventorySelection = `  capabilities:
+    - name: erp-inventory
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -961,6 +989,9 @@ WORKFLOWS
 	}
 	if strings.Contains(capabilities, "crm-core") && plannedData.CapabilityLock["crm-core"] != "0.1.0" {
 		t.Fatalf("Plan() CRM core lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "erp-inventory") && plannedData.CapabilityLock["erp-inventory"] != "0.1.0" {
+		t.Fatalf("Plan() ERP inventory lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

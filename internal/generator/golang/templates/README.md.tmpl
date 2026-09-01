@@ -52,6 +52,15 @@ It also contains `customer-accounts` with a customer-only session cookie,
 scoped email identity, optimistic lifecycle management, session revocation, and
 employee administration permissions that remain separate from storefront identity.
 {{end}}
+{{if .CRM}}
+It also contains `crm-core` with business accounts, contacts, immutable
+activities, and forward-only sales opportunities.
+{{end}}
+{{if .Inventory}}
+It also contains `erp-inventory` with independent SKU and warehouse master
+data, integer balances, idempotent stock commands, immutable movements,
+one-way reservations, and controlled purchase receiving.
+{{end}}
 
 ## Requirements
 
@@ -194,6 +203,34 @@ runtime secret store; queued message bodies are sensitive database content.
 - `POST /api/v1/customers/{id}/suspend`
 - `POST /api/v1/customers/{id}/reactivate`
 {{end}}
+{{if .Inventory}}
+- `POST /api/v1/inventory/items`
+- `GET /api/v1/inventory/items`
+- `GET /api/v1/inventory/items/{id}`
+- `PUT /api/v1/inventory/items/{id}`
+- `POST /api/v1/inventory/items/{id}/archive`
+- `POST /api/v1/inventory/items/{id}/reactivate`
+- `POST /api/v1/inventory/warehouses`
+- `GET /api/v1/inventory/warehouses`
+- `GET /api/v1/inventory/warehouses/{id}`
+- `PUT /api/v1/inventory/warehouses/{id}`
+- `POST /api/v1/inventory/warehouses/{id}/archive`
+- `POST /api/v1/inventory/warehouses/{id}/reactivate`
+- `GET /api/v1/inventory/balances`
+- `POST /api/v1/inventory/adjustments`
+- `GET /api/v1/inventory/movements`
+- `POST /api/v1/inventory/reservations`
+- `GET /api/v1/inventory/reservations`
+- `GET /api/v1/inventory/reservations/{id}`
+- `POST /api/v1/inventory/reservations/{id}/release`
+- `POST /api/v1/inventory/reservations/{id}/consume`
+- `POST /api/v1/inventory/purchase-orders`
+- `GET /api/v1/inventory/purchase-orders`
+- `GET /api/v1/inventory/purchase-orders/{id}`
+- `POST /api/v1/inventory/purchase-orders/{id}/submit`
+- `POST /api/v1/inventory/purchase-orders/{id}/cancel`
+- `POST /api/v1/inventory/purchase-orders/{id}/receive`
+{{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
 - `GET {{.Business.RoutePath}}`
@@ -273,6 +310,17 @@ and `crm:write` for ordinary records, and reserve `crm:pipeline:manage` for stag
 changes. Opportunities advance through `lead`, `qualified`, `proposal`, and
 `won`; any nonterminal stage may become `lost`. Every mutation commits its audit
 event atomically, and inactive tenant organizations cannot read or write CRM.
+{{end}}
+{{if .Inventory}}
+
+Inventory quantities and optimistic versions cross JSON as decimal strings and
+never use floating point. `on_hand`, `reserved`, and `available` are changed only
+inside store transactions that append an immutable movement and security audit.
+Idempotency keys persist the first result snapshot, so safe retries cannot apply
+stock twice. Reservations move once from `active` to `released` or `consumed`.
+Purchase orders move from `draft` to `submitted`, then through partial receipt to
+`received`; an order with received stock cannot be cancelled. Archived items and
+warehouses remain available to history but reject new stock operations.
 {{end}}
 {{if .Admin}}
 ## Administration UI

@@ -1,0 +1,95 @@
+// Package httpapi exposes permission-protected inventory routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/inventory"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const defaultPageLimit = 20
+
+// Handler maps inventory use cases to HTTP.
+type Handler struct{ service *inventory.Service }
+
+// New returns an inventory HTTP adapter.
+func New(service *inventory.Service) *Handler { return &Handler{service: service} }
+
+// Register adds inventory routes with least-privilege permissions.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/inventory/items", security.Authorized("inventory:catalog:write", handler.createItem))
+	mux.HandleFunc("GET /api/v1/inventory/items", security.Authorized("inventory:read", handler.listItems))
+	mux.HandleFunc("GET /api/v1/inventory/items/{id}", security.Authorized("inventory:read", handler.getItem))
+	mux.HandleFunc("PUT /api/v1/inventory/items/{id}", security.Authorized("inventory:catalog:write", handler.updateItem))
+	mux.HandleFunc("POST /api/v1/inventory/items/{id}/archive", security.Authorized("inventory:catalog:write", handler.archiveItem))
+	mux.HandleFunc("POST /api/v1/inventory/items/{id}/reactivate", security.Authorized("inventory:catalog:write", handler.reactivateItem))
+	mux.HandleFunc("POST /api/v1/inventory/warehouses", security.Authorized("inventory:catalog:write", handler.createWarehouse))
+	mux.HandleFunc("GET /api/v1/inventory/warehouses", security.Authorized("inventory:read", handler.listWarehouses))
+	mux.HandleFunc("GET /api/v1/inventory/warehouses/{id}", security.Authorized("inventory:read", handler.getWarehouse))
+	mux.HandleFunc("PUT /api/v1/inventory/warehouses/{id}", security.Authorized("inventory:catalog:write", handler.updateWarehouse))
+	mux.HandleFunc("POST /api/v1/inventory/warehouses/{id}/archive", security.Authorized("inventory:catalog:write", handler.archiveWarehouse))
+	mux.HandleFunc("POST /api/v1/inventory/warehouses/{id}/reactivate", security.Authorized("inventory:catalog:write", handler.reactivateWarehouse))
+	mux.HandleFunc("GET /api/v1/inventory/balances", security.Authorized("inventory:read", handler.listBalances))
+	mux.HandleFunc("POST /api/v1/inventory/adjustments", security.Authorized("inventory:stock:manage", handler.adjustStock))
+	mux.HandleFunc("GET /api/v1/inventory/movements", security.Authorized("inventory:read", handler.listMovements))
+	mux.HandleFunc("POST /api/v1/inventory/reservations", security.Authorized("inventory:stock:manage", handler.createReservation))
+	mux.HandleFunc("GET /api/v1/inventory/reservations", security.Authorized("inventory:read", handler.listReservations))
+	mux.HandleFunc("GET /api/v1/inventory/reservations/{id}", security.Authorized("inventory:read", handler.getReservation))
+	mux.HandleFunc("POST /api/v1/inventory/reservations/{id}/release", security.Authorized("inventory:stock:manage", handler.releaseReservation))
+	mux.HandleFunc("POST /api/v1/inventory/reservations/{id}/consume", security.Authorized("inventory:stock:manage", handler.consumeReservation))
+	mux.HandleFunc("POST /api/v1/inventory/purchase-orders", security.Authorized("inventory:procurement:manage", handler.createPurchaseOrder))
+	mux.HandleFunc("GET /api/v1/inventory/purchase-orders", security.Authorized("inventory:read", handler.listPurchaseOrders))
+	mux.HandleFunc("GET /api/v1/inventory/purchase-orders/{id}", security.Authorized("inventory:read", handler.getPurchaseOrder))
+	mux.HandleFunc("POST /api/v1/inventory/purchase-orders/{id}/submit", security.Authorized("inventory:procurement:manage", handler.submitPurchaseOrder))
+	mux.HandleFunc("POST /api/v1/inventory/purchase-orders/{id}/cancel", security.Authorized("inventory:procurement:manage", handler.cancelPurchaseOrder))
+	mux.HandleFunc("POST /api/v1/inventory/purchase-orders/{id}/receive", security.Authorized("inventory:procurement:manage", handler.receivePurchaseOrder))
+}
+
+func (handler *Handler) createItem(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input inventory.ItemWrite; if !decode(response,request,&input){return}; value,err:=handler.service.CreateItem(request.Context(),input,actor); writeResult(response,http.StatusCreated,value,"create inventory item",err)
+}
+func (handler *Handler) getItem(response http.ResponseWriter,request *http.Request,actor identity.Principal){value,err:=handler.service.GetItem(request.Context(),request.PathValue("id"),actor);writeResult(response,http.StatusOK,value,"get inventory item",err)}
+func (handler *Handler) listItems(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListItems(request.Context(),inventory.RecordStatus(request.URL.Query().Get("status")),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory items",err)}
+func (handler *Handler) updateItem(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.ItemUpdate;if !decode(response,request,&input){return};value,err:=handler.service.UpdateItem(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,"update inventory item",err)}
+func (handler *Handler) archiveItem(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.itemTransition(response,request,actor,handler.service.ArchiveItem,"archive inventory item")}
+func (handler *Handler) reactivateItem(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.itemTransition(response,request,actor,handler.service.ReactivateItem,"reactivate inventory item")}
+func (handler *Handler) itemTransition(response http.ResponseWriter,request *http.Request,actor identity.Principal,operation func(context.Context,string,inventory.TransitionInput,identity.Principal)(inventory.Item,error),name string){var input inventory.TransitionInput;if !decode(response,request,&input){return};value,err:=operation(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,name,err)}
+
+func (handler *Handler) createWarehouse(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.WarehouseWrite;if !decode(response,request,&input){return};value,err:=handler.service.CreateWarehouse(request.Context(),input,actor);writeResult(response,http.StatusCreated,value,"create inventory warehouse",err)}
+func (handler *Handler) getWarehouse(response http.ResponseWriter,request *http.Request,actor identity.Principal){value,err:=handler.service.GetWarehouse(request.Context(),request.PathValue("id"),actor);writeResult(response,http.StatusOK,value,"get inventory warehouse",err)}
+func (handler *Handler) listWarehouses(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListWarehouses(request.Context(),inventory.RecordStatus(request.URL.Query().Get("status")),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory warehouses",err)}
+func (handler *Handler) updateWarehouse(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.WarehouseUpdate;if !decode(response,request,&input){return};value,err:=handler.service.UpdateWarehouse(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,"update inventory warehouse",err)}
+func (handler *Handler) archiveWarehouse(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.warehouseTransition(response,request,actor,handler.service.ArchiveWarehouse,"archive inventory warehouse")}
+func (handler *Handler) reactivateWarehouse(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.warehouseTransition(response,request,actor,handler.service.ReactivateWarehouse,"reactivate inventory warehouse")}
+func (handler *Handler) warehouseTransition(response http.ResponseWriter,request *http.Request,actor identity.Principal,operation func(context.Context,string,inventory.TransitionInput,identity.Principal)(inventory.Warehouse,error),name string){var input inventory.TransitionInput;if !decode(response,request,&input){return};value,err:=operation(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,name,err)}
+
+func (handler *Handler) listBalances(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListBalances(request.Context(),request.URL.Query().Get("item_id"),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory balances",err)}
+func (handler *Handler) adjustStock(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.AdjustmentInput;if !decode(response,request,&input){return};value,err:=handler.service.AdjustStock(request.Context(),input,actor);writeResult(response,http.StatusOK,value,"adjust inventory stock",err)}
+func (handler *Handler) listMovements(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListMovements(request.Context(),request.URL.Query().Get("item_id"),request.URL.Query().Get("warehouse_id"),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory movements",err)}
+
+func (handler *Handler) createReservation(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.ReservationWrite;if !decode(response,request,&input){return};value,err:=handler.service.CreateReservation(request.Context(),input,actor);writeResult(response,http.StatusCreated,value,"create inventory reservation",err)}
+func (handler *Handler) getReservation(response http.ResponseWriter,request *http.Request,actor identity.Principal){value,err:=handler.service.GetReservation(request.Context(),request.PathValue("id"),actor);writeResult(response,http.StatusOK,value,"get inventory reservation",err)}
+func (handler *Handler) listReservations(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListReservations(request.Context(),inventory.ReservationStatus(request.URL.Query().Get("status")),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory reservations",err)}
+func (handler *Handler) releaseReservation(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.reservationTransition(response,request,actor,handler.service.ReleaseReservation,"release inventory reservation")}
+func (handler *Handler) consumeReservation(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.reservationTransition(response,request,actor,handler.service.ConsumeReservation,"consume inventory reservation")}
+func (handler *Handler) reservationTransition(response http.ResponseWriter,request *http.Request,actor identity.Principal,operation func(context.Context,string,inventory.ReservationTransition,identity.Principal)(inventory.ReservationResult,error),name string){var input inventory.ReservationTransition;if !decode(response,request,&input){return};value,err:=operation(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,name,err)}
+
+func (handler *Handler) createPurchaseOrder(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.PurchaseOrderWrite;if !decode(response,request,&input){return};value,err:=handler.service.CreatePurchaseOrder(request.Context(),input,actor);writeResult(response,http.StatusCreated,value,"create inventory purchase order",err)}
+func (handler *Handler) getPurchaseOrder(response http.ResponseWriter,request *http.Request,actor identity.Principal){value,err:=handler.service.GetPurchaseOrder(request.Context(),request.PathValue("id"),actor);writeResult(response,http.StatusOK,value,"get inventory purchase order",err)}
+func (handler *Handler) listPurchaseOrders(response http.ResponseWriter,request *http.Request,actor identity.Principal){limit,ok:=pageLimit(response,request);if !ok{return};value,err:=handler.service.ListPurchaseOrders(request.Context(),inventory.PurchaseOrderStatus(request.URL.Query().Get("status")),request.URL.Query().Get("cursor"),limit,actor);writeResult(response,http.StatusOK,value,"list inventory purchase orders",err)}
+func (handler *Handler) submitPurchaseOrder(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.purchaseTransition(response,request,actor,handler.service.SubmitPurchaseOrder,"submit inventory purchase order")}
+func (handler *Handler) cancelPurchaseOrder(response http.ResponseWriter,request *http.Request,actor identity.Principal){handler.purchaseTransition(response,request,actor,handler.service.CancelPurchaseOrder,"cancel inventory purchase order")}
+func (handler *Handler) purchaseTransition(response http.ResponseWriter,request *http.Request,actor identity.Principal,operation func(context.Context,string,inventory.TransitionInput,identity.Principal)(inventory.PurchaseOrder,error),name string){var input inventory.TransitionInput;if !decode(response,request,&input){return};value,err:=operation(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,name,err)}
+func (handler *Handler) receivePurchaseOrder(response http.ResponseWriter,request *http.Request,actor identity.Principal){var input inventory.ReceiptInput;if !decode(response,request,&input){return};value,err:=handler.service.ReceivePurchaseOrder(request.Context(),request.PathValue("id"),input,actor);writeResult(response,http.StatusOK,value,"receive inventory purchase order",err)}
+
+func decode(response http.ResponseWriter,request *http.Request,target any)bool{if err:=httpjson.Decode(response,request,target);err!=nil{httpjson.WriteError(response,http.StatusBadRequest,"request.invalid",err.Error());return false};return true}
+func pageLimit(response http.ResponseWriter,request *http.Request)(int,bool){limit:=defaultPageLimit;if raw:=request.URL.Query().Get("limit");raw!=""{value,err:=strconv.Atoi(raw);if err!=nil{httpjson.WriteError(response,http.StatusBadRequest,"request.invalid","limit must be an integer");return 0,false};limit=value};return limit,true}
+func writeResult(response http.ResponseWriter,status int,value any,operation string,err error){if err!=nil{handleError(response,operation,err);return};httpjson.Write(response,status,value)}
+func handleError(response http.ResponseWriter,operation string,err error){switch{case errors.Is(err,inventory.ErrInvalidInput):httpjson.WriteError(response,http.StatusBadRequest,"inventory.invalid","inventory data is invalid");case errors.Is(err,inventory.ErrNotFound):httpjson.WriteError(response,http.StatusNotFound,"inventory.not_found","inventory record was not found");case errors.Is(err,inventory.ErrConflict):httpjson.WriteError(response,http.StatusConflict,"inventory.conflict","inventory record changed or conflicts with current stock");default:slog.Error(operation,"error",err);httpjson.WriteError(response,http.StatusInternalServerError,"internal.error","the request could not be completed")}}

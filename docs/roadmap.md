@@ -95,7 +95,11 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java `crm-core` 0.1 parity for PostgreSQL and MySQL with Spring Boot, atomic JDBC audit, and shared Vue administration.
 - [x] Python `crm-core` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, atomic audit, active-tenant isolation, and shared Vue administration.
 - [x] Cross-backend CRM OpenAPI, permission, schema, migration, and shared administration conformance gate.
-- [ ] ERP catalog, procurement, stock ledger, reservations, and inventory movements.
+- [x] Portable `erp-inventory` 0.1 contract for inventory items, warehouses, integer balances, immutable movements, idempotent reservations, and purchase receiving.
+- [x] Go `erp-inventory` 0.1 reference implementation for PostgreSQL and MySQL with transactional stock invariants, active-tenant isolation, and shared Vue administration.
+- [ ] Java `erp-inventory` 0.1 parity for PostgreSQL and MySQL.
+- [ ] Python `erp-inventory` 0.1 parity for PostgreSQL and MySQL.
+- [ ] Cross-backend ERP inventory OpenAPI, permission, schema, migration, behavior, and shared administration conformance gate.
 - [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
 - [ ] Marketing campaigns, coupons, and promotion evaluation.
 - [ ] Payment abstraction with idempotent intents, callbacks, refunds, and reconciliation.

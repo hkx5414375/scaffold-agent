@@ -234,6 +234,80 @@ export interface CRMPage<T> {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .Inventory}}
+
+export type InventoryRecordStatus = "active" | "archived";
+export type InventoryReservationStatus = "active" | "released" | "consumed";
+export type InventoryPurchaseStatus =
+  "draft" | "submitted" | "partially_received" | "received" | "cancelled";
+
+export interface InventoryItem {
+  id: string;
+  organization_id?: string;
+  sku: string;
+  name: string;
+  unit: string;
+  status: InventoryRecordStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryWarehouse {
+  id: string;
+  organization_id?: string;
+  code: string;
+  name: string;
+  status: InventoryRecordStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryBalance {
+  item_id: string;
+  warehouse_id: string;
+  on_hand: string;
+  reserved: string;
+  available: string;
+  version: string;
+  updated_at: string;
+}
+
+export interface InventoryReservation {
+  id: string;
+  external_reference: string;
+  item_id: string;
+  warehouse_id: string;
+  quantity: string;
+  status: InventoryReservationStatus;
+  version: string;
+  updated_at: string;
+}
+
+export interface InventoryPurchaseLine {
+  id: string;
+  item_id: string;
+  ordered_quantity: string;
+  received_quantity: string;
+}
+
+export interface InventoryPurchaseOrder {
+  id: string;
+  number: string;
+  supplier_name: string;
+  status: InventoryPurchaseStatus;
+  version: string;
+  lines: InventoryPurchaseLine[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryPage<T> {
+  items: T[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

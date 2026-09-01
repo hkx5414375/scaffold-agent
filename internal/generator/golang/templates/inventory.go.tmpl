@@ -1,0 +1,436 @@
+// Package inventory owns portable inventory and procurement use cases.
+package inventory
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumIdentifierLength = 191
+	maximumCodeLength       = 64
+	maximumNameLength       = 160
+	maximumUnitLength       = 32
+	maximumReasonLength     = 500
+)
+
+var (
+	// ErrNotFound hides missing and cross-organization inventory records.
+	ErrNotFound = errors.New("inventory record not found")
+	// ErrConflict represents an optimistic version, idempotency, or stock conflict.
+	ErrConflict = errors.New("inventory record conflicts with current state")
+	// ErrInvalidInput represents malformed portable inventory input.
+	ErrInvalidInput = errors.New("inventory input is invalid")
+)
+
+// RecordStatus is the reversible master-data lifecycle.
+type RecordStatus string
+
+const (
+	StatusActive   RecordStatus = "active"
+	StatusArchived RecordStatus = "archived"
+)
+
+// ReservationStatus is the one-way reservation lifecycle.
+type ReservationStatus string
+
+const (
+	ReservationActive   ReservationStatus = "active"
+	ReservationReleased ReservationStatus = "released"
+	ReservationConsumed ReservationStatus = "consumed"
+)
+
+// PurchaseOrderStatus is the procurement state machine.
+type PurchaseOrderStatus string
+
+const (
+	PurchaseDraft             PurchaseOrderStatus = "draft"
+	PurchaseSubmitted         PurchaseOrderStatus = "submitted"
+	PurchasePartiallyReceived PurchaseOrderStatus = "partially_received"
+	PurchaseReceived          PurchaseOrderStatus = "received"
+	PurchaseCancelled         PurchaseOrderStatus = "cancelled"
+)
+
+// MovementKind identifies an immutable inventory reason.
+type MovementKind string
+
+const (
+	MovementAdjustment         MovementKind = "adjustment"
+	MovementReservationCreated MovementKind = "reservation_created"
+	MovementReservationReleased MovementKind = "reservation_released"
+	MovementReservationConsumed MovementKind = "reservation_consumed"
+	MovementPurchaseReceived    MovementKind = "purchase_received"
+)
+
+// Item is independent inventory master data. It does not require a commerce product.
+type Item struct {
+	ID             string       `json:"id"`
+	OrganizationID string       `json:"organization_id,omitempty"`
+	SKU            string       `json:"sku"`
+	Name           string       `json:"name"`
+	Unit           string       `json:"unit"`
+	Status         RecordStatus `json:"status"`
+	Version        int64        `json:"version,string"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+// Warehouse is a physical or logical stock location.
+type Warehouse struct {
+	ID             string       `json:"id"`
+	OrganizationID string       `json:"organization_id,omitempty"`
+	Code           string       `json:"code"`
+	Name           string       `json:"name"`
+	Status         RecordStatus `json:"status"`
+	Version        int64        `json:"version,string"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+// Balance is the single stock projection for one item and warehouse.
+type Balance struct {
+	ItemID      string `json:"item_id"`
+	WarehouseID string `json:"warehouse_id"`
+	OnHand      int64  `json:"on_hand,string"`
+	Reserved    int64  `json:"reserved,string"`
+	Available   int64  `json:"available,string"`
+	Version     int64  `json:"version,string"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// Movement is append-only evidence for every stock projection change.
+type Movement struct {
+	ID               string       `json:"id"`
+	OrganizationID   string       `json:"organization_id,omitempty"`
+	ItemID            string       `json:"item_id"`
+	WarehouseID       string       `json:"warehouse_id"`
+	Kind              MovementKind `json:"kind"`
+	QuantityDelta     int64        `json:"quantity_delta,string"`
+	ReservedDelta     int64        `json:"reserved_delta,string"`
+	ReferenceType     string       `json:"reference_type"`
+	ReferenceID       string       `json:"reference_id"`
+	Reason            string       `json:"reason"`
+	IdempotencyKey    string       `json:"idempotency_key"`
+	CreatedBy         string       `json:"created_by"`
+	CreatedAt         time.Time    `json:"created_at"`
+}
+
+// Reservation protects stock for an external business operation.
+type Reservation struct {
+	ID                string            `json:"id"`
+	OrganizationID    string            `json:"organization_id,omitempty"`
+	ExternalReference string            `json:"external_reference"`
+	ItemID             string            `json:"item_id"`
+	WarehouseID        string            `json:"warehouse_id"`
+	Quantity           int64             `json:"quantity,string"`
+	Status             ReservationStatus `json:"status"`
+	Version            int64             `json:"version,string"`
+	CreatedAt          time.Time          `json:"created_at"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
+// PurchaseOrderLine tracks ordered and cumulative received quantities.
+type PurchaseOrderLine struct {
+	ID               string `json:"id"`
+	ItemID           string `json:"item_id"`
+	OrderedQuantity  int64  `json:"ordered_quantity,string"`
+	ReceivedQuantity int64  `json:"received_quantity,string"`
+}
+
+// PurchaseOrder is the aggregate root for procurement receiving.
+type PurchaseOrder struct {
+	ID             string              `json:"id"`
+	OrganizationID string              `json:"organization_id,omitempty"`
+	Number         string              `json:"number"`
+	SupplierName   string              `json:"supplier_name"`
+	Status         PurchaseOrderStatus `json:"status"`
+	Version        int64               `json:"version,string"`
+	Lines          []PurchaseOrderLine `json:"lines"`
+	CreatedAt      time.Time           `json:"created_at"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+}
+
+type ItemWrite struct { SKU string `json:"sku"`; Name string `json:"name"`; Unit string `json:"unit"` }
+type ItemUpdate struct { SKU string `json:"sku"`; Name string `json:"name"`; Unit string `json:"unit"`; Version int64 `json:"version,string"` }
+type WarehouseWrite struct { Code string `json:"code"`; Name string `json:"name"` }
+type WarehouseUpdate struct { Code string `json:"code"`; Name string `json:"name"`; Version int64 `json:"version,string"` }
+type TransitionInput struct { Version int64 `json:"version,string"` }
+type AdjustmentInput struct {
+	ItemID string `json:"item_id"`
+	WarehouseID string `json:"warehouse_id"`
+	QuantityDelta string `json:"quantity_delta"`
+	Reason string `json:"reason"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+type ReservationWrite struct {
+	ExternalReference string `json:"external_reference"`
+	ItemID string `json:"item_id"`
+	WarehouseID string `json:"warehouse_id"`
+	Quantity string `json:"quantity"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+type ReservationTransition struct { Version int64 `json:"version,string"`; IdempotencyKey string `json:"idempotency_key"` }
+type PurchaseOrderLineWrite struct { ItemID string `json:"item_id"`; OrderedQuantity string `json:"ordered_quantity"` }
+type PurchaseOrderWrite struct { Number string `json:"number"`; SupplierName string `json:"supplier_name"`; Lines []PurchaseOrderLineWrite `json:"lines"` }
+type ReceiptInput struct {
+	LineID string `json:"line_id"`
+	WarehouseID string `json:"warehouse_id"`
+	Quantity string `json:"quantity"`
+	IdempotencyKey string `json:"idempotency_key"`
+	Version int64 `json:"version,string"`
+}
+
+type ItemPage struct { Items []Item `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type WarehousePage struct { Items []Warehouse `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type BalancePage struct { Items []Balance `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type MovementPage struct { Items []Movement `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type ReservationPage struct { Items []Reservation `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type PurchaseOrderPage struct { Items []PurchaseOrder `json:"items"`; NextCursor string `json:"next_cursor,omitempty"` }
+type StockResult struct { Balance Balance `json:"balance"`; Movement Movement `json:"movement"` }
+type ReservationResult struct { Reservation Reservation `json:"reservation"`; Balance Balance `json:"balance"`; Movement Movement `json:"movement"` }
+type ReceiptResult struct { PurchaseOrder PurchaseOrder `json:"purchase_order"`; Balance Balance `json:"balance"`; Movement Movement `json:"movement"` }
+
+// StockCommand is an atomic, idempotent balance and movement mutation.
+type StockCommand struct {
+	Scope, IdempotencyKey, Fingerprint string
+	Movement Movement
+	Audit identity.AuditEvent
+}
+
+// ReservationCommand creates an active reservation atomically.
+type ReservationCommand struct {
+	Scope, IdempotencyKey, Fingerprint string
+	Reservation Reservation
+	Movement Movement
+	Audit identity.AuditEvent
+}
+
+// ReservationTransitionCommand closes a reservation atomically.
+type ReservationTransitionCommand struct {
+	Scope, ReservationID, IdempotencyKey, Fingerprint string
+	Version int64
+	Target ReservationStatus
+	MovementID, ActorID string
+	OccurredAt time.Time
+	Audit identity.AuditEvent
+}
+
+// ReceiptCommand receives one purchase line atomically and idempotently.
+type ReceiptCommand struct {
+	Scope, PurchaseOrderID, LineID, WarehouseID, IdempotencyKey, Fingerprint string
+	Quantity, Version int64
+	MovementID, ActorID string
+	OccurredAt time.Time
+	Audit identity.AuditEvent
+}
+
+// Store is the atomic inventory persistence boundary.
+type Store interface {
+	CreateItem(context.Context, Item, identity.AuditEvent) error
+	GetItem(context.Context, string, string) (Item, error)
+	ListItems(context.Context, string, RecordStatus, string, int) ([]Item, string, error)
+	UpdateItem(context.Context, string, Item, int64, identity.AuditEvent) (Item, error)
+	TransitionItem(context.Context, string, string, int64, RecordStatus, time.Time, identity.AuditEvent) (Item, error)
+	CreateWarehouse(context.Context, Warehouse, identity.AuditEvent) error
+	GetWarehouse(context.Context, string, string) (Warehouse, error)
+	ListWarehouses(context.Context, string, RecordStatus, string, int) ([]Warehouse, string, error)
+	UpdateWarehouse(context.Context, string, Warehouse, int64, identity.AuditEvent) (Warehouse, error)
+	TransitionWarehouse(context.Context, string, string, int64, RecordStatus, time.Time, identity.AuditEvent) (Warehouse, error)
+	ListBalances(context.Context, string, string, string, int) ([]Balance, string, error)
+	ApplyStock(context.Context, StockCommand) (StockResult, error)
+	CreateReservation(context.Context, ReservationCommand) (ReservationResult, error)
+	GetReservation(context.Context, string, string) (Reservation, error)
+	ListReservations(context.Context, string, ReservationStatus, string, int) ([]Reservation, string, error)
+	TransitionReservation(context.Context, ReservationTransitionCommand) (ReservationResult, error)
+	CreatePurchaseOrder(context.Context, PurchaseOrder, identity.AuditEvent) error
+	GetPurchaseOrder(context.Context, string, string) (PurchaseOrder, error)
+	ListPurchaseOrders(context.Context, string, PurchaseOrderStatus, string, int) ([]PurchaseOrder, string, error)
+	TransitionPurchaseOrder(context.Context, string, string, int64, PurchaseOrderStatus, time.Time, identity.AuditEvent) (PurchaseOrder, error)
+	ReceivePurchaseOrder(context.Context, ReceiptCommand) (ReceiptResult, error)
+	ListMovements(context.Context, string, string, string, string, int) ([]Movement, string, error)
+}
+
+// Service enforces inventory rules independently from HTTP and SQL.
+type Service struct { store Store; now func() time.Time }
+
+func NewService(store Store) *Service { return &Service{store: store, now: time.Now} }
+
+func (service *Service) CreateItem(ctx context.Context, input ItemWrite, actor identity.Principal) (Item, error) {
+	scope, err := actorScope(actor); if err != nil { return Item{}, err }
+	sku, err := normalizedCode(input.SKU); if err != nil { return Item{}, err }
+	name, err := requiredText(input.Name, maximumNameLength); if err != nil { return Item{}, err }
+	unit, err := normalizedUnit(input.Unit); if err != nil { return Item{}, err }
+	now := service.now().UTC()
+	value := Item{ID:newID(), OrganizationID:scope, SKU:sku, Name:name, Unit:unit, Status:StatusActive, Version:1, CreatedAt:now, UpdatedAt:now}
+	if err := service.store.CreateItem(ctx, value, audit(actor, "inventory:item:create", value.ID, now)); err != nil { return Item{}, wrap("create inventory item", err) }
+	return value, nil
+}
+
+func (service *Service) GetItem(ctx context.Context, id string, actor identity.Principal) (Item, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil { return Item{}, err }
+	value, err := service.store.GetItem(ctx, scope, id); return value, wrap("get inventory item", err)
+}
+
+func (service *Service) ListItems(ctx context.Context, status RecordStatus, cursor string, limit int, actor identity.Principal) (ItemPage, error) {
+	scope, err := actorScope(actor); if err != nil || !validRecordStatusFilter(status) || !validPage(cursor, limit) { return ItemPage{}, ErrInvalidInput }
+	items, next, err := service.store.ListItems(ctx, scope, status, strings.TrimSpace(cursor), limit)
+	return ItemPage{Items:items, NextCursor:next}, wrap("list inventory items", err)
+}
+
+func (service *Service) UpdateItem(ctx context.Context, id string, input ItemUpdate, actor identity.Principal) (Item, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil || input.Version < 1 { return Item{}, ErrInvalidInput }
+	sku, err := normalizedCode(input.SKU); if err != nil { return Item{}, err }
+	name, err := requiredText(input.Name, maximumNameLength); if err != nil { return Item{}, err }
+	unit, err := normalizedUnit(input.Unit); if err != nil { return Item{}, err }
+	now := service.now().UTC(); value := Item{ID:id, OrganizationID:scope, SKU:sku, Name:name, Unit:unit, UpdatedAt:now}
+	updated, err := service.store.UpdateItem(ctx, scope, value, input.Version, audit(actor, "inventory:item:update", id, now))
+	return updated, wrap("update inventory item", err)
+}
+
+func (service *Service) TransitionItem(ctx context.Context, id string, input TransitionInput, target RecordStatus, actor identity.Principal) (Item, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil || input.Version < 1 || !validRecordStatus(target) { return Item{}, ErrInvalidInput }
+	now := service.now().UTC(); value, err := service.store.TransitionItem(ctx, scope, id, input.Version, target, now, audit(actor, "inventory:item:"+string(target), id, now))
+	return value, wrap("transition inventory item", err)
+}
+
+func (service *Service) ArchiveItem(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(Item,error){return service.TransitionItem(ctx,id,input,StatusArchived,actor)}
+func (service *Service) ReactivateItem(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(Item,error){return service.TransitionItem(ctx,id,input,StatusActive,actor)}
+
+func (service *Service) CreateWarehouse(ctx context.Context, input WarehouseWrite, actor identity.Principal) (Warehouse, error) {
+	scope, err := actorScope(actor); if err != nil { return Warehouse{}, err }
+	code, err := normalizedCode(input.Code); if err != nil { return Warehouse{}, err }
+	name, err := requiredText(input.Name, maximumNameLength); if err != nil { return Warehouse{}, err }
+	now := service.now().UTC(); value := Warehouse{ID:newID(), OrganizationID:scope, Code:code, Name:name, Status:StatusActive, Version:1, CreatedAt:now, UpdatedAt:now}
+	if err := service.store.CreateWarehouse(ctx, value, audit(actor, "inventory:warehouse:create", value.ID, now)); err != nil { return Warehouse{}, wrap("create inventory warehouse", err) }
+	return value, nil
+}
+
+func (service *Service) GetWarehouse(ctx context.Context, id string, actor identity.Principal) (Warehouse, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil { return Warehouse{}, err }
+	value, err := service.store.GetWarehouse(ctx, scope, id); return value, wrap("get inventory warehouse", err)
+}
+
+func (service *Service) ListWarehouses(ctx context.Context, status RecordStatus, cursor string, limit int, actor identity.Principal) (WarehousePage, error) {
+	scope, err := actorScope(actor); if err != nil || !validRecordStatusFilter(status) || !validPage(cursor, limit) { return WarehousePage{}, ErrInvalidInput }
+	items, next, err := service.store.ListWarehouses(ctx, scope, status, strings.TrimSpace(cursor), limit)
+	return WarehousePage{Items:items, NextCursor:next}, wrap("list inventory warehouses", err)
+}
+
+func (service *Service) UpdateWarehouse(ctx context.Context, id string, input WarehouseUpdate, actor identity.Principal) (Warehouse, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil || input.Version < 1 { return Warehouse{}, ErrInvalidInput }
+	code, err := normalizedCode(input.Code); if err != nil { return Warehouse{}, err }
+	name, err := requiredText(input.Name, maximumNameLength); if err != nil { return Warehouse{}, err }
+	now := service.now().UTC(); value := Warehouse{ID:id, OrganizationID:scope, Code:code, Name:name, UpdatedAt:now}
+	updated, err := service.store.UpdateWarehouse(ctx, scope, value, input.Version, audit(actor, "inventory:warehouse:update", id, now))
+	return updated, wrap("update inventory warehouse", err)
+}
+
+func (service *Service) TransitionWarehouse(ctx context.Context, id string, input TransitionInput, target RecordStatus, actor identity.Principal) (Warehouse, error) {
+	scope, id, err := scopeAndID(actor, id); if err != nil || input.Version < 1 || !validRecordStatus(target) { return Warehouse{}, ErrInvalidInput }
+	now := service.now().UTC(); value, err := service.store.TransitionWarehouse(ctx, scope, id, input.Version, target, now, audit(actor, "inventory:warehouse:"+string(target), id, now))
+	return value, wrap("transition inventory warehouse", err)
+}
+
+func (service *Service) ArchiveWarehouse(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(Warehouse,error){return service.TransitionWarehouse(ctx,id,input,StatusArchived,actor)}
+func (service *Service) ReactivateWarehouse(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(Warehouse,error){return service.TransitionWarehouse(ctx,id,input,StatusActive,actor)}
+
+func (service *Service) ListBalances(ctx context.Context, itemID, cursor string, limit int, actor identity.Principal) (BalancePage, error) {
+	scope, err := actorScope(actor); if err != nil || !validPage(cursor, limit) { return BalancePage{}, ErrInvalidInput }
+	if strings.TrimSpace(itemID) != "" { itemID, err = identifier(itemID); if err != nil { return BalancePage{}, err } }
+	items, next, err := service.store.ListBalances(ctx, scope, itemID, strings.TrimSpace(cursor), limit)
+	for index := range items { items[index].Available = items[index].OnHand - items[index].Reserved }
+	return BalancePage{Items:items, NextCursor:next}, wrap("list inventory balances", err)
+}
+
+func (service *Service) AdjustStock(ctx context.Context, input AdjustmentInput, actor identity.Principal) (StockResult, error) {
+	scope, err := actorScope(actor); if err != nil { return StockResult{}, err }
+	itemID, err := identifier(input.ItemID); if err != nil { return StockResult{}, err }
+	warehouseID, err := identifier(input.WarehouseID); if err != nil { return StockResult{}, err }
+	delta, err := canonicalInt64(input.QuantityDelta, false); if err != nil || delta == 0 { return StockResult{}, ErrInvalidInput }
+	reason, err := requiredText(input.Reason, maximumReasonLength); if err != nil { return StockResult{}, err }
+	key, err := idempotencyKey(input.IdempotencyKey); if err != nil { return StockResult{}, err }
+	now := service.now().UTC(); movement := Movement{ID:newID(), OrganizationID:scope, ItemID:itemID, WarehouseID:warehouseID, Kind:MovementAdjustment, QuantityDelta:delta, ReferenceType:"adjustment", ReferenceID:key, Reason:reason, IdempotencyKey:key, CreatedBy:actor.UserID, CreatedAt:now}
+	command := StockCommand{Scope:scope, IdempotencyKey:key, Fingerprint:fingerprint("adjust", itemID, warehouseID, strconv.FormatInt(delta,10), reason), Movement:movement, Audit:audit(actor,"inventory:stock:adjust",movement.ID,now)}
+	result, err := service.store.ApplyStock(ctx, command); result.Balance.Available = result.Balance.OnHand-result.Balance.Reserved
+	return result, wrap("adjust inventory stock", err)
+}
+
+func (service *Service) CreateReservation(ctx context.Context, input ReservationWrite, actor identity.Principal) (ReservationResult, error) {
+	scope, err := actorScope(actor); if err != nil { return ReservationResult{}, err }
+	reference, err := identifier(input.ExternalReference); if err != nil { return ReservationResult{}, err }
+	itemID, err := identifier(input.ItemID); if err != nil { return ReservationResult{}, err }
+	warehouseID, err := identifier(input.WarehouseID); if err != nil { return ReservationResult{}, err }
+	quantity, err := canonicalInt64(input.Quantity, true); if err != nil { return ReservationResult{}, err }
+	key, err := idempotencyKey(input.IdempotencyKey); if err != nil { return ReservationResult{}, err }
+	now := service.now().UTC(); value := Reservation{ID:newID(),OrganizationID:scope,ExternalReference:reference,ItemID:itemID,WarehouseID:warehouseID,Quantity:quantity,Status:ReservationActive,Version:1,CreatedAt:now,UpdatedAt:now}
+	movement := Movement{ID:newID(),OrganizationID:scope,ItemID:itemID,WarehouseID:warehouseID,Kind:MovementReservationCreated,ReservedDelta:quantity,ReferenceType:"reservation",ReferenceID:value.ID,Reason:"stock reserved",IdempotencyKey:key,CreatedBy:actor.UserID,CreatedAt:now}
+	command := ReservationCommand{Scope:scope,IdempotencyKey:key,Fingerprint:fingerprint("reserve",reference,itemID,warehouseID,strconv.FormatInt(quantity,10)),Reservation:value,Movement:movement,Audit:audit(actor,"inventory:reservation:create",value.ID,now)}
+	result, err := service.store.CreateReservation(ctx, command); result.Balance.Available=result.Balance.OnHand-result.Balance.Reserved
+	return result, wrap("create inventory reservation", err)
+}
+
+func (service *Service) GetReservation(ctx context.Context, id string, actor identity.Principal) (Reservation, error) {
+	scope,id,err:=scopeAndID(actor,id); if err!=nil{return Reservation{},err}; value,err:=service.store.GetReservation(ctx,scope,id); return value,wrap("get inventory reservation",err)
+}
+
+func (service *Service) ListReservations(ctx context.Context, status ReservationStatus, cursor string, limit int, actor identity.Principal) (ReservationPage,error) {
+	scope,err:=actorScope(actor); if err!=nil||!validReservationStatusFilter(status)||!validPage(cursor,limit){return ReservationPage{},ErrInvalidInput}
+	items,next,err:=service.store.ListReservations(ctx,scope,status,strings.TrimSpace(cursor),limit); return ReservationPage{Items:items,NextCursor:next},wrap("list inventory reservations",err)
+}
+
+func (service *Service) TransitionReservation(ctx context.Context,id string,input ReservationTransition,target ReservationStatus,actor identity.Principal)(ReservationResult,error){
+	scope,id,err:=scopeAndID(actor,id); if err!=nil||input.Version<1||(target!=ReservationReleased&&target!=ReservationConsumed){return ReservationResult{},ErrInvalidInput}
+	key,err:=idempotencyKey(input.IdempotencyKey);if err!=nil{return ReservationResult{},err};now:=service.now().UTC()
+	command:=ReservationTransitionCommand{Scope:scope,ReservationID:id,IdempotencyKey:key,Fingerprint:fingerprint("reservation",id,string(target),strconv.FormatInt(input.Version,10)),Version:input.Version,Target:target,MovementID:newID(),ActorID:actor.UserID,OccurredAt:now,Audit:audit(actor,"inventory:reservation:"+string(target),id,now)}
+	result,err:=service.store.TransitionReservation(ctx,command);result.Balance.Available=result.Balance.OnHand-result.Balance.Reserved;return result,wrap("transition inventory reservation",err)
+}
+
+func(service *Service)ReleaseReservation(ctx context.Context,id string,input ReservationTransition,actor identity.Principal)(ReservationResult,error){return service.TransitionReservation(ctx,id,input,ReservationReleased,actor)}
+func(service *Service)ConsumeReservation(ctx context.Context,id string,input ReservationTransition,actor identity.Principal)(ReservationResult,error){return service.TransitionReservation(ctx,id,input,ReservationConsumed,actor)}
+
+func (service *Service) CreatePurchaseOrder(ctx context.Context,input PurchaseOrderWrite,actor identity.Principal)(PurchaseOrder,error){
+	scope,err:=actorScope(actor);if err!=nil{return PurchaseOrder{},err};number,err:=normalizedCode(input.Number);if err!=nil{return PurchaseOrder{},err};supplier,err:=requiredText(input.SupplierName,maximumNameLength);if err!=nil||len(input.Lines)<1||len(input.Lines)>100{return PurchaseOrder{},ErrInvalidInput}
+	lines:=make([]PurchaseOrderLine,0,len(input.Lines));seen:=make(map[string]struct{},len(input.Lines));for _,entry:=range input.Lines{itemID,e:=identifier(entry.ItemID);if e!=nil{return PurchaseOrder{},e};if _,exists:=seen[itemID];exists{return PurchaseOrder{},ErrInvalidInput};seen[itemID]=struct{}{};quantity,e:=canonicalInt64(entry.OrderedQuantity,true);if e!=nil{return PurchaseOrder{},e};lines=append(lines,PurchaseOrderLine{ID:newID(),ItemID:itemID,OrderedQuantity:quantity})}
+	now:=service.now().UTC();value:=PurchaseOrder{ID:newID(),OrganizationID:scope,Number:number,SupplierName:supplier,Status:PurchaseDraft,Version:1,Lines:lines,CreatedAt:now,UpdatedAt:now};if err:=service.store.CreatePurchaseOrder(ctx,value,audit(actor,"inventory:purchase:create",value.ID,now));err!=nil{return PurchaseOrder{},wrap("create inventory purchase order",err)};return value,nil
+}
+
+func(service *Service)GetPurchaseOrder(ctx context.Context,id string,actor identity.Principal)(PurchaseOrder,error){scope,id,err:=scopeAndID(actor,id);if err!=nil{return PurchaseOrder{},err};value,err:=service.store.GetPurchaseOrder(ctx,scope,id);return value,wrap("get inventory purchase order",err)}
+func(service *Service)ListPurchaseOrders(ctx context.Context,status PurchaseOrderStatus,cursor string,limit int,actor identity.Principal)(PurchaseOrderPage,error){scope,err:=actorScope(actor);if err!=nil||!validPurchaseStatusFilter(status)||!validPage(cursor,limit){return PurchaseOrderPage{},ErrInvalidInput};items,next,err:=service.store.ListPurchaseOrders(ctx,scope,status,strings.TrimSpace(cursor),limit);return PurchaseOrderPage{Items:items,NextCursor:next},wrap("list inventory purchase orders",err)}
+
+func(service *Service)TransitionPurchaseOrder(ctx context.Context,id string,input TransitionInput,target PurchaseOrderStatus,actor identity.Principal)(PurchaseOrder,error){scope,id,err:=scopeAndID(actor,id);if err!=nil||input.Version<1||(target!=PurchaseSubmitted&&target!=PurchaseCancelled){return PurchaseOrder{},ErrInvalidInput};now:=service.now().UTC();value,err:=service.store.TransitionPurchaseOrder(ctx,scope,id,input.Version,target,now,audit(actor,"inventory:purchase:"+string(target),id,now));return value,wrap("transition inventory purchase order",err)}
+
+func(service *Service)SubmitPurchaseOrder(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(PurchaseOrder,error){return service.TransitionPurchaseOrder(ctx,id,input,PurchaseSubmitted,actor)}
+func(service *Service)CancelPurchaseOrder(ctx context.Context,id string,input TransitionInput,actor identity.Principal)(PurchaseOrder,error){return service.TransitionPurchaseOrder(ctx,id,input,PurchaseCancelled,actor)}
+
+func(service *Service)ReceivePurchaseOrder(ctx context.Context,id string,input ReceiptInput,actor identity.Principal)(ReceiptResult,error){scope,id,err:=scopeAndID(actor,id);if err!=nil||input.Version<1{return ReceiptResult{},ErrInvalidInput};lineID,err:=identifier(input.LineID);if err!=nil{return ReceiptResult{},err};warehouseID,err:=identifier(input.WarehouseID);if err!=nil{return ReceiptResult{},err};quantity,err:=canonicalInt64(input.Quantity,true);if err!=nil{return ReceiptResult{},err};key,err:=idempotencyKey(input.IdempotencyKey);if err!=nil{return ReceiptResult{},err};now:=service.now().UTC();command:=ReceiptCommand{Scope:scope,PurchaseOrderID:id,LineID:lineID,WarehouseID:warehouseID,IdempotencyKey:key,Fingerprint:fingerprint("receive",id,lineID,warehouseID,strconv.FormatInt(quantity,10),strconv.FormatInt(input.Version,10)),Quantity:quantity,Version:input.Version,MovementID:newID(),ActorID:actor.UserID,OccurredAt:now,Audit:audit(actor,"inventory:purchase:receive",id,now)};result,err:=service.store.ReceivePurchaseOrder(ctx,command);result.Balance.Available=result.Balance.OnHand-result.Balance.Reserved;return result,wrap("receive inventory purchase order",err)}
+
+func(service *Service)ListMovements(ctx context.Context,itemID,warehouseID,cursor string,limit int,actor identity.Principal)(MovementPage,error){scope,err:=actorScope(actor);if err!=nil||!validPage(cursor,limit){return MovementPage{},ErrInvalidInput};if strings.TrimSpace(itemID)!=""{itemID,err=identifier(itemID);if err!=nil{return MovementPage{},err}};if strings.TrimSpace(warehouseID)!=""{warehouseID,err=identifier(warehouseID);if err!=nil{return MovementPage{},err}};items,next,err:=service.store.ListMovements(ctx,scope,itemID,warehouseID,strings.TrimSpace(cursor),limit);return MovementPage{Items:items,NextCursor:next},wrap("list inventory movements",err)}
+
+func actorScope(actor identity.Principal)(string,error){if actor.UserID==""||len(actor.UserID)>maximumIdentifierLength||!printable(actor.UserID){return "",ErrInvalidInput}{{if .Tenancy}};scope:=strings.TrimSpace(actor.OrganizationID);if scope==""||len(scope)>maximumIdentifierLength||!printable(scope){return "",ErrInvalidInput};return scope,nil{{else}};return "",nil{{end}}}
+func scopeAndID(actor identity.Principal,value string)(string,string,error){scope,err:=actorScope(actor);if err!=nil{return "","",err};id,err:=identifier(value);return scope,id,err}
+func identifier(value string)(string,error){value=strings.TrimSpace(value);if value==""||len(value)>maximumIdentifierLength||!printable(value){return "",ErrInvalidInput};return value,nil}
+func requiredText(value string,maximum int)(string,error){value=strings.TrimSpace(value);if value==""||utf8.RuneCountInString(value)>maximum||!printable(value){return "",ErrInvalidInput};return value,nil}
+func normalizedCode(value string)(string,error){value=strings.ToUpper(strings.TrimSpace(value));if value==""||len(value)>maximumCodeLength||strings.IndexFunc(value,func(r rune)bool{return !(r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='.'||r=='_'||r=='-')})>=0{return "",ErrInvalidInput};return value,nil}
+func normalizedUnit(value string)(string,error){value=strings.ToUpper(strings.TrimSpace(value));if value==""||len(value)>maximumUnitLength||!printable(value){return "",ErrInvalidInput};return value,nil}
+func canonicalInt64(value string,positive bool)(int64,error){parsed,err:=strconv.ParseInt(value,10,64);if err!=nil||strconv.FormatInt(parsed,10)!=value||(positive&&parsed<=0){return 0,ErrInvalidInput};return parsed,nil}
+func idempotencyKey(value string)(string,error){return identifier(value)}
+func validPage(cursor string,limit int)bool{cursor=strings.TrimSpace(cursor);return limit>=1&&limit<=100&&len(cursor)<=maximumIdentifierLength&&printable(cursor)}
+func validRecordStatus(value RecordStatus)bool{return value==StatusActive||value==StatusArchived}
+func validRecordStatusFilter(value RecordStatus)bool{return value==""||validRecordStatus(value)}
+func validReservationStatusFilter(value ReservationStatus)bool{return value==""||value==ReservationActive||value==ReservationReleased||value==ReservationConsumed}
+func validPurchaseStatusFilter(value PurchaseOrderStatus)bool{return value==""||value==PurchaseDraft||value==PurchaseSubmitted||value==PurchasePartiallyReceived||value==PurchaseReceived||value==PurchaseCancelled}
+func printable(value string)bool{return strings.IndexFunc(value,func(character rune)bool{return !unicode.IsGraphic(character)})<0}
+func fingerprint(parts ...string)string{sum:=sha256.Sum256([]byte(strings.Join(parts,"\x00")));return fmt.Sprintf("%x",sum[:])}
+func audit(actor identity.Principal,action,target string,now time.Time)identity.AuditEvent{return identity.AuditEvent{ID:newID(),UserID:actor.UserID,Action:action,Outcome:"succeeded",Target:target,CreatedAt:now}}
+func wrap(operation string,err error)error{if err==nil{return nil};return errors.Join(errors.New(operation),err)}
+func newID()string{return rand.Text()}

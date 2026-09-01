@@ -1053,6 +1053,76 @@ func TestCRMCoreRequiresLifecycleTenancyWhenScoped(t *testing.T) {
 	}
 }
 
+func TestGenerateERPInventoryCapability(t *testing.T) {
+	t.Parallel()
+
+	for _, engine := range []string{"postgresql", "mysql"} {
+		engine := engine
+		t.Run(engine, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = engine
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+				{Name: inventoryCapability, Version: inventoryVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if generated.CapabilityLock[inventoryCapability] != inventoryVersion {
+				t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+			}
+			storePath := "internal/inventory/" + databaseTemplates[engine].Data.PackageName + "/store.go"
+			for _, path := range []string{
+				"internal/inventory/inventory.go",
+				"internal/inventory/inventory_test.go",
+				"internal/inventory/httpapi/handler.go",
+				"internal/inventory/httpapi/handler_test.go",
+				storePath,
+				"internal/platform/migrate/migrations/000290_erp_inventory.sql",
+				"web/admin/src/views/InventoryView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != inventoryCapability {
+					t.Errorf("Generate() inventory output %s is missing or has the wrong owner", path)
+				}
+			}
+			if mainSource := string(outputContent(generated, "cmd/server/main.go")); !strings.Contains(mainSource, "inventoryAPI.Register") {
+				t.Fatal("Generate() did not wire inventory routes")
+			}
+			var document struct {
+				Paths map[string]any `yaml:"paths"`
+			}
+			openAPI := outputContent(generated, "api/openapi.yaml")
+			if err := yaml.Unmarshal(openAPI, &document); err != nil {
+				t.Fatalf("generated inventory OpenAPI is invalid YAML: %v\n%s", err, openAPI)
+			}
+			for _, path := range []string{
+				"/api/v1/inventory/items", "/api/v1/inventory/balances",
+				"/api/v1/inventory/reservations", "/api/v1/inventory/purchase-orders/{id}/receive",
+			} {
+				if document.Paths[path] == nil {
+					t.Errorf("generated inventory OpenAPI is missing %s", path)
+				}
+			}
+		})
+	}
+}
+
+func TestERPInventoryRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyMembersVersion},
+		{Name: inventoryCapability, Version: inventoryVersion},
+	}
+	if _, err := New().Generate(context.Background(), project); err == nil ||
+		!strings.Contains(err.Error(), "erp-inventory with organization-tenancy requires organization-tenancy 0.3.0") {
+		t.Fatalf("Generate() error = %v, want lifecycle tenancy requirement", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

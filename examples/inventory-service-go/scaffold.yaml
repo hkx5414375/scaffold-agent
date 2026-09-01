@@ -1,0 +1,34 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: inventory-service-go
+  display_name: Inventory Service
+spec:
+  stack:
+    backend: go
+    admin_ui: element-plus
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: erp-inventory
+      version: 0.1.0
+  modules:
+    - name: notes
+      entities:
+        - name: note
+          fields:
+            - name: title
+              type: string
+              required: true
+      permissions:
+        - code: notes:note:create
+        - code: notes:note:read
+        - code: notes:note:update
+        - code: notes:note:delete
+      acceptance:
+        - Generic notes remain independent from inventory records.

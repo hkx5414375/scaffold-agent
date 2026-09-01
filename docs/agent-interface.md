@@ -189,6 +189,25 @@ administration view aligned. See `examples/crm-service-go/scaffold.yaml`,
 `examples/crm-service-java/scaffold.yaml`, and
 `examples/crm-service-python/scaffold.yaml` for complete selections.
 
+Selecting `erp-inventory` version `0.1.0` with the Go adapter generates inventory
+items, warehouses, integer balances, an immutable movement ledger, stock
+reservations, purchase orders, PostgreSQL or MySQL persistence, OpenAPI, and the
+shared Vue administration view. Add the capability by exact version in
+`project.capabilities`; tenant projects must also select `organization-tenancy`
+`0.3.0`. Quantities and optimistic versions are signed `int64` values represented
+as decimal JSON strings, so agents must not introduce floating-point stock.
+Every adjustment, reservation, release, consumption, and purchase receipt requires
+an idempotency key; reusing a key with the same command returns the original result,
+while reusing it for different input is a conflict. Inventory always preserves
+`on_hand >= 0`, `reserved >= 0`, `reserved <= on_hand`, and
+`available = on_hand - reserved` in one database transaction with the movement and
+audit event. Agents should reuse `inventory:read`, `inventory:catalog:write`,
+`inventory:stock:manage`, and `inventory:procurement:manage`; keep movements
+append-only; and must not automatically couple inventory items to commerce products.
+See `examples/inventory-service-go/scaffold.yaml` and
+`examples/inventory-service-go-mysql/scaffold.yaml` for the current reference
+selections. Java and Python parity remains tracked in the roadmap.
+
 ## STDIO protocol
 
 Run the server with:

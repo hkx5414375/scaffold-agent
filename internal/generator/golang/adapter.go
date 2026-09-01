@@ -57,6 +57,8 @@ const (
 	customerVersion         = "0.1.0"
 	crmCapability           = "crm-core"
 	crmVersion              = "0.1.0"
+	inventoryCapability     = "erp-inventory"
+	inventoryVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -134,6 +136,9 @@ type databaseTemplateSet struct {
 	CRMStorePath                      string
 	CRMStoreTemplate                  string
 	CRMMigrationTemplate              string
+	InventoryStorePath                string
+	InventoryStoreTemplate            string
+	InventoryMigrationTemplate        string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -188,6 +193,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CRMStorePath:                      "internal/crm/postgres/store.go",
 		CRMStoreTemplate:                  "templates/crm_postgres_store.go.tmpl",
 		CRMMigrationTemplate:              "templates/crm_postgres.sql.tmpl",
+		InventoryStorePath:                "internal/inventory/postgres/store.go",
+		InventoryStoreTemplate:            "templates/inventory_postgres_store.go.tmpl",
+		InventoryMigrationTemplate:        "templates/inventory_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -241,6 +249,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CRMStorePath:                      "internal/crm/mysql/store.go",
 		CRMStoreTemplate:                  "templates/crm_mysql_store.go.tmpl",
 		CRMMigrationTemplate:              "templates/crm_mysql.sql.tmpl",
+		InventoryStorePath:                "internal/inventory/mysql/store.go",
+		InventoryStoreTemplate:            "templates/inventory_mysql_store.go.tmpl",
+		InventoryMigrationTemplate:        "templates/inventory_mysql.sql.tmpl",
 	},
 }
 
@@ -387,6 +398,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: inventoryCapability, Version: inventoryVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable inventory, stock reservations, immutable movements, and procurement",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -489,6 +510,13 @@ var crmTemplates = map[string]string{
 	"internal/crm/httpapi/handler_test.go": "templates/crm_handler_test.go.tmpl",
 }
 
+var inventoryTemplates = map[string]string{
+	"internal/inventory/inventory.go":            "templates/inventory.go.tmpl",
+	"internal/inventory/inventory_test.go":       "templates/inventory_test.go.tmpl",
+	"internal/inventory/httpapi/handler.go":      "templates/inventory_handler.go.tmpl",
+	"internal/inventory/httpapi/handler_test.go": "templates/inventory_handler_test.go.tmpl",
+}
+
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -543,6 +571,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	catalogEnabled := false
 	customerEnabled := false
 	crmEnabled := false
+	inventoryEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -587,6 +616,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == crmCapability {
 			crmEnabled = true
 		}
+		if pack.Metadata.Name == inventoryCapability {
+			inventoryEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0")
@@ -596,6 +628,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("crm-core with organization-tenancy requires organization-tenancy 0.3.0")
+	}
+	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, errors.New("erp-inventory with organization-tenancy requires organization-tenancy 0.3.0")
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine, approvalsEnabled)
 	if err != nil {
@@ -627,6 +662,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Catalog:          catalogEnabled,
 		CustomerAccounts: customerEnabled,
 		CRM:              crmEnabled,
+		Inventory:        inventoryEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -666,6 +702,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if crmEnabled {
+		data.MigrationCount++
+	}
+	if inventoryEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+len(storefrontui.BaseTemplates)+1)
@@ -929,6 +968,26 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if inventoryEnabled {
+		for path, templatePath := range inventoryTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: inventoryCapability}
+		}
+		targets[database.InventoryStorePath] = renderTarget{
+			TemplatePath: database.InventoryStoreTemplate,
+			Owner:        inventoryCapability,
+		}
+		targets["internal/platform/migrate/migrations/000290_erp_inventory.sql"] = renderTarget{
+			TemplatePath: database.InventoryMigrationTemplate,
+			Owner:        inventoryCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/InventoryView.vue"] = renderTarget{
+				TemplatePath: "templates/src/views/InventoryView.vue.tmpl",
+				Owner:        inventoryCapability,
+				SharedAdmin:  true,
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -1014,6 +1073,7 @@ type templateData struct {
 	Catalog          bool
 	CustomerAccounts bool
 	CRM              bool
+	Inventory        bool
 	MigrationCount   int
 }
 

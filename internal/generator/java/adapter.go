@@ -308,6 +308,7 @@ type templateData struct {
 	Catalog          bool
 	CustomerAccounts bool
 	CRM              bool
+	Inventory        bool
 	MigrationCount   int
 }
 

@@ -39,6 +39,11 @@ import (
 	crmhttp "{{.ModulePath}}/internal/crm/httpapi"
 	crmdatabase "{{.ModulePath}}/internal/crm/{{.Database.PackageName}}"
 {{- end}}
+{{- if .Inventory}}
+	"{{.ModulePath}}/internal/inventory"
+	inventoryhttp "{{.ModulePath}}/internal/inventory/httpapi"
+	inventorydatabase "{{.ModulePath}}/internal/inventory/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Files}}
 	"{{.ModulePath}}/internal/files"
 	fileshttp "{{.ModulePath}}/internal/files/httpapi"
@@ -147,6 +152,10 @@ func run() error {
 	crmService := crm.NewService(crmdatabase.New(pool))
 	crmAPI := crmhttp.New(crmService)
 {{- end}}
+{{- if .Inventory}}
+	inventoryService := inventory.NewService(inventorydatabase.New(pool))
+	inventoryAPI := inventoryhttp.New(inventoryService)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -186,6 +195,9 @@ func run() error {
 {{- end}}
 {{- if .CRM}}
 		crmAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .Inventory}}
+		inventoryAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .JobAdmin}}
 		jobAdminAPI.Register(mux, identityAPI)

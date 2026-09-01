@@ -1,0 +1,100 @@
+insert ignore into identity_permissions (code, description) values
+    ('inventory:read', 'Read inventory, reservations, movements, and purchase orders'),
+    ('inventory:catalog:write', 'Manage inventory items and warehouses'),
+    ('inventory:stock:manage', 'Adjust, reserve, release, and consume inventory'),
+    ('inventory:procurement:manage', 'Create, submit, cancel, and receive purchase orders');
+
+insert ignore into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'inventory:read'), ('admin', 'inventory:catalog:write'),
+    ('admin', 'inventory:stock:manage'), ('admin', 'inventory:procurement:manage');
+
+create table if not exists inventory_items (
+    id varchar(191) primary key, organization_id varchar(191) not null, sku varchar(64) not null,
+    name varchar(160) not null, unit varchar(32) not null, status varchar(16) not null,
+    version bigint not null, created_at timestamp(6) not null, updated_at timestamp(6) not null,
+    constraint inventory_items_status_ck check (status in ('active', 'archived')),
+    constraint inventory_items_version_ck check (version > 0),
+    unique key inventory_items_scope_sku_uq (organization_id, sku){{if .Tenancy}},
+    constraint inventory_items_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_items_scope_status_id_idx on inventory_items (organization_id, status, id);
+
+create table if not exists inventory_warehouses (
+    id varchar(191) primary key, organization_id varchar(191) not null, code varchar(64) not null,
+    name varchar(160) not null, status varchar(16) not null, version bigint not null,
+    created_at timestamp(6) not null, updated_at timestamp(6) not null,
+    constraint inventory_warehouses_status_ck check (status in ('active', 'archived')),
+    constraint inventory_warehouses_version_ck check (version > 0),
+    unique key inventory_warehouses_scope_code_uq (organization_id, code){{if .Tenancy}},
+    constraint inventory_warehouses_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_warehouses_scope_status_id_idx on inventory_warehouses (organization_id, status, id);
+
+create table if not exists inventory_balances (
+    organization_id varchar(191) not null, item_id varchar(191) not null, warehouse_id varchar(191) not null,
+    on_hand bigint not null, reserved bigint not null, version bigint not null, updated_at timestamp(6) not null,
+    primary key (item_id, warehouse_id),
+    constraint inventory_balances_on_hand_ck check (on_hand >= 0),
+    constraint inventory_balances_reserved_ck check (reserved >= 0 and reserved <= on_hand),
+    constraint inventory_balances_item_fk foreign key (item_id) references inventory_items(id),
+    constraint inventory_balances_warehouse_fk foreign key (warehouse_id) references inventory_warehouses(id){{if .Tenancy}},
+    constraint inventory_balances_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_balances_scope_item_id_idx on inventory_balances (organization_id, item_id, warehouse_id);
+
+create table if not exists inventory_movements (
+    id varchar(191) primary key, organization_id varchar(191) not null,
+    item_id varchar(191) not null, warehouse_id varchar(191) not null, movement_kind varchar(32) not null,
+    quantity_delta bigint not null, reserved_delta bigint not null, reference_type varchar(32) not null,
+    reference_id varchar(191) not null, reason varchar(500) not null, idempotency_key varchar(191) not null,
+    created_by varchar(191) not null, created_at timestamp(6) not null,
+    constraint inventory_movements_kind_ck check (movement_kind in ('adjustment', 'reservation_created', 'reservation_released', 'reservation_consumed', 'purchase_received')),
+    constraint inventory_movements_item_fk foreign key (item_id) references inventory_items(id),
+    constraint inventory_movements_warehouse_fk foreign key (warehouse_id) references inventory_warehouses(id),
+    constraint inventory_movements_creator_fk foreign key (created_by) references identity_users(id){{if .Tenancy}},
+    constraint inventory_movements_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_movements_scope_stock_id_idx on inventory_movements (organization_id, item_id, warehouse_id, id);
+
+create table if not exists inventory_reservations (
+    id varchar(191) primary key, organization_id varchar(191) not null, external_reference varchar(191) not null,
+    item_id varchar(191) not null, warehouse_id varchar(191) not null, quantity bigint not null,
+    status varchar(16) not null, version bigint not null, created_at timestamp(6) not null, updated_at timestamp(6) not null,
+    constraint inventory_reservations_quantity_ck check (quantity > 0),
+    constraint inventory_reservations_status_ck check (status in ('active', 'released', 'consumed')),
+    constraint inventory_reservations_version_ck check (version > 0),
+    constraint inventory_reservations_item_fk foreign key (item_id) references inventory_items(id),
+    constraint inventory_reservations_warehouse_fk foreign key (warehouse_id) references inventory_warehouses(id),
+    unique key inventory_reservations_scope_reference_uq (organization_id, external_reference){{if .Tenancy}},
+    constraint inventory_reservations_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_reservations_scope_status_id_idx on inventory_reservations (organization_id, status, id);
+
+create table if not exists inventory_purchase_orders (
+    id varchar(191) primary key, organization_id varchar(191) not null, order_number varchar(64) not null,
+    supplier_name varchar(160) not null, status varchar(32) not null, version bigint not null,
+    created_at timestamp(6) not null, updated_at timestamp(6) not null,
+    constraint inventory_purchase_orders_status_ck check (status in ('draft', 'submitted', 'partially_received', 'received', 'cancelled')),
+    constraint inventory_purchase_orders_version_ck check (version > 0),
+    unique key inventory_purchase_orders_scope_number_uq (organization_id, order_number){{if .Tenancy}},
+    constraint inventory_purchase_orders_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index inventory_purchase_orders_scope_status_id_idx on inventory_purchase_orders (organization_id, status, id);
+
+create table if not exists inventory_purchase_order_lines (
+    id varchar(191) primary key, purchase_order_id varchar(191) not null, item_id varchar(191) not null,
+    ordered_quantity bigint not null, received_quantity bigint not null,
+    constraint inventory_purchase_order_lines_ordered_ck check (ordered_quantity > 0),
+    constraint inventory_purchase_order_lines_received_ck check (received_quantity >= 0 and received_quantity <= ordered_quantity),
+    constraint inventory_purchase_order_lines_order_fk foreign key (purchase_order_id) references inventory_purchase_orders(id) on delete cascade,
+    constraint inventory_purchase_order_lines_item_fk foreign key (item_id) references inventory_items(id),
+    unique key inventory_purchase_order_lines_item_uq (purchase_order_id, item_id)
+);
+
+create table if not exists inventory_idempotency (
+    organization_id varchar(191) not null, idempotency_key varchar(191) not null,
+    fingerprint char(64) not null, result_type varchar(32) not null, result_id varchar(191),
+    movement_id varchar(191), result_payload text, created_at timestamp(6) not null,
+    primary key (organization_id, idempotency_key),
+    constraint inventory_idempotency_movement_fk foreign key (movement_id) references inventory_movements(id)
+);
