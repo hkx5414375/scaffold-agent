@@ -1,0 +1,220 @@
+"""Identity use-case and HTTP contract tests."""
+
+from datetime import UTC, datetime
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind, install_error_handlers
+from {{.PackageName}}.identity.http import router
+from {{.PackageName}}.identity.models import AuditEvent, Principal, User
+from {{.PackageName}}.identity.repository import IdentityConflict
+from {{.PackageName}}.identity.service import ApiTokenResult, IdentityService, LoginResult
+from {{.PackageName}}.identity.tokens import digest_token
+
+NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.users: dict[str, User] = {}
+        self.sessions: dict[str, tuple[str, datetime]] = {}
+        self.tokens: dict[str, tuple[str, datetime]] = {}
+        self.permissions: set[tuple[str, str]] = {("admin", "identity:token:create")}
+        self.audits: list[AuditEvent] = []
+        self.conflict_after_create = False
+
+    def find_user_by_email(self, email: str) -> User | None:
+        return next((user for user in self.users.values() if user.email == email), None)
+
+    def find_user_by_session_hash(self, token_hash: str, now: datetime) -> User | None:
+        credential = self.sessions.get(token_hash)
+        if credential is None or credential[1] <= now:
+            return None
+        return self.users.get(credential[0])
+
+    def find_user_by_api_token_hash(self, token_hash: str, now: datetime) -> User | None:
+        credential = self.tokens.get(token_hash)
+        if credential is None or credential[1] <= now:
+            return None
+        return self.users.get(credential[0])
+
+    def has_permission(self, role: str, permission: str) -> bool:
+        return (role, permission) in self.permissions
+
+    def create_user(self, user: User) -> None:
+        self.users[user.id] = user
+        if self.conflict_after_create:
+            raise IdentityConflict
+
+    def create_session(
+        self,
+        token_hash: str,
+        user_id: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None:
+        self.sessions[token_hash] = (user_id, expires_at)
+        self.audits.append(audit_event)
+
+    def delete_session(self, token_hash: str) -> None:
+        self.sessions.pop(token_hash, None)
+
+    def create_api_token(
+        self,
+        token_id: str,
+        token_hash: str,
+        user_id: str,
+        name: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None:
+        del token_id, name
+        self.tokens[token_hash] = (user_id, expires_at)
+        self.audits.append(audit_event)
+
+    def append_audit(self, audit_event: AuditEvent) -> None:
+        self.audits.append(audit_event)
+
+
+def test_admin_login_session_token_and_logout() -> None:
+    repository = MemoryRepository()
+    service = IdentityService(repository, lambda: NOW)
+    service.ensure_admin(" Admin@Example.com ", "a sufficiently long password")
+
+    login = service.login("admin@example.com", "a sufficiently long password", "127.0.0.1", "test")
+    session_principal = service.authenticate(login.token, "")
+    service.authorize(session_principal, "identity:token:create", "127.0.0.1", "test")
+    api_token = service.create_api_token(session_principal, " automation ")
+    token_principal = service.authenticate("", api_token.token)
+    service.logout(login.token)
+
+    assert session_principal.method == "session"
+    assert token_principal.method == "token"
+    assert token_principal.user_id == session_principal.user_id
+    assert digest_token(login.token) not in repository.sessions
+    assert [event.action for event in repository.audits] == [
+        "identity.login",
+        "identity.api_token.create",
+    ]
+
+
+def test_login_and_authorization_failures_are_safe_and_audited() -> None:
+    repository = MemoryRepository()
+    service = IdentityService(repository, lambda: NOW)
+
+    with pytest.raises(IdentityError) as missing:
+        service.login(
+            "missing@example.com", "a sufficiently long password", "\n127.0.0.1", "bad\x00agent"
+        )
+    with pytest.raises(IdentityError) as malformed:
+        service.login("not-an-email", "password", "127.0.0.1", "test")
+    with pytest.raises(IdentityError) as unauthenticated:
+        service.authenticate("", "")
+
+    principal = Principal(user_id="user-1", email="user@example.com", role="user", method="session")
+    with pytest.raises(IdentityError) as forbidden:
+        service.authorize(principal, "identity:token:create", "127.0.0.1", "test")
+    with pytest.raises(IdentityError) as bad_name:
+        service.create_api_token(principal, "bad\nname")
+
+    assert missing.value.kind == IdentityErrorKind.INVALID_CREDENTIALS
+    assert malformed.value.kind == IdentityErrorKind.INVALID_CREDENTIALS
+    assert unauthenticated.value.kind == IdentityErrorKind.INVALID_CREDENTIALS
+    assert forbidden.value.kind == IdentityErrorKind.FORBIDDEN
+    assert bad_name.value.kind == IdentityErrorKind.INVALID_INPUT
+    assert repository.audits[-1].outcome == "denied"
+    assert repository.audits[0].ip_address == "127.0.0.1"
+    assert repository.audits[0].user_agent == "badagent"
+
+
+def test_bootstrap_is_idempotent_and_rejects_conflicting_identity() -> None:
+    repository = MemoryRepository()
+    repository.conflict_after_create = True
+    service = IdentityService(repository, lambda: NOW)
+
+    service.ensure_admin("admin@example.com", "a sufficiently long password")
+    repository.conflict_after_create = False
+    service.ensure_admin("admin@example.com", "a different long password")
+    administrator = next(iter(repository.users.values()))
+    repository.users[administrator.id] = User(
+        id=administrator.id,
+        email=administrator.email,
+        password_hash=administrator.password_hash,
+        role="user",
+        disabled=False,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+    with pytest.raises(IdentityError):
+        service.ensure_admin("admin@example.com", "a sufficiently long password")
+
+
+class HttpService:
+    def login(self, email: str, password: str, ip_address: str, user_agent: str) -> LoginResult:
+        del email, password, ip_address, user_agent
+        return LoginResult(
+            "browser-secret",
+            Principal(user_id="admin-1", email="admin@example.com", role="admin", method="session"),
+        )
+
+    def authenticate(self, session_token: str, bearer_token: str) -> Principal:
+        if session_token != "browser-secret" and bearer_token != "api-secret":
+            raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+        method = "token" if bearer_token else "session"
+        return Principal(user_id="admin-1", email="admin@example.com", role="admin", method=method)
+
+    def authorize(
+        self,
+        actor: Principal,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> None:
+        del actor, ip_address, user_agent
+        if permission != "identity:token:create":
+            raise IdentityError(IdentityErrorKind.FORBIDDEN, "permission is required")
+
+    def logout(self, session_token: str) -> None:
+        assert session_token == "browser-secret"
+
+    def create_api_token(self, owner: Principal, name: str) -> ApiTokenResult:
+        del owner
+        assert name == "automation"
+        return ApiTokenResult("new-api-secret")
+
+
+def test_http_identity_contract_and_safe_error_mapping() -> None:
+    application = FastAPI()
+    application.state.identity_service = HttpService()
+    application.state.cookie_secure = False
+    install_error_handlers(application)
+    application.include_router(router)
+    client = TestClient(application)
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@example.com", "password": "a sufficiently long password"},
+        headers={"user-agent": "test"},
+    )
+    current = client.get("/api/v1/auth/me", headers={"Authorization": "Bearer api-secret"})
+    token = client.post(
+        "/api/v1/auth/tokens",
+        headers={"Authorization": "Bearer api-secret"},
+        json={"name": "automation"},
+    )
+    client.cookies.set("scaffold_session", "browser-secret")
+    logout = client.post("/api/v1/auth/logout")
+    denied = TestClient(application).get("/api/v1/auth/me")
+
+    assert login.status_code == 200
+    assert "HttpOnly" in login.headers["set-cookie"]
+    assert "SameSite=lax" in login.headers["set-cookie"]
+    assert current.json()["method"] == "token"
+    assert token.status_code == 201
+    assert token.json() == {"token": "new-api-secret"}
+    assert logout.status_code == 204
+    assert denied.status_code == 401
+    assert denied.json()["code"] == "identity.invalid_credentials"

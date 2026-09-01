@@ -1,0 +1,47 @@
+"""Stable public API errors."""
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
+
+
+class IdentityErrorKind(StrEnum):
+    """Identity failure categories mapped to stable HTTP responses."""
+
+    INVALID_CREDENTIALS = "invalid_credentials"
+    FORBIDDEN = "forbidden"
+    INVALID_INPUT = "invalid_input"
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityError(Exception):
+    """Expected identity failure without internal details."""
+
+    kind: IdentityErrorKind
+    message: str
+
+
+class ApiError(BaseModel):
+    """Stable JSON error body."""
+
+    code: str
+    message: str
+    model_config = ConfigDict(extra="forbid")
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install safe exception-to-contract mappings."""
+
+    @app.exception_handler(IdentityError)
+    async def identity_error(_request: Request, error: IdentityError) -> JSONResponse:
+        status, code = {
+            IdentityErrorKind.INVALID_CREDENTIALS: (401, "identity.invalid_credentials"),
+            IdentityErrorKind.FORBIDDEN: (403, "identity.forbidden"),
+            IdentityErrorKind.INVALID_INPUT: (400, "request.invalid"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status, content=ApiError(code=code, message=error.message).model_dump()
+        )

@@ -1,0 +1,195 @@
+"""Transactional SQLAlchemy identity persistence."""
+
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import func, insert, select
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.identity.models import (
+    AuditEvent,
+    User,
+    api_tokens,
+    audit_events,
+    role_permissions,
+    sessions,
+    users,
+)
+
+
+class IdentityConflict(Exception):
+    """Persistence conflict without driver-specific details."""
+
+
+class IdentityRepository(Protocol):
+    """Persistence seam used by identity application services and tests."""
+
+    def find_user_by_email(self, email: str) -> User | None: ...
+
+    def find_user_by_session_hash(self, token_hash: str, now: datetime) -> User | None: ...
+
+    def find_user_by_api_token_hash(self, token_hash: str, now: datetime) -> User | None: ...
+
+    def has_permission(self, role: str, permission: str) -> bool: ...
+
+    def create_user(self, user: User) -> None: ...
+
+    def create_session(
+        self,
+        token_hash: str,
+        user_id: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None: ...
+
+    def delete_session(self, token_hash: str) -> None: ...
+
+    def create_api_token(
+        self,
+        token_id: str,
+        token_hash: str,
+        user_id: str,
+        name: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None: ...
+
+    def append_audit(self, audit_event: AuditEvent) -> None: ...
+
+
+class SQLAlchemyIdentityRepository:
+    """SQLAlchemy Core implementation with explicit transaction boundaries."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def find_user_by_email(self, email: str) -> User | None:
+        statement = select(users).where(users.c.email == email)
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_user(row) if row is not None else None
+
+    def find_user_by_session_hash(self, token_hash: str, now: datetime) -> User | None:
+        statement = (
+            select(users)
+            .join(sessions, sessions.c.user_id == users.c.id)
+            .where(sessions.c.token_hash == token_hash, sessions.c.expires_at > now)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_user(row) if row is not None else None
+
+    def find_user_by_api_token_hash(self, token_hash: str, now: datetime) -> User | None:
+        statement = (
+            select(users)
+            .join(api_tokens, api_tokens.c.user_id == users.c.id)
+            .where(api_tokens.c.token_hash == token_hash, api_tokens.c.expires_at > now)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_user(row) if row is not None else None
+
+    def has_permission(self, role: str, permission: str) -> bool:
+        statement = (
+            select(func.count())
+            .select_from(role_permissions)
+            .where(
+                role_permissions.c.role_code == role,
+                role_permissions.c.permission_code == permission,
+            )
+        )
+        with self._engine.connect() as connection:
+            return connection.execute(statement).scalar_one() == 1
+
+    def create_user(self, user: User) -> None:
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    insert(users).values(
+                        id=user.id,
+                        email=user.email,
+                        password_hash=user.password_hash,
+                        role=user.role,
+                        disabled=user.disabled,
+                        created_at=user.created_at,
+                        updated_at=user.updated_at,
+                    )
+                )
+        except IntegrityError as error:
+            raise IdentityConflict from error
+
+    def create_session(
+        self,
+        token_hash: str,
+        user_id: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(
+                insert(sessions).values(
+                    token_hash=token_hash,
+                    user_id=user_id,
+                    expires_at=expires_at,
+                    created_at=audit_event.created_at,
+                )
+            )
+            _append_audit(connection, audit_event)
+
+    def delete_session(self, token_hash: str) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(sessions.delete().where(sessions.c.token_hash == token_hash))
+
+    def create_api_token(
+        self,
+        token_id: str,
+        token_hash: str,
+        user_id: str,
+        name: str,
+        expires_at: datetime,
+        audit_event: AuditEvent,
+    ) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(
+                insert(api_tokens).values(
+                    id=token_id,
+                    token_hash=token_hash,
+                    user_id=user_id,
+                    name=name,
+                    expires_at=expires_at,
+                    created_at=audit_event.created_at,
+                )
+            )
+            _append_audit(connection, audit_event)
+
+    def append_audit(self, audit_event: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            _append_audit(connection, audit_event)
+
+
+def _append_audit(connection: Connection, event: AuditEvent) -> None:
+    connection.execute(
+        insert(audit_events).values(
+            id=event.id,
+            user_id=event.user_id,
+            action=event.action,
+            outcome=event.outcome,
+            target=event.target,
+            ip_address=event.ip_address,
+            user_agent=event.user_agent,
+            created_at=event.created_at,
+        )
+    )
+
+
+def _map_user(row: RowMapping) -> User:
+    return User(
+        id=str(row["id"]),
+        email=str(row["email"]),
+        password_hash=str(row["password_hash"]),
+        role=str(row["role"]),
+        disabled=bool(row["disabled"]),
+        created_at=cast(datetime, row["created_at"]),
+        updated_at=cast(datetime, row["updated_at"]),
+    )

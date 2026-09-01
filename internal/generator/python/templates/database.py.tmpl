@@ -1,0 +1,48 @@
+"""SQLAlchemy engine construction and bounded readiness."""
+
+from collections.abc import Mapping
+from typing import Any, cast
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine, make_url
+from sqlalchemy.exc import SQLAlchemyError
+
+
+def create_database_engine(
+    database_url: str,
+    *,
+    connect_args: Mapping[str, Any] | None = None,
+) -> Engine:
+    """Create a bounded, pre-pinged synchronous database pool."""
+    url = make_url(database_url)
+    arguments: dict[str, Any] = dict(connect_args or {})
+    if url.drivername.startswith("postgresql"):
+        arguments.setdefault("connect_timeout", 2)
+    elif url.drivername.startswith("mysql"):
+        arguments.setdefault("connect_timeout", 2)
+        arguments.setdefault("read_timeout", 2)
+        arguments.setdefault("write_timeout", 2)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=0,
+        pool_timeout=5,
+        connect_args=arguments,
+    )
+
+
+class DatabaseProbe:
+    """Expose only a boolean readiness result to HTTP."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def is_ready(self) -> bool:
+        """Return whether one bounded database round trip succeeds."""
+        try:
+            with self._engine.connect() as connection:
+                value = cast(int, connection.execute(text("select 1")).scalar_one())
+                return value == 1
+        except SQLAlchemyError:
+            return False

@@ -1,0 +1,241 @@
+"""Authentication, authorization, tokens, and audit use cases."""
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
+from {{.PackageName}}.identity.models import AuditEvent, Principal, User
+from {{.PackageName}}.identity.passwords import DUMMY_HASH, hash_password, verify_password
+from {{.PackageName}}.identity.repository import IdentityConflict, IdentityRepository
+from {{.PackageName}}.identity.tokens import digest_token, new_token
+
+SESSION_LIFETIME = timedelta(hours=24)
+API_TOKEN_LIFETIME = timedelta(days=90)
+MAXIMUM_AUDIT_VALUE_LENGTH = 512
+EMAIL_PATTERN = re.compile(
+    r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+    r"(?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LoginResult:
+    """Raw browser credential and safe principal returned once."""
+
+    token: str
+    principal: Principal
+
+
+@dataclass(frozen=True, slots=True)
+class ApiTokenResult:
+    """Raw API credential returned once."""
+
+    token: str
+
+
+class IdentityService:
+    """Identity use cases independent from HTTP and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: IdentityRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def ensure_admin(self, email: str, password: str) -> None:
+        """Idempotently create or verify the configured administrator."""
+        normalized_email = _normalize_email(email)
+        existing = self._repository.find_user_by_email(normalized_email)
+        if existing is not None:
+            _require_usable_admin(existing)
+            return
+        now = self._clock()
+        administrator = User(
+            id=_new_id(),
+            email=normalized_email,
+            password_hash=hash_password(password),
+            role="admin",
+            disabled=False,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_user(administrator)
+        except IdentityConflict:
+            concurrent = self._repository.find_user_by_email(normalized_email)
+            if concurrent is None:
+                raise
+            _require_usable_admin(concurrent)
+
+    def login(self, email: str, password: str, ip_address: str, user_agent: str) -> LoginResult:
+        """Authenticate credentials and atomically persist session plus audit."""
+        try:
+            normalized_email = _normalize_email(email)
+        except IdentityError:
+            verify_password(DUMMY_HASH, password)
+            self._deny_login(None, ip_address, user_agent)
+            raise _invalid_credentials() from None
+        candidate = self._repository.find_user_by_email(normalized_email)
+        if candidate is None:
+            verify_password(DUMMY_HASH, password)
+            self._deny_login(None, ip_address, user_agent)
+            raise _invalid_credentials()
+        if candidate.disabled or not verify_password(candidate.password_hash, password):
+            self._deny_login(candidate.id, ip_address, user_agent)
+            raise _invalid_credentials()
+        raw_token = new_token()
+        now = self._clock()
+        self._repository.create_session(
+            digest_token(raw_token),
+            candidate.id,
+            now + SESSION_LIFETIME,
+            _audit(candidate.id, "identity.login", "succeeded", None, ip_address, user_agent, now),
+        )
+        return LoginResult(raw_token, _principal(candidate, "session"))
+
+    def authenticate(self, session_token: str, bearer_token: str) -> Principal:
+        """Resolve one unexpired digest-backed credential."""
+        now = self._clock()
+        if bearer_token:
+            user = self._repository.find_user_by_api_token_hash(digest_token(bearer_token), now)
+            method = "token"
+        elif session_token:
+            user = self._repository.find_user_by_session_hash(digest_token(session_token), now)
+            method = "session"
+        else:
+            raise _invalid_credentials()
+        if user is None or user.disabled:
+            raise _invalid_credentials()
+        return _principal(user, method)
+
+    def authorize(
+        self,
+        actor: Principal,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> None:
+        """Require one role permission and audit denial."""
+        if not permission or not self._repository.has_permission(actor.role, permission):
+            self._repository.append_audit(
+                _audit(
+                    actor.user_id,
+                    "identity.authorization",
+                    "denied",
+                    permission,
+                    ip_address,
+                    user_agent,
+                    self._clock(),
+                )
+            )
+            raise IdentityError(IdentityErrorKind.FORBIDDEN, "permission is required")
+
+    def logout(self, session_token: str) -> None:
+        """Revoke one browser session when present."""
+        if session_token:
+            self._repository.delete_session(digest_token(session_token))
+
+    def create_api_token(self, owner: Principal, name: str) -> ApiTokenResult:
+        """Create one named 90-day API token and atomically audit it."""
+        normalized_name = name.strip()
+        if not normalized_name or len(normalized_name) > 80 or _has_control(normalized_name):
+            raise IdentityError(IdentityErrorKind.INVALID_INPUT, "API token name is invalid")
+        raw_token = new_token()
+        token_id = _new_id()
+        now = self._clock()
+        self._repository.create_api_token(
+            token_id,
+            digest_token(raw_token),
+            owner.user_id,
+            normalized_name,
+            now + API_TOKEN_LIFETIME,
+            _audit(
+                owner.user_id,
+                "identity.api_token.create",
+                "succeeded",
+                token_id,
+                None,
+                None,
+                now,
+            ),
+        )
+        return ApiTokenResult(raw_token)
+
+    def _deny_login(self, user_id: str | None, ip_address: str, user_agent: str) -> None:
+        self._repository.append_audit(
+            _audit(
+                user_id,
+                "identity.login",
+                "denied",
+                None,
+                ip_address,
+                user_agent,
+                self._clock(),
+            )
+        )
+
+
+def _normalize_email(email: str) -> str:
+    normalized = email.strip().lower()
+    if len(normalized) > 254 or EMAIL_PATTERN.fullmatch(normalized) is None:
+        raise IdentityError(IdentityErrorKind.INVALID_INPUT, "email address is invalid")
+    return normalized
+
+
+def _require_usable_admin(user: User) -> None:
+    if user.role != "admin" or user.disabled:
+        raise IdentityError(
+            IdentityErrorKind.INVALID_INPUT,
+            "bootstrap email belongs to a non-administrator or disabled account",
+        )
+
+
+def _audit(
+    user_id: str | None,
+    action: str,
+    outcome: str,
+    target: str | None,
+    ip_address: str | None,
+    user_agent: str | None,
+    now: datetime,
+) -> AuditEvent:
+    return AuditEvent(
+        id=_new_id(),
+        user_id=_safe_audit_value(user_id),
+        action=action,
+        outcome=outcome,
+        target=_safe_audit_value(target),
+        ip_address=_safe_audit_value(ip_address),
+        user_agent=_safe_audit_value(user_agent),
+        created_at=now,
+    )
+
+
+def _safe_audit_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return "".join(character for character in value if character.isprintable())[
+        :MAXIMUM_AUDIT_VALUE_LENGTH
+    ]
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)
+
+
+def _principal(user: User, method: str) -> Principal:
+    return Principal(user_id=user.id, email=user.email, role=user.role, method=method)
+
+
+def _invalid_credentials() -> IdentityError:
+    return IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "email or password is incorrect")
+
+
+def _new_id() -> str:
+    return str(uuid4())

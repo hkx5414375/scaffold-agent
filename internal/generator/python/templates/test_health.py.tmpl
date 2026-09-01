@@ -1,0 +1,105 @@
+"""Runtime configuration, lifecycle, liveness, and readiness tests."""
+
+import asyncio
+from pathlib import Path
+from typing import NoReturn, cast
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+import {{.PackageName}}.main as application_main
+from {{.PackageName}}.config import Settings, get_settings
+from {{.PackageName}}.database import DatabaseProbe, create_database_engine
+from {{.PackageName}}.health import router
+
+
+class Probe:
+    def __init__(self, ready: bool) -> None:
+        self.ready = ready
+
+    def is_ready(self) -> bool:
+        return self.ready
+
+
+def test_health_does_not_depend_on_database() -> None:
+    application = FastAPI()
+    application.state.database_probe = Probe(False)
+    application.include_router(router)
+
+    response = TestClient(application).get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_readiness_reports_only_generic_status() -> None:
+    application = FastAPI()
+    application.state.database_probe = Probe(False)
+    application.include_router(router)
+    client = TestClient(application)
+
+    unavailable = client.get("/readyz")
+    application.state.database_probe = Probe(True)
+    ready = client.get("/readyz")
+
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"status": "unavailable"}
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ok"}
+
+
+def test_settings_require_a_complete_bootstrap_pair(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        Settings(database_url="sqlite://", bootstrap_admin_email="admin@example.com")
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    settings = get_settings()
+    get_settings.cache_clear()
+
+    assert settings.database_url == "sqlite://"
+    assert not settings.cookie_secure
+
+
+class FailingEngine:
+    def connect(self) -> NoReturn:
+        raise SQLAlchemyError("unavailable")
+
+
+def test_database_engine_selection_and_probe_failure() -> None:
+    database_url = "{{.Database.ExampleURL}}"
+    engine = create_database_engine(database_url)
+    try:
+        assert engine.url.drivername.startswith("{{.Database.Engine}}")
+    finally:
+        engine.dispose()
+
+    assert not DatabaseProbe(cast(Engine, FailingEngine())).is_ready()
+
+
+def test_application_lifecycle_migrates_bootstraps_and_disposes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'application.db'}")
+    settings = Settings(
+        database_url="sqlite://",
+        cookie_secure=False,
+        bootstrap_admin_email="admin@example.com",
+        bootstrap_admin_password="a sufficiently long password",
+    )
+    monkeypatch.setattr(application_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(application_main, "create_database_engine", lambda _url: engine)
+    application = application_main.create_app()
+
+    async def exercise() -> None:
+        async with application_main.lifespan(application):
+            assert application.state.cookie_secure is False
+            assert application.state.database_probe.is_ready()
+
+    asyncio.run(exercise())

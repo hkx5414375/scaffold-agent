@@ -1,0 +1,48 @@
+# {{.ProjectName}}
+
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。
+
+## 环境要求
+
+- Python 3.12 或 3.13
+- uv 0.12.8
+- 可用的 {{.Database.DisplayName}} 数据库
+
+## 本地启动
+
+```powershell
+$env:DATABASE_URL = "{{.Database.ExampleURL}}"
+$env:BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
+$env:BOOTSTRAP_ADMIN_PASSWORD = "replace-with-at-least-12-characters"
+$env:COOKIE_SECURE = "false"
+uv sync --frozen --all-groups
+uv run uvicorn {{.PackageName}}.main:app --reload
+```
+
+启动过程会在接受 HTTP 流量前执行 Alembic 迁移。管理员引导配置必须同时提供邮箱和密码；已有同邮箱管理员不会被覆盖密码或降级权限。
+
+## 质量门禁
+
+```powershell
+uv lock --check
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run bandit -c pyproject.toml -r src
+uv run pytest
+```
+
+## 认证约定
+
+- `POST /api/v1/auth/login` 创建 24 小时、`HttpOnly`、`SameSite=Lax` 会话 Cookie。
+- `Authorization: Bearer <token>` 使用只在创建时返回一次的 90 天 API Token。
+- 数据库只保存凭证的 SHA-256 摘要，密码使用有参数上限的 PBKDF2-SHA256。
+- `POST /api/v1/auth/tokens` 要求 `identity:token:create` 权限。
+- 对外 API 契约固定在 `api/openapi.yaml`，运行时文档不能代替版本化契约。
+
+## 目录边界
+
+- `src/{{.PackageName}}/identity`：领域记录、用例、持久化和 HTTP 适配器。
+- `src/{{.PackageName}}/migration`：不可跳号的数据库迁移。
+- `tests`：单元、HTTP、架构和真实数据库契约测试。
+- `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

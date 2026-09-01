@@ -62,7 +62,9 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java csv-import-export 0.1 with fixed field order, bounded parsing, atomic create-only import, spreadsheet-safe export, tenant scope, and audit.
 - [x] Java approval-workflows 0.1 with subject verification, separation of duties, optimistic transitions, immutable events, tenant scope, and shared administration UI.
 - [x] Java platform capability parity.
-- [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
+- [x] Python 3.12+/FastAPI foundation for PostgreSQL and MySQL with deterministic uv locks, Alembic migrations, liveness/readiness, and frozen quality gates.
+- [x] Python session/token identity, permission RBAC, transactional audit, stable OpenAPI, SQLite repository contracts, and live PostgreSQL/MySQL CI gates.
+- [ ] Python Blueprint CRUD, shared Vue administration, organization tenancy, and M5 platform capability parity.
 
 ## M7 — General business suite and storefront
 

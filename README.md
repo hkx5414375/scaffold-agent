@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot adapter now has platform parity and generates PostgreSQL or MySQL Maven services with health/readiness, PBKDF2 passwords, session and bearer authentication, permission RBAC, atomic audit records, Blueprint-driven CRUD, keyset pagination, optimistic concurrency, organization tenancy, member and lifecycle administration, durable leased background jobs, idempotent TLS-only email notifications, bounded atomic file assets, a cross-instance database TTL cache, payload-free audited job administration, safe HTTP observability, atomic bounded CSV transfer, single-stage approval workflows, OpenAPI, the same build-tested Vue/Element Plus administration UI, and enforced JUnit, ArchUnit, Checkstyle, Spotless, SpotBugs, and Maven quality gates. The Python adapter and Nuxt storefronts are in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot adapter has platform parity, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. The Python 3.12+/FastAPI adapter now generates PostgreSQL or MySQL identity services with deterministic uv locks, Alembic migrations, bounded health/readiness, PBKDF2 passwords, session and bearer authentication, permission RBAC, transactional audit, stable OpenAPI, and enforced Ruff, strict mypy, Bandit, pytest coverage, and live-database gates. Python CRUD/platform parity and Nuxt storefronts remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -34,6 +34,7 @@ Prerequisites:
 - Go 1.27 or newer in the 1.27 release line
 - Git
 - Node.js 22.12 or newer when validating generated frontends
+- Python 3.12 or 3.13 and uv 0.12.8 when validating generated Python services
 
 Run the baseline checks:
 
@@ -56,6 +57,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/csv-transfer-task
 go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-service --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-java --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-java --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-python --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

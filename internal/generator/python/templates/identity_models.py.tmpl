@@ -1,0 +1,146 @@
+"""Identity domain records and SQLAlchemy table metadata."""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict
+
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+metadata = sa.MetaData(naming_convention=NAMING_CONVENTION)
+
+roles = sa.Table(
+    "identity_roles",
+    metadata,
+    sa.Column("code", sa.String(32), primary_key=True),
+    sa.Column("display_name", sa.String(120), nullable=False),
+)
+
+permissions = sa.Table(
+    "identity_permissions",
+    metadata,
+    sa.Column("code", sa.String(191), primary_key=True),
+    sa.Column("description", sa.String(255), nullable=False),
+)
+
+role_permissions = sa.Table(
+    "identity_role_permissions",
+    metadata,
+    sa.Column(
+        "role_code",
+        sa.String(32),
+        sa.ForeignKey("identity_roles.code", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column(
+        "permission_code",
+        sa.String(191),
+        sa.ForeignKey("identity_permissions.code", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+users = sa.Table(
+    "identity_users",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column("email", sa.String(254), nullable=False, unique=True),
+    sa.Column("password_hash", sa.Text, nullable=False),
+    sa.Column("role", sa.String(32), sa.ForeignKey("identity_roles.code"), nullable=False),
+    sa.Column("disabled", sa.Boolean, nullable=False, server_default=sa.false()),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+sessions = sa.Table(
+    "identity_sessions",
+    metadata,
+    sa.Column("token_hash", sa.String(64), primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False, index=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+api_tokens = sa.Table(
+    "identity_api_tokens",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column("token_hash", sa.String(64), nullable=False, unique=True),
+    sa.Column(
+        "user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    ),
+    sa.Column("name", sa.String(80), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False, index=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+audit_events = sa.Table(
+    "audit_events",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    sa.Column("action", sa.String(191), nullable=False, index=True),
+    sa.Column("outcome", sa.String(32), nullable=False),
+    sa.Column("target", sa.String(512), nullable=True),
+    sa.Column("ip_address", sa.String(512), nullable=True),
+    sa.Column("user_agent", sa.String(512), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class User:
+    """Internal authenticated identity including its password verifier."""
+
+    id: str
+    email: str
+    password_hash: str
+    role: str
+    disabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class Principal(BaseModel):
+    """Safe authenticated identity returned through HTTP."""
+
+    user_id: str
+    email: str
+    role: str
+    method: str
+    model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True, slots=True)
+class AuditEvent:
+    """Security audit evidence committed with protected mutations."""
+
+    id: str
+    user_id: str | None
+    action: str
+    outcome: str
+    target: str | None
+    ip_address: str | None
+    user_agent: str | None
+    created_at: datetime

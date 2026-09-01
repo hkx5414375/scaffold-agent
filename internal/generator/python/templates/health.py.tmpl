@@ -1,0 +1,40 @@
+"""Process liveness and database readiness routes."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
+
+from {{.PackageName}}.database import DatabaseProbe
+
+router = APIRouter()
+
+
+class StatusResponse(BaseModel):
+    """Minimal health response without infrastructure details."""
+
+    status: str
+    model_config = ConfigDict(extra="forbid")
+
+
+def database_probe(request: Request) -> DatabaseProbe:
+    """Resolve the process-scoped probe from application state."""
+    probe: DatabaseProbe = request.app.state.database_probe
+    return probe
+
+
+@router.get("/healthz", response_model=StatusResponse)
+def health() -> StatusResponse:
+    """Report process liveness without touching the database."""
+    return StatusResponse(status="ok")
+
+
+@router.get("/readyz", response_model=StatusResponse)
+def readiness(
+    probe: Annotated[DatabaseProbe, Depends(database_probe)],
+) -> StatusResponse | JSONResponse:
+    """Report generic database readiness."""
+    if probe.is_ready():
+        return StatusResponse(status="ok")
+    return JSONResponse(status_code=503, content={"status": "unavailable"})

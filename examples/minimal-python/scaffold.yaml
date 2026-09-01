@@ -1,0 +1,14 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: minimal-python
+  display_name: Minimal Python Service
+spec:
+  stack:
+    backend: python
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]

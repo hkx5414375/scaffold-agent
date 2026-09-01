@@ -1,0 +1,17 @@
+"""Programmatic database migration entrypoint."""
+
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.engine import Engine
+
+
+def upgrade_database(engine: Engine) -> None:
+    """Upgrade one engine to the generated schema head."""
+    root = Path(__file__).resolve().parents[2]
+    configuration = Config(str(root / "alembic.ini"))
+    configuration.set_main_option("script_location", str(Path(__file__).parent / "migration"))
+    with engine.begin() as connection:
+        configuration.attributes["connection"] = connection
+        command.upgrade(configuration, "head")

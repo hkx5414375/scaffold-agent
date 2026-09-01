@@ -1,0 +1,110 @@
+"""Identity repository contract against SQLite and the configured production database."""
+
+import os
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import create_engine, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import DatabaseProbe, create_database_engine
+from {{.PackageName}}.identity.models import (
+    AuditEvent,
+    User,
+    audit_events,
+    metadata,
+    permissions,
+    role_permissions,
+    roles,
+)
+from {{.PackageName}}.identity.repository import IdentityConflict, SQLAlchemyIdentityRepository
+from {{.PackageName}}.identity.tokens import digest_token
+from {{.PackageName}}.migrations import upgrade_database
+
+
+def _seed(engine: Engine) -> None:
+    with engine.begin() as connection:
+        connection.execute(insert(roles), [{"code": "admin", "display_name": "Administrator"}])
+        connection.execute(
+            insert(permissions),
+            [{"code": "identity:token:create", "description": "Create token"}],
+        )
+        connection.execute(
+            insert(role_permissions),
+            [{"role_code": "admin", "permission_code": "identity:token:create"}],
+        )
+
+
+def _repository_contract(engine: Engine) -> None:
+    repository = SQLAlchemyIdentityRepository(engine)
+    now = datetime.now(UTC)
+    user = User("user-1", "admin@example.com", "hash", "admin", False, now, now)
+    repository.create_user(user)
+
+    _assert_user(repository.find_user_by_email(user.email), user)
+    assert repository.find_user_by_email("missing@example.com") is None
+    assert repository.has_permission("admin", "identity:token:create")
+    assert not repository.has_permission("admin", "missing")
+    with pytest.raises(IdentityConflict):
+        repository.create_user(user)
+
+    session_hash = digest_token("session-secret")
+    session_audit = AuditEvent(
+        "audit-1", user.id, "identity.login", "succeeded", None, None, None, now
+    )
+    repository.create_session(session_hash, user.id, now + timedelta(hours=1), session_audit)
+    _assert_user(repository.find_user_by_session_hash(session_hash, now), user)
+    assert repository.find_user_by_session_hash(session_hash, now + timedelta(hours=2)) is None
+
+    token_hash = digest_token("api-secret")
+    token_audit = AuditEvent(
+        "audit-2", user.id, "identity.api_token.create", "succeeded", "token-1", None, None, now
+    )
+    repository.create_api_token(
+        "token-1", token_hash, user.id, "automation", now + timedelta(days=1), token_audit
+    )
+    _assert_user(repository.find_user_by_api_token_hash(token_hash, now), user)
+    assert repository.find_user_by_api_token_hash(token_hash, now + timedelta(days=2)) is None
+
+    repository.append_audit(
+        AuditEvent("audit-3", user.id, "test", "succeeded", None, None, None, now)
+    )
+    with engine.connect() as connection:
+        assert len(connection.execute(select(audit_events)).all()) == 3
+    repository.delete_session(session_hash)
+    assert repository.find_user_by_session_hash(session_hash, now) is None
+
+
+def _assert_user(actual: User | None, expected: User) -> None:
+    assert actual is not None
+    assert actual.id == expected.id
+    assert actual.email == expected.email
+    assert actual.role == expected.role
+    assert actual.disabled == expected.disabled
+
+
+def test_repository_contract_and_readiness_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    _seed(engine)
+
+    _repository_contract(engine)
+    assert DatabaseProbe(engine).is_ready()
+    engine.dispose()
+
+
+def test_configured_database_migrations_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

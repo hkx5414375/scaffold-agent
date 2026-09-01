@@ -1,0 +1,31 @@
+"""Validated runtime configuration."""
+
+from functools import lru_cache
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Process settings loaded from environment variables."""
+
+    database_url: str
+    cookie_secure: bool = True
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+
+    @model_validator(mode="after")
+    def require_bootstrap_pair(self) -> "Settings":
+        """Reject half-configured administrator bootstrap credentials."""
+        if (self.bootstrap_admin_email is None) != (self.bootstrap_admin_password is None):
+            msg = "BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must be set together"
+            raise ValueError(msg)
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return one immutable settings snapshot per process."""
+    return Settings()

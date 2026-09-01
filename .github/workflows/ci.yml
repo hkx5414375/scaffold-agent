@@ -80,6 +80,27 @@ jobs:
           SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
         run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs|TenantNotifications|TenantFiles|TenantCache|TenantJobAdministration|TenantCSVImportExport|TenantApprovalWorkflows|Observability)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQL(Jobs|Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLPlatformCapabilitiesCompose$' -count=1
 
+  generated-python:
+    name: Generated Python identity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.12.8"
+          enable-cache: true
+      - name: Generate and verify PostgreSQL and MySQL Python projects
+        env:
+          SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
+        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)IdentityPlanApplyVerifyEndToEnd$' -count=1
+
   generated-postgresql:
     name: Generated PostgreSQL integration
     runs-on: ubuntu-latest
@@ -97,6 +118,19 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres-python:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_DB: scaffold_agent_python
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -108,6 +142,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.12.8"
+          enable-cache: true
       - name: Generate and test against PostgreSQL
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/scaffold_agent?sslmode=disable
@@ -119,6 +160,11 @@ jobs:
           TEST_DATABASE_USER: postgres
           TEST_DATABASE_PASSWORD: postgres
         run: go test ./internal/engine -run '^TestJavaPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
+      - name: Generate Python and test identity against PostgreSQL
+        env:
+          SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5433/scaffold_agent_python
+        run: go test ./internal/engine -run '^TestPythonPostgreSQLIdentityPlanApplyVerifyEndToEnd$' -count=1
 
   generated-mysql:
     name: Generated MySQL integration
@@ -127,6 +173,7 @@ jobs:
       mysql:
         image: mysql:8.4.11
         env:
+          MYSQL_DATABASE: scaffold_agent_python
           MYSQL_ROOT_PASSWORD: mysql
         ports:
           - 3306:3306
@@ -146,6 +193,13 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.12.8"
+          enable-cache: true
       - name: Generate and test against MySQL
         env:
           TEST_DATABASE_URL: "root:mysql@tcp(127.0.0.1:3306)/"
@@ -157,3 +211,8 @@ jobs:
           TEST_DATABASE_USER: root
           TEST_DATABASE_PASSWORD: mysql
         run: go test ./internal/engine -run '^TestJavaMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
+      - name: Generate Python and test identity against MySQL
+        env:
+          SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
+          TEST_DATABASE_URL: mysql+pymysql://root:mysql@127.0.0.1:3306/scaffold_agent_python?charset=utf8mb4
+        run: go test ./internal/engine -run '^TestPythonMySQLIdentityPlanApplyVerifyEndToEnd$' -count=1

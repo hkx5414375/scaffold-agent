@@ -17,6 +17,7 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	gogen "github.com/hkx5414375/scaffold-agent/internal/generator/golang"
 	javagen "github.com/hkx5414375/scaffold-agent/internal/generator/java"
+	pygen "github.com/hkx5414375/scaffold-agent/internal/generator/python"
 	"github.com/hkx5414375/scaffold-agent/internal/manifest"
 	"github.com/hkx5414375/scaffold-agent/internal/paging"
 	"github.com/hkx5414375/scaffold-agent/internal/plan"
@@ -45,7 +46,7 @@ type Engine struct {
 
 // New returns an Engine with build-version reporting.
 func New(version string) *Engine {
-	return NewWithRegistry(version, generator.NewRegistry(gogen.New(), javagen.New()))
+	return NewWithRegistry(version, generator.NewRegistry(gogen.New(), javagen.New(), pygen.New()))
 }
 
 // NewWithRegistry returns an Engine with an explicit language-adapter registry.
@@ -90,6 +91,8 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"portable-approval-workflows",
 				"java-spring-boot-foundation",
 				"java-session-token-identity",
+				"python-fastapi-foundation",
+				"python-session-token-identity",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

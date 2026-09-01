@@ -1,0 +1,216 @@
+openapi: 3.1.0
+info:
+  title: "{{.ProjectName}}"
+  version: 0.1.0
+  description: Generated identity and health API contract.
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Check process liveness
+      responses:
+        "200":
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+  /readyz:
+    get:
+      operationId: readiness
+      summary: Check database readiness
+      responses:
+        "200":
+          description: Database is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "503":
+          description: Database is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      summary: Create a browser session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated session created.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Revoke a browser session
+      responses:
+        "204":
+          description: Session removed when present.
+  /api/v1/auth/me:
+    get:
+      operationId: currentPrincipal
+      summary: Read the authenticated principal
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Safe current principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Principal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/v1/auth/tokens:
+    post:
+      operationId: createApiToken
+      summary: Create an expiring API token
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiTokenRequest"
+      responses:
+        "201":
+          description: Raw token returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: scaffold_session
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Unauthorized:
+      description: Authentication failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Forbidden:
+      description: Permission is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    ValidationError:
+      description: Input validation failed.
+      content:
+        application/json:
+          schema:
+            type: object
+  schemas:
+    StatusResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          minLength: 3
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          format: password
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [principal]
+      properties:
+        principal:
+          $ref: "#/components/schemas/Principal"
+    Principal:
+      type: object
+      additionalProperties: false
+      required: [user_id, email, role, method]
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        method:
+          type: string
+          enum: [session, token]
+    ApiTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+    ApiTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+    ApiError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string

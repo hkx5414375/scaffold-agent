@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器现可生成 Java 21/Spring Boot 4.1 + Maven 的 PostgreSQL 或 MySQL 服务，包含有界数据库就绪检查、PBKDF2-SHA256 密码、HttpOnly 浏览器会话、只保存摘要的 Bearer Token、权限 RBAC、事务安全审计、蓝图驱动 CRUD、有界游标分页、乐观锁、组织生命周期、可靠后台任务、通知、文件资产、应用缓存、带审计的任务管理、安全 HTTP 可观测性、原子 CSV 导入导出、单阶段审批工作流、OpenAPI、共享 Vue/Element Plus 管理端和锁定的质量门禁；Java 已与 Go 的平台能力集合对齐。Python 当前仍返回稳定诊断 `generator.adapter.unavailable`。所有不支持的选择都会失败，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座，包含确定性 uv 锁、Alembic 迁移、有界健康检查、PBKDF2-SHA256 密码、HttpOnly 会话、只保存摘要的 Bearer Token、权限 RBAC、事务审计、稳定 OpenAPI 和锁定质量门禁。Python 管理端、业务模块和能力选择在完整切片实现前会返回明确且稳定的生成错误；任何不支持的选择都不会生成残缺项目。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。

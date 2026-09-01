@@ -1,0 +1,185 @@
+"""Create the identity, authorization, token, and audit foundation."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000001_identity"
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create identity tables and immutable built-in authorization data."""
+    op.create_table(
+        "identity_roles",
+        sa.Column("code", sa.String(length=32), nullable=False),
+        sa.Column("display_name", sa.String(length=120), nullable=False),
+        sa.PrimaryKeyConstraint("code", name="pk_identity_roles"),
+    )
+    op.create_table(
+        "identity_permissions",
+        sa.Column("code", sa.String(length=191), nullable=False),
+        sa.Column("description", sa.String(length=255), nullable=False),
+        sa.PrimaryKeyConstraint("code", name="pk_identity_permissions"),
+    )
+    op.create_table(
+        "identity_role_permissions",
+        sa.Column("role_code", sa.String(length=32), nullable=False),
+        sa.Column("permission_code", sa.String(length=191), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["permission_code"],
+            ["identity_permissions.code"],
+            name="fk_identity_role_permissions_permission_code_identity_permissions",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_code"],
+            ["identity_roles.code"],
+            name="fk_identity_role_permissions_role_code_identity_roles",
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint(
+            "role_code",
+            "permission_code",
+            name="pk_identity_role_permissions",
+        ),
+    )
+    op.create_table(
+        "identity_users",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("email", sa.String(length=254), nullable=False),
+        sa.Column("password_hash", sa.Text(), nullable=False),
+        sa.Column("role", sa.String(length=32), nullable=False),
+        sa.Column("disabled", sa.Boolean(), server_default=sa.false(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["role"],
+            ["identity_roles.code"],
+            name="fk_identity_users_role_identity_roles",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_identity_users"),
+        sa.UniqueConstraint("email", name="uq_identity_users_email"),
+    )
+    op.create_table(
+        "identity_sessions",
+        sa.Column("token_hash", sa.String(length=64), nullable=False),
+        sa.Column("user_id", sa.String(length=191), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["identity_users.id"],
+            name="fk_identity_sessions_user_id_identity_users",
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("token_hash", name="pk_identity_sessions"),
+    )
+    op.create_index(
+        "ix_identity_sessions_expires_at",
+        "identity_sessions",
+        ["expires_at"],
+        unique=False,
+    )
+    op.create_table(
+        "identity_api_tokens",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("token_hash", sa.String(length=64), nullable=False),
+        sa.Column("user_id", sa.String(length=191), nullable=False),
+        sa.Column("name", sa.String(length=80), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["identity_users.id"],
+            name="fk_identity_api_tokens_user_id_identity_users",
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_identity_api_tokens"),
+        sa.UniqueConstraint("token_hash", name="uq_identity_api_tokens_token_hash"),
+    )
+    op.create_index(
+        "ix_identity_api_tokens_expires_at",
+        "identity_api_tokens",
+        ["expires_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_identity_api_tokens_user_id",
+        "identity_api_tokens",
+        ["user_id"],
+        unique=False,
+    )
+    op.create_table(
+        "audit_events",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("user_id", sa.String(length=191), nullable=True),
+        sa.Column("action", sa.String(length=191), nullable=False),
+        sa.Column("outcome", sa.String(length=32), nullable=False),
+        sa.Column("target", sa.String(length=512), nullable=True),
+        sa.Column("ip_address", sa.String(length=512), nullable=True),
+        sa.Column("user_agent", sa.String(length=512), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["identity_users.id"],
+            name="fk_audit_events_user_id_identity_users",
+            ondelete="SET NULL",
+        ),
+        sa.PrimaryKeyConstraint("id", name="pk_audit_events"),
+    )
+    op.create_index("ix_audit_events_action", "audit_events", ["action"], unique=False)
+
+    roles = sa.table(
+        "identity_roles",
+        sa.column("code", sa.String),
+        sa.column("display_name", sa.String),
+    )
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    op.bulk_insert(
+        roles,
+        [
+            {"code": "admin", "display_name": "Administrator"},
+            {"code": "user", "display_name": "User"},
+        ],
+    )
+    op.bulk_insert(
+        permissions,
+        [
+            {
+                "code": "identity:token:create",
+                "description": "Create an API token for the current account",
+            }
+        ],
+    )
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": "identity:token:create"}],
+    )
+
+
+def downgrade() -> None:
+    """Remove the complete identity foundation in dependency order."""
+    op.drop_index("ix_audit_events_action", table_name="audit_events")
+    op.drop_table("audit_events")
+    op.drop_index("ix_identity_api_tokens_user_id", table_name="identity_api_tokens")
+    op.drop_index("ix_identity_api_tokens_expires_at", table_name="identity_api_tokens")
+    op.drop_table("identity_api_tokens")
+    op.drop_index("ix_identity_sessions_expires_at", table_name="identity_sessions")
+    op.drop_table("identity_sessions")
+    op.drop_table("identity_users")
+    op.drop_table("identity_role_permissions")
+    op.drop_table("identity_permissions")
+    op.drop_table("identity_roles")
