@@ -1,0 +1,515 @@
+"""Portable commerce API records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from {{.PackageName}}.identity.models import metadata
+
+NON_NEGATIVE_INTEGER = r"^(0|[1-9][0-9]*)$"
+POSITIVE_INTEGER = r"^[1-9][0-9]*$"
+
+
+def _organization_column() -> sa.Column[str]:
+    return sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+{{- end}}
+        nullable=False,
+    )
+
+
+commerce_carts = sa.Table(
+    "commerce_carts",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column(
+        "customer_id",
+        sa.String(191),
+        sa.ForeignKey("customer_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('active', 'checked_out')", name="commerce_carts_status"),
+    sa.CheckConstraint("version > 0", name="commerce_carts_version"),
+    sa.UniqueConstraint(
+        "organization_id",
+        "customer_id",
+        "currency",
+        "status",
+        name="commerce_carts_scope_customer_currency_status_unique",
+    ),
+)
+sa.Index(
+    "commerce_carts_scope_customer_idx",
+    commerce_carts.c.organization_id,
+    commerce_carts.c.customer_id,
+    commerce_carts.c.id,
+)
+
+commerce_cart_lines = sa.Table(
+    "commerce_cart_lines",
+    metadata,
+    sa.Column(
+        "cart_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_carts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column("product_id", sa.String(191), sa.ForeignKey("catalog_products.id"), primary_key=True),
+    sa.Column("sku", sa.String(64), nullable=False),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("unit_minor", sa.BigInteger(), nullable=False),
+    sa.Column("quantity", sa.BigInteger(), nullable=False),
+    sa.Column("line_minor", sa.BigInteger(), nullable=False),
+    sa.CheckConstraint("unit_minor >= 0", name="commerce_cart_lines_unit"),
+    sa.CheckConstraint("quantity > 0 and quantity <= 999", name="commerce_cart_lines_quantity"),
+    sa.CheckConstraint("line_minor >= 0", name="commerce_cart_lines_total"),
+)
+
+commerce_campaigns = sa.Table(
+    "commerce_campaigns",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("discount_kind", sa.String(16), nullable=False),
+    sa.Column("discount_value", sa.BigInteger(), nullable=False),
+    sa.Column("minimum_minor", sa.BigInteger(), nullable=False),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("priority", sa.Integer(), nullable=False),
+    sa.Column("coupon_required", sa.Boolean(), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("starts_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("ends_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("discount_kind in ('fixed', 'percent')", name="commerce_campaigns_kind"),
+    sa.CheckConstraint("discount_value > 0", name="commerce_campaigns_value"),
+    sa.CheckConstraint("minimum_minor >= 0", name="commerce_campaigns_minimum"),
+    sa.CheckConstraint(
+        "status in ('draft', 'active', 'archived')", name="commerce_campaigns_status"
+    ),
+    sa.CheckConstraint("ends_at > starts_at", name="commerce_campaigns_window"),
+    sa.CheckConstraint("version > 0", name="commerce_campaigns_version"),
+)
+sa.Index(
+    "commerce_campaigns_scope_active_idx",
+    commerce_campaigns.c.organization_id,
+    commerce_campaigns.c.status,
+    commerce_campaigns.c.currency,
+    commerce_campaigns.c.priority,
+    commerce_campaigns.c.id,
+)
+
+commerce_coupons = sa.Table(
+    "commerce_coupons",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column(
+        "campaign_id", sa.String(191), sa.ForeignKey("commerce_campaigns.id"), nullable=False
+    ),
+    sa.Column("code", sa.String(64), nullable=False),
+    sa.Column("maximum_uses", sa.BigInteger(), nullable=False),
+    sa.Column("used_count", sa.BigInteger(), nullable=False, server_default="0"),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("maximum_uses > 0", name="commerce_coupons_maximum"),
+    sa.CheckConstraint(
+        "used_count >= 0 and used_count <= maximum_uses", name="commerce_coupons_usage"
+    ),
+    sa.UniqueConstraint("organization_id", "code", name="commerce_coupons_scope_code_unique"),
+)
+
+commerce_orders = sa.Table(
+    "commerce_orders",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    _organization_column(),
+    sa.Column("customer_id", sa.String(191), sa.ForeignKey("customer_accounts.id"), nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("subtotal_minor", sa.BigInteger(), nullable=False),
+    sa.Column("discount_minor", sa.BigInteger(), nullable=False),
+    sa.Column("total_minor", sa.BigInteger(), nullable=False),
+    sa.Column("campaign_id", sa.String(191), nullable=True),
+    sa.Column("coupon_code", sa.String(64), nullable=True),
+    sa.Column("fulfillment_ref", sa.String(191), nullable=True),
+    sa.Column("return_reason", sa.String(500), nullable=True),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('pending_payment', 'confirmed', 'fulfilling', 'fulfilled', "
+        "'return_requested', 'returned', 'cancelled')",
+        name="commerce_orders_status",
+    ),
+    sa.CheckConstraint("subtotal_minor >= 0", name="commerce_orders_subtotal"),
+    sa.CheckConstraint(
+        "discount_minor >= 0 and discount_minor <= subtotal_minor",
+        name="commerce_orders_discount",
+    ),
+    sa.CheckConstraint(
+        "total_minor = subtotal_minor - discount_minor", name="commerce_orders_total"
+    ),
+    sa.CheckConstraint("version > 0", name="commerce_orders_version"),
+)
+sa.Index(
+    "commerce_orders_scope_customer_idx",
+    commerce_orders.c.organization_id,
+    commerce_orders.c.customer_id,
+    commerce_orders.c.id,
+)
+
+commerce_order_lines = sa.Table(
+    "commerce_order_lines",
+    metadata,
+    sa.Column(
+        "order_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_orders.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column("product_id", sa.String(191), primary_key=True),
+    sa.Column("sku", sa.String(64), nullable=False),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("unit_minor", sa.BigInteger(), nullable=False),
+    sa.Column("quantity", sa.BigInteger(), nullable=False),
+    sa.Column("line_minor", sa.BigInteger(), nullable=False),
+)
+
+commerce_checkout_idempotency = sa.Table(
+    "commerce_checkout_idempotency",
+    metadata,
+    sa.Column("organization_id", sa.String(191), primary_key=True),
+    sa.Column("customer_id", sa.String(191), primary_key=True),
+    sa.Column("idempotency_key", sa.String(191), primary_key=True),
+    sa.Column("cart_id", sa.String(191), nullable=False),
+    sa.Column("cart_version", sa.BigInteger(), nullable=False),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("coupon_code", sa.String(64), nullable=False),
+    sa.Column("order_id", sa.String(191), sa.ForeignKey("commerce_orders.id"), nullable=False),
+)
+
+commerce_payment_intents = sa.Table(
+    "commerce_payment_intents",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "order_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_orders.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    ),
+    sa.Column("provider", sa.String(32), nullable=False),
+    sa.Column("provider_ref", sa.String(191), unique=True, nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("amount_minor", sa.BigInteger(), nullable=False),
+    sa.Column("refunded_minor", sa.BigInteger(), nullable=False),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('requires_action', 'succeeded', 'failed')",
+        name="commerce_payments_status",
+    ),
+    sa.CheckConstraint("amount_minor >= 0", name="commerce_payments_amount"),
+    sa.CheckConstraint(
+        "refunded_minor >= 0 and refunded_minor <= amount_minor",
+        name="commerce_payments_refunded",
+    ),
+)
+
+commerce_payment_events = sa.Table(
+    "commerce_payment_events",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column("organization_id", sa.String(191), nullable=False),
+    sa.Column("order_id", sa.String(191), sa.ForeignKey("commerce_orders.id"), nullable=False),
+    sa.Column("provider", sa.String(32), nullable=False),
+    sa.Column("provider_ref", sa.String(191), nullable=False),
+    sa.Column("event_id", sa.String(191), nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.UniqueConstraint(
+        "organization_id",
+        "provider",
+        "event_id",
+        name="commerce_payment_events_scope_event_unique",
+    ),
+)
+
+commerce_refunds = sa.Table(
+    "commerce_refunds",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column("organization_id", sa.String(191), nullable=False),
+    sa.Column("order_id", sa.String(191), sa.ForeignKey("commerce_orders.id"), nullable=False),
+    sa.Column("idempotency_key", sa.String(191), nullable=False),
+    sa.Column("amount_minor", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("amount_minor > 0", name="commerce_refunds_amount"),
+    sa.UniqueConstraint(
+        "organization_id", "idempotency_key", name="commerce_refunds_scope_key_unique"
+    ),
+)
+
+commerce_fulfillments = sa.Table(
+    "commerce_fulfillments",
+    metadata,
+    sa.Column(
+        "order_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_orders.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column("reference", sa.String(191), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+)
+
+commerce_returns = sa.Table(
+    "commerce_returns",
+    metadata,
+    sa.Column(
+        "order_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_orders.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column("reason", sa.String(500), nullable=False),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("requested_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+)
+
+commerce_order_events = sa.Table(
+    "commerce_order_events",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "order_id",
+        sa.String(191),
+        sa.ForeignKey("commerce_orders.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("from_status", sa.String(32), nullable=False),
+    sa.Column("to_status", sa.String(32), nullable=False),
+    sa.Column("actor_id", sa.String(191), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+
+class CommerceErrorKind(StrEnum):
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    STORAGE = "storage"
+
+
+class CommerceError(Exception):
+    def __init__(self, kind: CommerceErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class OrderStatus(StrEnum):
+    PENDING_PAYMENT = "pending_payment"
+    CONFIRMED = "confirmed"
+    FULFILLING = "fulfilling"
+    FULFILLED = "fulfilled"
+    RETURN_REQUESTED = "return_requested"
+    RETURNED = "returned"
+    CANCELLED = "cancelled"
+
+
+class PaymentStatus(StrEnum):
+    REQUIRES_ACTION = "requires_action"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class CampaignStatus(StrEnum):
+    DRAFT = "draft"
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class DiscountKind(StrEnum):
+    FIXED = "fixed"
+    PERCENT = "percent"
+
+
+class CommerceLine(StrictModel):
+    product_id: str = Field(min_length=1, max_length=191)
+    sku: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=160)
+    unit_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=3)
+    line_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+
+
+class CommerceCart(StrictModel):
+    id: str | None = Field(default=None, max_length=191)
+    organization_id: str | None = Field(default=None, max_length=191)
+    customer_id: str = Field(min_length=1, max_length=191)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    status: str = Field(pattern=r"^(active|checked_out)$")
+    lines: list[CommerceLine]
+    subtotal_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    version: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class CartLineInput(StrictModel):
+    currency: str = Field(min_length=3, max_length=3)
+    quantity: str = Field(pattern=POSITIVE_INTEGER, max_length=3)
+    version: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+
+
+class CartMutation(StrictModel):
+    currency: str = Field(min_length=3, max_length=3)
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class CheckoutInput(CartMutation):
+    coupon_code: str = Field(default="", max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class PaymentIntent(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+    provider: str = Field(min_length=1, max_length=32)
+    provider_ref: str = Field(min_length=1, max_length=191)
+    status: PaymentStatus
+    amount_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    refunded_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    updated_at: datetime
+
+
+class CommerceOrder(StrictModel):
+    id: str = Field(min_length=1, max_length=191)
+    organization_id: str | None = Field(default=None, max_length=191)
+    customer_id: str = Field(min_length=1, max_length=191)
+    status: OrderStatus
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    subtotal_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    discount_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    total_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    campaign_id: str | None = None
+    coupon_code: str | None = None
+    lines: list[CommerceLine]
+    payment: PaymentIntent
+    fulfillment_ref: str | None = None
+    return_reason: str | None = None
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CommerceOrderPage(StrictModel):
+    items: list[CommerceOrder]
+    next_cursor: str
+
+
+class OrderTransition(StrictModel):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    reference: str = Field(default="", max_length=191)
+
+
+class ReturnInput(StrictModel):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class RefundInput(StrictModel):
+    amount_minor: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    idempotency_key: str = Field(min_length=1, max_length=191)
+
+
+class SandboxCompletion(StrictModel):
+    event_id: str = Field(min_length=1, max_length=191)
+    status: PaymentStatus
+
+
+class CampaignInput(StrictModel):
+    name: str = Field(min_length=1, max_length=160)
+    kind: DiscountKind
+    value: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+    minimum_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    currency: str = Field(min_length=3, max_length=3)
+    priority: int = Field(ge=-1000, le=1000)
+    coupon_required: bool = False
+    starts_at: datetime
+    ends_at: datetime
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+
+
+class Campaign(StrictModel):
+    id: str
+    organization_id: str | None = None
+    name: str
+    kind: DiscountKind
+    value: str
+    minimum_minor: str
+    currency: str
+    priority: int
+    coupon_required: bool
+    status: CampaignStatus
+    starts_at: datetime
+    ends_at: datetime
+    version: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignPage(StrictModel):
+    items: list[Campaign]
+    next_cursor: str
+
+
+class CampaignTransition(StrictModel):
+    version: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class CouponInput(StrictModel):
+    campaign_id: str = Field(min_length=1, max_length=191)
+    code: str = Field(min_length=1, max_length=64)
+    maximum_uses: str = Field(pattern=POSITIVE_INTEGER, max_length=19)
+
+
+class Coupon(StrictModel):
+    id: str
+    organization_id: str | None = None
+    campaign_id: str
+    code: str
+    maximum_uses: str
+    used_count: str
+    created_at: datetime
+
+
+commerce_metadata = metadata

@@ -196,6 +196,14 @@ func TestPythonMySQLCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantCommerceOperationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, true, "0.3.0", false, false, false, false, false, false, false, false, true, true, false, false, true)
+}
+
+func TestPythonMySQLTenantCommerceOperationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "0.3.0", false, false, false, false, false, false, false, false, true, true, false, false, true)
+}
+
 func TestPythonPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReferenceOptions(t, "postgresql", false, true, "0.3.0", false, false, false, false, false, false, false, false, false, true)
 }
@@ -370,11 +378,11 @@ CAPABILITIES`
 }
 
 func TestPythonPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func TestPythonMySQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func runGeneratedPythonReference(
@@ -421,6 +429,7 @@ func runGeneratedPythonReferenceOptions(
 	customerAccounts := len(platformSelections) > 3 && platformSelections[3]
 	crm := len(platformSelections) > 4 && platformSelections[4]
 	inventory := len(platformSelections) > 5 && platformSelections[5]
+	commerce := len(platformSelections) > 6 && platformSelections[6]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -453,12 +462,12 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	storefront := "none"
-	if catalog || customerAccounts {
+	if catalog || customerAccounts || commerce {
 		storefront = "nuxt"
 	}
 	blueprint = strings.ReplaceAll(blueprint, "STOREFRONT", storefront)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts || crm || inventory {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts || crm || inventory || commerce {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -528,6 +537,11 @@ CAPABILITIES
 	}
 	if inventory {
 		capabilities += `    - name: erp-inventory
+      version: 0.1.0
+`
+	}
+	if commerce {
+		capabilities += `    - name: commerce-operations
       version: 0.1.0
 `
 	}
@@ -654,6 +668,12 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
+	if commerce {
+		wantChanges += 10 + 17
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -704,6 +724,9 @@ CAPABILITIES
 	}
 	if inventory && plannedData.CapabilityLock["erp-inventory"] != "0.1.0" {
 		t.Fatalf("Plan() ERP inventory lock = %#v", plannedData.CapabilityLock)
+	}
+	if commerce && plannedData.CapabilityLock["commerce-operations"] != "0.1.0" {
+		t.Fatalf("Plan() commerce operations lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}{{if .Observability}}项目启用了安全请求关联、访问日志、低基数指标和 2 秒数据库就绪探测。{{end}}{{if .CSVTransfer}}项目启用了 Blueprint 字段顺序驱动的原子 CSV 导入与审计导出。{{end}}{{if .Approvals}}项目启用了职责分离、不可变事件和乐观并发的单阶段审批。{{end}}{{if .Catalog}}项目启用了带审计、发布状态和公开读取边界的商品目录。{{end}}{{if .CRM}}项目启用了账户、联系人、不可变活动和前向商机阶段组成的 CRM 核心。{{end}}{{if .Inventory}}项目启用了库存目录、仓库、余额、预留、采购收货和不可变库存流水组成的 ERP 库存核心。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}{{if .Observability}}项目启用了安全请求关联、访问日志、低基数指标和 2 秒数据库就绪探测。{{end}}{{if .CSVTransfer}}项目启用了 Blueprint 字段顺序驱动的原子 CSV 导入与审计导出。{{end}}{{if .Approvals}}项目启用了职责分离、不可变事件和乐观并发的单阶段审批。{{end}}{{if .Catalog}}项目启用了带审计、发布状态和公开读取边界的商品目录。{{end}}{{if .Commerce}}项目启用了购物车、结算、支付、履约、退货退款和确定性促销组成的交易闭环。{{end}}{{if .CRM}}项目启用了账户、联系人、不可变活动和前向商机阶段组成的 CRM 核心。{{end}}{{if .Inventory}}项目启用了库存目录、仓库、余额、预留、采购收货和不可变库存流水组成的 ERP 库存核心。{{end}}
 
 ## 环境要求
 
@@ -15,6 +15,9 @@ $env:DATABASE_URL = "{{.Database.ExampleURL}}"
 $env:BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
 $env:BOOTSTRAP_ADMIN_PASSWORD = "replace-with-at-least-12-characters"
 $env:COOKIE_SECURE = "false"
+{{- if .Commerce}}
+$env:COMMERCE_SANDBOX_ENABLED = "false"
+{{- end}}
 {{- if .Files}}
 $env:FILE_STORAGE_ROOT = "C:\\replace-with-runtime-storage"
 {{- end}}
@@ -67,6 +70,11 @@ $env:SMTP_PASSWORD = "replace-me"
 {{end}}
 {{if .Catalog}}
 `commerce-catalog` 独立于 Blueprint 通用 CRUD。后台通过 `/api/v1/catalog/products` 创建、修改、发布和归档商品；SKU 与币种统一为大写，金额使用最小货币单位，金额和版本在 JSON 中使用十进制字符串。商品只允许 `draft → active → archived`，归档后不可修改或重新发布，每次成功写入都与审计事件在同一事务提交。匿名 `/api/v1/storefront/products` 只返回已上架商品{{if .Tenancy}}和状态为 active 的组织；公开请求必须携带 `X-Organization-ID`，Nuxt 服务端从 `SCAFFOLD_ORGANIZATION_ID` 注入该值{{end}}。
+{{end}}
+{{if .Commerce}}
+`commerce-operations` 复用商品目录和客户账户，提供客户购物车、幂等结算、订单查询、支付事件、履约、整单退货、幂等退款、活动与优惠券。金额、数量和乐观锁版本在 JSON 中使用十进制字符串；结算键、支付事件 ID 和退款键重复提交时只允许返回同一结果，载荷冲突会返回 `409`。订单、支付、履约、退货、退款、不可变订单事件和审计记录在同一数据库事务中更新，所有仓储读写都重新校验{{if .Tenancy}}组织{{else}}全局{{end}}范围。后台权限拆分为 `commerce:orders:read`、`commerce:fulfillment:manage`、`commerce:payments:manage` 和 `commerce:marketing:manage`。
+
+默认的 `SandboxPaymentGateway` 不访问网络，只用于本地开发和自动测试。`COMMERCE_SANDBOX_ENABLED=true` 才会开放 `/api/v1/storefront/sandbox/payments/{provider_ref}/complete`；正式环境必须保持关闭，并用实现相同 `PaymentGateway` 协议的真实支付适配器替换它，同时保留事件幂等和状态冲突语义。
 {{end}}
 {{if .CRM}}
 `crm-core` 提供业务账户、可选归属账户的联系人、不可变活动和商机。账户与联系人支持 `active ↔ archived`；商机只允许 `lead → qualified → proposal → won` 逐级前进，任一非终态可转为 `lost`，终态不可再修改。金额使用最小货币单位，金额与版本在 JSON 中保持十进制字符串。所有成功写入都与审计事件在同一数据库事务提交；租户项目还会在每次读取、关联和变更时重新验证 active 组织范围。管理员分别使用 `crm:read`、`crm:write` 和 `crm:pipeline:manage` 权限。
@@ -154,6 +162,9 @@ uv run pytest
 {{end}}
 {{if .Catalog}}
 - `src/{{.PackageName}}/catalog`：商品目录领域、事务仓储、发布状态机、管理与公开 HTTP 适配器。
+{{end}}
+{{if .Commerce}}
+- `src/{{.PackageName}}/commerce`：购物车、订单、支付网关协议、履约退货、促销状态机、事务仓储和 HTTP 适配器。
 {{end}}
 {{if .CRM}}
 - `src/{{.PackageName}}/crm`：账户、联系人、不可变活动、商机状态机、事务仓储和 HTTP 适配器。

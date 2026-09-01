@@ -58,6 +58,8 @@ const (
 	crmVersion              = "0.1.0"
 	inventoryOwner          = "erp-inventory"
 	inventoryVersion        = "0.1.0"
+	commerceOwner           = "commerce-operations"
+	commerceVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -239,6 +241,20 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Description: "Portable inventory balances, movements, reservations, and purchase receiving.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: commerceOwner, Version: commerceVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable carts, checkout, orders, payments, refunds, fulfillment, returns, and promotions.",
+			Requires: []spec.PackDependency{
+				{Name: catalogOwner, Constraint: "^0.1.0"},
+				{Name: customerOwner, Constraint: "^0.1.0"},
+			},
+			Backends:  []string{backend},
+			Databases: []string{"postgresql", "mysql"},
 		},
 	},
 )
@@ -542,6 +558,19 @@ var inventoryTemplates = map[string]string{
 	"tests/test_inventory_http.py":                           "templates/test_inventory_http.py.tmpl",
 }
 
+var commerceTemplates = map[string]string{
+	"src/package/commerce/__init__.py":                  "templates/commerce_init.py.tmpl",
+	"src/package/commerce/gateway.py":                   "templates/commerce_gateway.py.tmpl",
+	"src/package/commerce/http.py":                      "templates/commerce_http.py.tmpl",
+	"src/package/commerce/models.py":                    "templates/commerce_models.py.tmpl",
+	"src/package/commerce/repository.py":                "templates/commerce_repository.py.tmpl",
+	"src/package/commerce/service.py":                   "templates/commerce_service.py.tmpl",
+	"src/package/migration/versions/000300_commerce.py": "templates/commerce_migration.py.tmpl",
+	"tests/test_commerce_operations.py":                 "templates/test_commerce_operations.py.tmpl",
+	"tests/test_commerce_operations_database.py":        "templates/test_commerce_operations_database.py.tmpl",
+	"tests/test_commerce_operations_http.py":            "templates/test_commerce_operations_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -609,6 +638,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	customerEnabled := false
 	crmEnabled := false
 	inventoryEnabled := false
+	commerceEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -654,6 +684,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == inventoryOwner {
 			inventoryEnabled = true
 		}
+		if pack.Metadata.Name == commerceOwner {
+			commerceEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -673,6 +706,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"erp-inventory with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if commerceEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"commerce-operations with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -719,11 +757,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		CustomerAccounts:      customerEnabled,
 		CRM:                   crmEnabled,
 		Inventory:             inventoryEnabled,
+		Commerce:              commerceEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(crmTemplates)+len(inventoryTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+8,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(crmTemplates)+len(inventoryTemplates)+len(commerceTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+len(storefrontui.CommerceTemplates)+10,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -876,6 +915,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if commerceEnabled {
+		for path, templatePath := range commerceTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    commerceOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -950,6 +997,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 				SharedAdmin: true,
 			}
 		}
+		if commerceEnabled {
+			targets["web/admin/src/views/CommerceView.vue"] = renderTarget{
+				Template:    "templates/src/views/CommerceView.vue.tmpl",
+				Owner:       commerceOwner,
+				SharedAdmin: true,
+			}
+		}
 	}
 	if storefrontEnabled {
 		for path, templatePath := range storefrontui.BaseTemplates {
@@ -977,6 +1031,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 				}
 			}
 		}
+		if commerceEnabled {
+			for path, templatePath := range storefrontui.CommerceTemplates {
+				targets[path] = renderTarget{
+					Template:         templatePath,
+					Owner:            commerceOwner,
+					SharedStorefront: true,
+				}
+			}
+		}
 	}
 
 	paths := make([]string, 0, len(targets))
@@ -999,6 +1062,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			storefrontData.Catalog = catalogEnabled
 			storefrontData.Tenancy = tenancyEnabled
 			storefrontData.CustomerAccounts = customerEnabled
+			storefrontData.Commerce = commerceEnabled
 			content, err = storefrontui.Render(
 				target.Template,
 				storefrontData,
@@ -1060,6 +1124,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if inventoryEnabled {
 		capabilityLock[inventoryOwner] = inventoryVersion
 	}
+	if commerceEnabled {
+		capabilityLock[commerceOwner] = commerceVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -1096,6 +1163,10 @@ func migrationModels(data templateData) (string, string) {
 	if data.Inventory {
 		imports = append(imports, "from "+data.PackageName+".inventory import models as inventory_models")
 		metadata = append(metadata, "_inventory_metadata = inventory_models.inventory_items.metadata")
+	}
+	if data.Commerce {
+		imports = append(imports, "from "+data.PackageName+".commerce import models as commerce_models")
+		metadata = append(metadata, "_commerce_metadata = commerce_models.commerce_carts.metadata")
 	}
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")

@@ -275,6 +275,110 @@ func TestCustomerAccountsRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateCommerceOperationsAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Metadata.DisplayName = "Generated Python Commerce Store"
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: commerceOwner, Version: commerceVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			for name, version := range map[string]string{
+				tenancyOwner:    tenancyLifecycleVersion,
+				catalogOwner:    catalogVersion,
+				customerOwner:   customerVersion,
+				commerceOwner:   commerceVersion,
+				adminui.Owner:   adminui.Version,
+				storefrontOwner: storefrontVersion,
+			} {
+				if generated.CapabilityLock[name] != version {
+					t.Errorf("Generate(%s) capability %s = %q, want %q", database, name, generated.CapabilityLock[name], version)
+				}
+			}
+			for _, path := range []string{
+				"src/demo_service/commerce/gateway.py",
+				"src/demo_service/commerce/models.py",
+				"src/demo_service/commerce/service.py",
+				"src/demo_service/commerce/repository.py",
+				"src/demo_service/commerce/http.py",
+				"src/demo_service/migration/versions/000300_commerce.py",
+				"tests/test_commerce_operations.py",
+				"tests/test_commerce_operations_database.py",
+				"tests/test_commerce_operations_http.py",
+				"web/admin/src/views/CommerceView.vue",
+				"web/storefront/app/pages/cart.vue",
+				"web/storefront/app/pages/checkout.vue",
+				"web/storefront/app/pages/account/orders/[id].vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != commerceOwner {
+					t.Errorf("Generate(%s) commerce output %s is missing or has the wrong owner", database, path)
+				}
+			}
+			assertions := map[string][]string{
+				"src/demo_service/main.py": {
+					"app.state.commerce_service = CommerceService",
+					"application.include_router(commerce_router)",
+					"commerce_sandbox_enabled",
+				},
+				"src/demo_service/commerce/repository.py": {
+					"commerce_checkout_idempotency",
+					"commerce_payment_events",
+					"commerce_refunds",
+					"organization_id == organization_id",
+				},
+				"api/openapi.yaml": {
+					"/api/v1/storefront/checkout:",
+					"/api/v1/commerce/orders/{id}/refund:",
+					"commerce:payments:manage",
+					"CommercePaymentIntent:",
+				},
+				"web/admin/src/App.vue":             {"CommerceView"},
+				"web/storefront/app/pages/cart.vue": {"checkout"},
+			}
+			for path, fragments := range assertions {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+			var contract map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+				t.Fatalf("generated commerce OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommerceOperationsRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: commerceOwner, Version: commerceVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), "requires organization-tenancy 0.3.0") {
+			t.Fatalf("Generate(tenancy %s) error = %v", version, err)
+		}
+	}
+}
+
 func TestGenerateCRMCoreAcrossDatabasesAndSurfaces(t *testing.T) {
 	t.Parallel()
 

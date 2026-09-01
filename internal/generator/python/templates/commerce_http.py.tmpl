@@ -1,0 +1,345 @@
+"""Customer storefront and separated staff transport for commerce operations."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.commerce.gateway import (
+    GatewayConflict,
+    GatewayNotFound,
+    SandboxPaymentGateway,
+)
+from {{.PackageName}}.commerce.models import (
+    Campaign,
+    CampaignInput,
+    CampaignPage,
+    CampaignTransition,
+    CartLineInput,
+    CartMutation,
+    CheckoutInput,
+    CommerceCart,
+    CommerceError,
+    CommerceErrorKind,
+    CommerceOrder,
+    CommerceOrderPage,
+    Coupon,
+    CouponInput,
+    OrderTransition,
+    RefundInput,
+    ReturnInput,
+    SandboxCompletion,
+)
+from {{.PackageName}}.commerce.service import CommerceService
+from {{.PackageName}}.customer_accounts.http import current_customer
+from {{.PackageName}}.customer_accounts.models import CustomerRecord
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+
+router = APIRouter(tags=["commerce"])
+
+
+def commerce_service(request: Request) -> CommerceService:
+    service: CommerceService = request.app.state.commerce_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable commerce errors without exposing provider or storage internals."""
+
+    @app.exception_handler(CommerceError)
+    async def commerce_error(_request: Request, error: CommerceError) -> JSONResponse:
+        status, code = {
+            CommerceErrorKind.INVALID: (400, "commerce.invalid"),
+            CommerceErrorKind.NOT_FOUND: (404, "commerce.not_found"),
+            CommerceErrorKind.CONFLICT: (409, "commerce.conflict"),
+            CommerceErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+Customer = Annotated[CustomerRecord, Depends(current_customer)]
+Service = Annotated[CommerceService, Depends(commerce_service)]
+ReadPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("commerce:orders:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+FulfillmentPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("commerce:fulfillment:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+PaymentPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("commerce:payments:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+MarketingPrincipal = Annotated[
+    Principal,
+    Depends(require_permission("commerce:marketing:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+]
+
+
+@router.get(
+    "/api/v1/storefront/cart",
+    response_model=CommerceCart,
+    response_model_exclude_none=True,
+)
+def get_cart(
+    customer: Customer,
+    service: Service,
+    currency: Annotated[str, Query(min_length=3, max_length=3)] = "USD",
+) -> CommerceCart:
+    return service.cart(customer, currency)
+
+
+@router.put(
+    "/api/v1/storefront/cart/lines/{product_id}",
+    response_model=CommerceCart,
+    response_model_exclude_none=True,
+)
+def put_cart_line(
+    product_id: str,
+    value: CartLineInput,
+    customer: Customer,
+    service: Service,
+) -> CommerceCart:
+    return service.put_line(customer, product_id, value)
+
+
+@router.post(
+    "/api/v1/storefront/cart/lines/{product_id}/remove",
+    response_model=CommerceCart,
+    response_model_exclude_none=True,
+)
+def remove_cart_line(
+    product_id: str,
+    value: CartMutation,
+    customer: Customer,
+    service: Service,
+) -> CommerceCart:
+    return service.remove_line(customer, product_id, value)
+
+
+@router.post(
+    "/api/v1/storefront/checkout",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def checkout(value: CheckoutInput, customer: Customer, service: Service) -> CommerceOrder:
+    return service.checkout(customer, value)
+
+
+@router.get(
+    "/api/v1/storefront/orders",
+    response_model=CommerceOrderPage,
+    response_model_exclude_none=True,
+)
+def customer_orders(
+    customer: Customer,
+    service: Service,
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CommerceOrderPage:
+    return service.customer_orders(customer, cursor, limit)
+
+
+@router.get(
+    "/api/v1/storefront/orders/{id}",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def customer_order(id: str, customer: Customer, service: Service) -> CommerceOrder:
+    return service.customer_order(customer, id)
+
+
+@router.post(
+    "/api/v1/storefront/orders/{id}/return",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def request_return(
+    id: str,
+    value: ReturnInput,
+    customer: Customer,
+    service: Service,
+) -> CommerceOrder:
+    return service.request_return(customer, id, value)
+
+
+@router.post(
+    "/api/v1/storefront/sandbox/payments/{provider_ref}/complete",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def complete_sandbox_payment(
+    provider_ref: str,
+    value: SandboxCompletion,
+    request: Request,
+    service: Service,
+) -> CommerceOrder:
+    if not bool(request.app.state.commerce_sandbox_enabled):
+        raise HTTPException(status_code=404, detail="not found")
+    gateway: SandboxPaymentGateway = request.app.state.commerce_sandbox_gateway
+    try:
+        gateway.complete(provider_ref, value.status.value)
+    except GatewayNotFound as error:
+        raise CommerceError(CommerceErrorKind.NOT_FOUND, "commerce record was not found") from error
+    except GatewayConflict as error:
+        raise CommerceError(
+            CommerceErrorKind.CONFLICT,
+            "commerce state conflicts with the request",
+        ) from error
+    return service.complete_payment(provider_ref, value.event_id, value.status.value)
+
+
+@router.get(
+    "/api/v1/commerce/orders",
+    response_model=CommerceOrderPage,
+    response_model_exclude_none=True,
+)
+def list_orders(
+    principal: ReadPrincipal,
+    service: Service,
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CommerceOrderPage:
+    return service.orders(cursor, limit, principal)
+
+
+@router.post(
+    "/api/v1/commerce/orders/{id}/fulfillment/start",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def start_fulfillment(
+    id: str,
+    value: OrderTransition,
+    principal: FulfillmentPrincipal,
+    service: Service,
+) -> CommerceOrder:
+    return service.start_fulfillment(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/orders/{id}/fulfillment/complete",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def complete_fulfillment(
+    id: str,
+    value: OrderTransition,
+    principal: FulfillmentPrincipal,
+    service: Service,
+) -> CommerceOrder:
+    return service.complete_fulfillment(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/orders/{id}/return/complete",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def complete_return(
+    id: str,
+    value: OrderTransition,
+    principal: FulfillmentPrincipal,
+    service: Service,
+) -> CommerceOrder:
+    return service.complete_return(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/orders/{id}/refund",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def refund(
+    id: str,
+    value: RefundInput,
+    principal: PaymentPrincipal,
+    service: Service,
+) -> CommerceOrder:
+    return service.refund(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/orders/{id}/reconcile",
+    response_model=CommerceOrder,
+    response_model_exclude_none=True,
+)
+def reconcile(id: str, principal: PaymentPrincipal, service: Service) -> CommerceOrder:
+    return service.reconcile(id, principal)
+
+
+@router.get(
+    "/api/v1/commerce/campaigns",
+    response_model=CampaignPage,
+    response_model_exclude_none=True,
+)
+def list_campaigns(
+    principal: MarketingPrincipal,
+    service: Service,
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CampaignPage:
+    return service.campaigns(cursor, limit, principal)
+
+
+@router.post(
+    "/api/v1/commerce/campaigns",
+    response_model=Campaign,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_campaign(
+    value: CampaignInput,
+    principal: MarketingPrincipal,
+    service: Service,
+) -> Campaign:
+    return service.create_campaign(value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/campaigns/{id}/activate",
+    response_model=Campaign,
+    response_model_exclude_none=True,
+)
+def activate_campaign(
+    id: str,
+    value: CampaignTransition,
+    principal: MarketingPrincipal,
+    service: Service,
+) -> Campaign:
+    return service.activate_campaign(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/campaigns/{id}/archive",
+    response_model=Campaign,
+    response_model_exclude_none=True,
+)
+def archive_campaign(
+    id: str,
+    value: CampaignTransition,
+    principal: MarketingPrincipal,
+    service: Service,
+) -> Campaign:
+    return service.archive_campaign(id, value, principal)
+
+
+@router.post(
+    "/api/v1/commerce/coupons",
+    response_model=Coupon,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_coupon(
+    value: CouponInput,
+    principal: MarketingPrincipal,
+    service: Service,
+) -> Coupon:
+    return service.create_coupon(value, principal)

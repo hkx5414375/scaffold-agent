@@ -19,6 +19,13 @@ from {{.PackageName}}.cache.service import CacheService
 from {{.PackageName}}.catalog.http import router as catalog_router
 from {{.PackageName}}.catalog.repository import SQLAlchemyCatalogRepository
 from {{.PackageName}}.catalog.service import CatalogService
+{{end}}{{if .Commerce}}from {{.PackageName}}.commerce.gateway import SandboxPaymentGateway
+from {{.PackageName}}.commerce.http import (
+    install_error_handlers as install_commerce_error_handlers,
+)
+from {{.PackageName}}.commerce.http import router as commerce_router
+from {{.PackageName}}.commerce.repository import SQLAlchemyCommerceRepository
+from {{.PackageName}}.commerce.service import CommerceService
 {{end}}from {{.PackageName}}.config import get_settings
 {{if .CRM}}from {{.PackageName}}.crm.http import (
     install_error_handlers as install_crm_error_handlers,
@@ -161,6 +168,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 {{- if .Catalog}}
         app.state.catalog_service = CatalogService(SQLAlchemyCatalogRepository(engine))
 {{- end}}
+{{- if .Commerce}}
+        sandbox_gateway = SandboxPaymentGateway()
+        app.state.commerce_service = CommerceService(
+            SQLAlchemyCommerceRepository(engine),
+            SQLAlchemyCatalogRepository(engine),
+            sandbox_gateway,
+        )
+        app.state.commerce_sandbox_gateway = sandbox_gateway
+        app.state.commerce_sandbox_enabled = settings.commerce_sandbox_enabled
+{{- end}}
 {{- if .CRM}}
         app.state.crm_service = CRMService(SQLAlchemyCRMRepository(engine))
 {{- end}}
@@ -237,6 +254,9 @@ def create_app() -> FastAPI:
 {{- if .Catalog}}
     install_catalog_error_handlers(application)
 {{- end}}
+{{- if .Commerce}}
+    install_commerce_error_handlers(application)
+{{- end}}
 {{- if .CRM}}
     install_crm_error_handlers(application)
 {{- end}}
@@ -274,6 +294,9 @@ def create_app() -> FastAPI:
 {{- end}}
 {{- if .Catalog}}
     application.include_router(catalog_router)
+{{- end}}
+{{- if .Commerce}}
+    application.include_router(commerce_router)
 {{- end}}
 {{- if .CRM}}
     application.include_router(crm_router)

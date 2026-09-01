@@ -1,0 +1,76 @@
+"""Payment-provider boundary and deterministic no-network sandbox adapter."""
+
+from dataclasses import dataclass
+from hashlib import sha256
+from typing import Protocol
+
+
+class GatewayNotFound(Exception):
+    """The provider reference is unknown to the selected adapter."""
+
+
+class GatewayConflict(Exception):
+    """The provider rejected an incompatible replay or transition."""
+
+
+@dataclass(frozen=True, slots=True)
+class PaymentIntentResult:
+    """Provider-neutral payment intent state."""
+
+    provider: str
+    provider_reference: str
+    status: str
+
+
+class PaymentGateway(Protocol):
+    """Small application-owned seam implemented by real payment adapters."""
+
+    def create_intent(
+        self,
+        order_id: str,
+        amount_minor: int,
+        currency: str,
+        idempotency_key: str,
+    ) -> PaymentIntentResult: ...
+
+    def fetch_status(self, provider_reference: str) -> str: ...
+
+
+class SandboxPaymentGateway:
+    """Deterministic in-process adapter that never performs network I/O."""
+
+    provider = "sandbox"
+
+    def __init__(self) -> None:
+        self._states: dict[str, str] = {}
+
+    def create_intent(
+        self,
+        order_id: str,
+        amount_minor: int,
+        currency: str,
+        idempotency_key: str,
+    ) -> PaymentIntentResult:
+        if amount_minor < 0 or len(currency) != 3 or not idempotency_key:
+            raise GatewayConflict()
+        digest = sha256(f"{order_id}\0{idempotency_key}".encode()).hexdigest()[:32]
+        reference = f"sandbox_{digest}"
+        self._states.setdefault(reference, "requires_action")
+        return PaymentIntentResult(self.provider, reference, self._states[reference])
+
+    def complete(self, provider_reference: str, status: str) -> PaymentIntentResult:
+        current = self._states.get(provider_reference)
+        if current is None:
+            raise GatewayNotFound()
+        if status not in {"succeeded", "failed"}:
+            raise GatewayConflict()
+        if current != "requires_action" and current != status:
+            raise GatewayConflict()
+        self._states[provider_reference] = status
+        return PaymentIntentResult(self.provider, provider_reference, status)
+
+    def fetch_status(self, provider_reference: str) -> str:
+        status = self._states.get(provider_reference)
+        if status is None:
+            raise GatewayNotFound()
+        return status

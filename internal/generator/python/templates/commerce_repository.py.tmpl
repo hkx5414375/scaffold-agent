@@ -1,0 +1,1136 @@
+"""Atomic SQLAlchemy persistence for portable commerce operations."""
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, cast
+from uuid import uuid4
+
+from sqlalchemy import delete, desc, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.commerce.models import (
+    Campaign,
+    CampaignStatus,
+    CommerceCart,
+    CommerceLine,
+    CommerceOrder,
+    Coupon,
+    OrderStatus,
+    PaymentIntent,
+    PaymentStatus,
+    commerce_campaigns,
+    commerce_cart_lines,
+    commerce_carts,
+    commerce_checkout_idempotency,
+    commerce_coupons,
+    commerce_fulfillments,
+    commerce_order_events,
+    commerce_order_lines,
+    commerce_orders,
+    commerce_payment_events,
+    commerce_payment_intents,
+    commerce_refunds,
+    commerce_returns,
+)
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+
+
+class RepositoryConflict(Exception):
+    """A scope, version, replay, state, or uniqueness invariant rejected a mutation."""
+
+
+class RepositoryNotFound(Exception):
+    """The scoped commerce record does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class CartLineCommand:
+    cart_id: str
+    organization_id: str
+    customer_id: str
+    currency: str
+    line: CommerceLine
+    expected_version: int
+    changed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class Promotion:
+    campaign: Campaign
+    coupon: Coupon | None
+
+
+@dataclass(frozen=True, slots=True)
+class CheckoutCommand:
+    order: CommerceOrder
+    cart_id: str
+    cart_version: int
+    idempotency_key: str
+    promotion: Promotion | None
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class OrderStatusCommand:
+    organization_id: str
+    order_id: str
+    expected_version: int
+    from_status: OrderStatus
+    to_status: OrderStatus
+    reference: str
+    changed_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class RefundCommand:
+    refund_id: str
+    organization_id: str
+    order_id: str
+    amount_minor: int
+    idempotency_key: str
+    changed_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignStatusCommand:
+    organization_id: str
+    campaign_id: str
+    expected_version: int
+    from_status: CampaignStatus
+    to_status: CampaignStatus
+    changed_at: datetime
+    audit: AuditEvent
+
+
+@dataclass(frozen=True, slots=True)
+class OrderPageResult:
+    items: list[CommerceOrder]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignPageResult:
+    items: list[Campaign]
+    next_cursor: str
+
+
+class CommerceRepository(Protocol):
+    def get_cart(
+        self, organization_id: str, customer_id: str, currency: str
+    ) -> CommerceCart | None: ...
+
+    def put_line(self, command: CartLineCommand) -> CommerceCart: ...
+
+    def remove_line(
+        self,
+        organization_id: str,
+        customer_id: str,
+        currency: str,
+        product_id: str,
+        expected_version: int,
+        changed_at: datetime,
+    ) -> CommerceCart: ...
+
+    def replay_checkout(
+        self,
+        organization_id: str,
+        customer_id: str,
+        idempotency_key: str,
+        currency: str,
+        coupon_code: str,
+        cart_version: int,
+    ) -> CommerceOrder | None: ...
+
+    def promotion(
+        self,
+        organization_id: str,
+        currency: str,
+        coupon_code: str,
+        subtotal_minor: int,
+        now: datetime,
+    ) -> Promotion | None: ...
+
+    def checkout(self, command: CheckoutCommand) -> CommerceOrder: ...
+
+    def get_order(
+        self, organization_id: str, customer_id: str, order_id: str
+    ) -> CommerceOrder | None: ...
+
+    def list_orders(
+        self, organization_id: str, customer_id: str, cursor: str, limit: int
+    ) -> OrderPageResult: ...
+
+    def apply_payment(
+        self,
+        provider_reference: str,
+        event_id: str,
+        status: PaymentStatus,
+        changed_at: datetime,
+    ) -> CommerceOrder: ...
+
+    def transition_order(self, command: OrderStatusCommand) -> CommerceOrder: ...
+
+    def refund(self, command: RefundCommand) -> CommerceOrder: ...
+
+    def create_campaign(self, campaign: Campaign, audit: AuditEvent) -> Campaign: ...
+
+    def list_campaigns(
+        self, organization_id: str, cursor: str, limit: int
+    ) -> CampaignPageResult: ...
+
+    def transition_campaign(self, command: CampaignStatusCommand) -> Campaign: ...
+
+    def create_coupon(self, coupon: Coupon, audit: AuditEvent) -> Coupon: ...
+
+
+class SQLAlchemyCommerceRepository:
+    """Repeat organization, version, and state predicates in every SQL mutation."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def get_cart(
+        self, organization_id: str, customer_id: str, currency: str
+    ) -> CommerceCart | None:
+        with self._engine.connect() as connection:
+            cart_id = connection.execute(
+                select(commerce_carts.c.id).where(
+                    commerce_carts.c.organization_id == organization_id,
+                    commerce_carts.c.customer_id == customer_id,
+                    commerce_carts.c.currency == currency,
+                    commerce_carts.c.status == "active",
+                )
+            ).scalar_one_or_none()
+            return _read_cart(connection, str(cart_id)) if cart_id is not None else None
+
+    def put_line(self, command: CartLineCommand) -> CommerceCart:
+        try:
+            with self._engine.begin() as connection:
+                row = (
+                    connection.execute(
+                        select(commerce_carts.c.id, commerce_carts.c.version)
+                        .where(
+                            commerce_carts.c.organization_id == command.organization_id,
+                            commerce_carts.c.customer_id == command.customer_id,
+                            commerce_carts.c.currency == command.currency,
+                            commerce_carts.c.status == "active",
+                        )
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is None:
+                    if command.expected_version != 0:
+                        raise RepositoryConflict()
+                    cart_id = command.cart_id
+                    connection.execute(
+                        insert(commerce_carts).values(
+                            id=cart_id,
+                            organization_id=command.organization_id,
+                            customer_id=command.customer_id,
+                            currency=command.currency,
+                            status="active",
+                            version=1,
+                            created_at=command.changed_at,
+                            updated_at=command.changed_at,
+                        )
+                    )
+                else:
+                    if int(row["version"]) != command.expected_version:
+                        raise RepositoryConflict()
+                    cart_id = str(row["id"])
+                    _require_one(
+                        connection.execute(
+                            update(commerce_carts)
+                            .where(
+                                commerce_carts.c.id == cart_id,
+                                commerce_carts.c.organization_id == command.organization_id,
+                                commerce_carts.c.customer_id == command.customer_id,
+                                commerce_carts.c.version == command.expected_version,
+                                commerce_carts.c.status == "active",
+                            )
+                            .values(
+                                version=commerce_carts.c.version + 1,
+                                updated_at=command.changed_at,
+                            )
+                        ).rowcount
+                    )
+                existing = connection.execute(
+                    select(commerce_cart_lines.c.product_id).where(
+                        commerce_cart_lines.c.cart_id == cart_id,
+                        commerce_cart_lines.c.product_id == command.line.product_id,
+                    )
+                ).scalar_one_or_none()
+                values = _line_values(command.line)
+                if existing is None:
+                    connection.execute(
+                        insert(commerce_cart_lines).values(cart_id=cart_id, **values)
+                    )
+                else:
+                    connection.execute(
+                        update(commerce_cart_lines)
+                        .where(
+                            commerce_cart_lines.c.cart_id == cart_id,
+                            commerce_cart_lines.c.product_id == command.line.product_id,
+                        )
+                        .values(**values)
+                    )
+                return _read_cart(connection, cart_id)
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def remove_line(
+        self,
+        organization_id: str,
+        customer_id: str,
+        currency: str,
+        product_id: str,
+        expected_version: int,
+        changed_at: datetime,
+    ) -> CommerceCart:
+        with self._engine.begin() as connection:
+            cart_id = connection.execute(
+                select(commerce_carts.c.id).where(
+                    commerce_carts.c.organization_id == organization_id,
+                    commerce_carts.c.customer_id == customer_id,
+                    commerce_carts.c.currency == currency,
+                    commerce_carts.c.status == "active",
+                    commerce_carts.c.version == expected_version,
+                )
+            ).scalar_one_or_none()
+            if cart_id is None:
+                raise RepositoryConflict()
+            _require_one(
+                connection.execute(
+                    delete(commerce_cart_lines).where(
+                        commerce_cart_lines.c.cart_id == cart_id,
+                        commerce_cart_lines.c.product_id == product_id,
+                    )
+                ).rowcount
+            )
+            _require_one(
+                connection.execute(
+                    update(commerce_carts)
+                    .where(
+                        commerce_carts.c.id == cart_id,
+                        commerce_carts.c.organization_id == organization_id,
+                        commerce_carts.c.version == expected_version,
+                    )
+                    .values(version=commerce_carts.c.version + 1, updated_at=changed_at)
+                ).rowcount
+            )
+            return _read_cart(connection, str(cart_id))
+
+    def replay_checkout(
+        self,
+        organization_id: str,
+        customer_id: str,
+        idempotency_key: str,
+        currency: str,
+        coupon_code: str,
+        cart_version: int,
+    ) -> CommerceOrder | None:
+        with self._engine.connect() as connection:
+            return _replay_checkout(
+                connection,
+                organization_id,
+                customer_id,
+                idempotency_key,
+                currency,
+                coupon_code,
+                cart_version,
+            )
+
+    def promotion(
+        self,
+        organization_id: str,
+        currency: str,
+        coupon_code: str,
+        subtotal_minor: int,
+        now: datetime,
+    ) -> Promotion | None:
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(commerce_campaigns)
+                    .where(
+                        commerce_campaigns.c.organization_id == organization_id,
+                        commerce_campaigns.c.currency == currency,
+                        commerce_campaigns.c.status == CampaignStatus.ACTIVE.value,
+                        commerce_campaigns.c.minimum_minor <= subtotal_minor,
+                        commerce_campaigns.c.starts_at <= now,
+                        commerce_campaigns.c.ends_at > now,
+                    )
+                    .order_by(desc(commerce_campaigns.c.priority), commerce_campaigns.c.id)
+                )
+                .mappings()
+                .all()
+            )
+            for row in rows:
+                campaign = _map_campaign(row)
+                if not campaign.coupon_required:
+                    return Promotion(campaign, None)
+                if not coupon_code:
+                    continue
+                coupon_row = (
+                    connection.execute(
+                        select(commerce_coupons).where(
+                            commerce_coupons.c.organization_id == organization_id,
+                            commerce_coupons.c.campaign_id == campaign.id,
+                            commerce_coupons.c.code == coupon_code,
+                            commerce_coupons.c.used_count < commerce_coupons.c.maximum_uses,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if coupon_row is not None:
+                    return Promotion(campaign, _map_coupon(coupon_row))
+        return None
+
+    def checkout(self, command: CheckoutCommand) -> CommerceOrder:
+        order = command.order
+        scope = order.organization_id or ""
+        coupon_code = order.coupon_code or ""
+        try:
+            with self._engine.begin() as connection:
+                replay = _replay_checkout(
+                    connection,
+                    scope,
+                    order.customer_id,
+                    command.idempotency_key,
+                    order.currency,
+                    coupon_code,
+                    command.cart_version,
+                )
+                if replay is not None:
+                    return replay
+                _require_one(
+                    connection.execute(
+                        update(commerce_carts)
+                        .where(
+                            commerce_carts.c.id == command.cart_id,
+                            commerce_carts.c.organization_id == scope,
+                            commerce_carts.c.customer_id == order.customer_id,
+                            commerce_carts.c.status == "active",
+                            commerce_carts.c.version == command.cart_version,
+                        )
+                        .values(
+                            status="checked_out",
+                            version=commerce_carts.c.version + 1,
+                            updated_at=order.updated_at,
+                        )
+                    ).rowcount
+                )
+                if command.promotion is not None and command.promotion.coupon is not None:
+                    coupon = command.promotion.coupon
+                    _require_one(
+                        connection.execute(
+                            update(commerce_coupons)
+                            .where(
+                                commerce_coupons.c.id == coupon.id,
+                                commerce_coupons.c.organization_id == scope,
+                                commerce_coupons.c.used_count < commerce_coupons.c.maximum_uses,
+                            )
+                            .values(used_count=commerce_coupons.c.used_count + 1)
+                        ).rowcount
+                    )
+                connection.execute(insert(commerce_orders).values(**_order_values(order)))
+                for line in order.lines:
+                    connection.execute(
+                        insert(commerce_order_lines).values(order_id=order.id, **_line_values(line))
+                    )
+                connection.execute(
+                    insert(commerce_payment_intents).values(
+                        **_payment_values(order.id, order.payment)
+                    )
+                )
+                connection.execute(
+                    insert(commerce_checkout_idempotency).values(
+                        organization_id=scope,
+                        customer_id=order.customer_id,
+                        idempotency_key=command.idempotency_key,
+                        cart_id=command.cart_id,
+                        cart_version=command.cart_version,
+                        currency=order.currency,
+                        coupon_code=coupon_code,
+                        order_id=order.id,
+                    )
+                )
+                _append_order_event(
+                    connection, order.id, "", order.status.value, "", order.created_at
+                )
+                append_audit(connection, command.audit)
+                return order
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def get_order(
+        self, organization_id: str, customer_id: str, order_id: str
+    ) -> CommerceOrder | None:
+        with self._engine.connect() as connection:
+            return _read_order(connection, organization_id, customer_id, order_id)
+
+    def list_orders(
+        self, organization_id: str, customer_id: str, cursor: str, limit: int
+    ) -> OrderPageResult:
+        statement = select(commerce_orders.c.id).where(
+            commerce_orders.c.organization_id == organization_id
+        )
+        if customer_id:
+            statement = statement.where(commerce_orders.c.customer_id == customer_id)
+        if cursor:
+            statement = statement.where(commerce_orders.c.id > cursor)
+        with self._engine.connect() as connection:
+            ids = list(
+                connection.execute(
+                    statement.order_by(commerce_orders.c.id).limit(limit + 1)
+                ).scalars()
+            )
+            next_cursor = str(ids[limit - 1]) if len(ids) > limit else ""
+            items = [
+                _required_order(
+                    _read_order(connection, organization_id, customer_id, str(order_id))
+                )
+                for order_id in ids[:limit]
+            ]
+        return OrderPageResult(items, next_cursor)
+
+    def apply_payment(
+        self,
+        provider_reference: str,
+        event_id: str,
+        status: PaymentStatus,
+        changed_at: datetime,
+    ) -> CommerceOrder:
+        try:
+            with self._engine.begin() as connection:
+                state = (
+                    connection.execute(
+                        select(
+                            commerce_payment_intents.c.order_id,
+                            commerce_payment_intents.c.provider,
+                            commerce_payment_intents.c.status,
+                            commerce_orders.c.organization_id,
+                        )
+                        .join(
+                            commerce_orders,
+                            commerce_orders.c.id == commerce_payment_intents.c.order_id,
+                        )
+                        .where(commerce_payment_intents.c.provider_ref == provider_reference)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if state is None:
+                    raise RepositoryNotFound()
+                scope = str(state["organization_id"])
+                replay = (
+                    connection.execute(
+                        select(commerce_payment_events).where(
+                            commerce_payment_events.c.organization_id == scope,
+                            commerce_payment_events.c.provider == state["provider"],
+                            commerce_payment_events.c.event_id == event_id,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if replay is not None:
+                    if (
+                        replay["provider_ref"] != provider_reference
+                        or replay["status"] != status.value
+                    ):
+                        raise RepositoryConflict()
+                    return _required_order(
+                        _read_order(connection, scope, "", str(state["order_id"]))
+                    )
+                current = PaymentStatus(str(state["status"]))
+                if current is not PaymentStatus.REQUIRES_ACTION and current is not status:
+                    raise RepositoryConflict()
+                if current is PaymentStatus.REQUIRES_ACTION:
+                    _require_one(
+                        connection.execute(
+                            update(commerce_payment_intents)
+                            .where(
+                                commerce_payment_intents.c.provider_ref == provider_reference,
+                                commerce_payment_intents.c.status == current.value,
+                            )
+                            .values(status=status.value, updated_at=changed_at)
+                        ).rowcount
+                    )
+                    order_status = (
+                        OrderStatus.CONFIRMED
+                        if status is PaymentStatus.SUCCEEDED
+                        else OrderStatus.CANCELLED
+                    )
+                    _require_one(
+                        connection.execute(
+                            update(commerce_orders)
+                            .where(
+                                commerce_orders.c.id == state["order_id"],
+                                commerce_orders.c.organization_id == scope,
+                                commerce_orders.c.status == OrderStatus.PENDING_PAYMENT.value,
+                            )
+                            .values(
+                                status=order_status.value,
+                                version=commerce_orders.c.version + 1,
+                                updated_at=changed_at,
+                            )
+                        ).rowcount
+                    )
+                    _append_order_event(
+                        connection,
+                        str(state["order_id"]),
+                        OrderStatus.PENDING_PAYMENT.value,
+                        order_status.value,
+                        "",
+                        changed_at,
+                    )
+                connection.execute(
+                    insert(commerce_payment_events).values(
+                        id=str(uuid4()),
+                        organization_id=scope,
+                        order_id=state["order_id"],
+                        provider=state["provider"],
+                        provider_ref=provider_reference,
+                        event_id=event_id,
+                        status=status.value,
+                        created_at=changed_at,
+                    )
+                )
+                return _required_order(_read_order(connection, scope, "", str(state["order_id"])))
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def transition_order(self, command: OrderStatusCommand) -> CommerceOrder:
+        try:
+            with self._engine.begin() as connection:
+                _require_one(
+                    connection.execute(
+                        update(commerce_orders)
+                        .where(
+                            commerce_orders.c.id == command.order_id,
+                            commerce_orders.c.organization_id == command.organization_id,
+                            commerce_orders.c.version == command.expected_version,
+                            commerce_orders.c.status == command.from_status.value,
+                        )
+                        .values(
+                            status=command.to_status.value,
+                            fulfillment_ref=(
+                                command.reference
+                                if command.to_status is OrderStatus.FULFILLED
+                                else commerce_orders.c.fulfillment_ref
+                            ),
+                            return_reason=(
+                                command.reference
+                                if command.to_status is OrderStatus.RETURN_REQUESTED
+                                else commerce_orders.c.return_reason
+                            ),
+                            version=commerce_orders.c.version + 1,
+                            updated_at=command.changed_at,
+                        )
+                    ).rowcount
+                )
+                if command.to_status is OrderStatus.FULFILLING:
+                    connection.execute(
+                        insert(commerce_fulfillments).values(
+                            order_id=command.order_id,
+                            reference="",
+                            status="in_progress",
+                            created_at=command.changed_at,
+                            completed_at=None,
+                        )
+                    )
+                elif command.to_status is OrderStatus.FULFILLED:
+                    _require_one(
+                        connection.execute(
+                            update(commerce_fulfillments)
+                            .where(
+                                commerce_fulfillments.c.order_id == command.order_id,
+                                commerce_fulfillments.c.status == "in_progress",
+                            )
+                            .values(
+                                reference=command.reference,
+                                status="completed",
+                                completed_at=command.changed_at,
+                            )
+                        ).rowcount
+                    )
+                elif command.to_status is OrderStatus.RETURN_REQUESTED:
+                    connection.execute(
+                        insert(commerce_returns).values(
+                            order_id=command.order_id,
+                            reason=command.reference,
+                            status="requested",
+                            requested_at=command.changed_at,
+                            completed_at=None,
+                        )
+                    )
+                elif command.to_status is OrderStatus.RETURNED:
+                    _require_one(
+                        connection.execute(
+                            update(commerce_returns)
+                            .where(
+                                commerce_returns.c.order_id == command.order_id,
+                                commerce_returns.c.status == "requested",
+                            )
+                            .values(status="completed", completed_at=command.changed_at)
+                        ).rowcount
+                    )
+                _append_order_event(
+                    connection,
+                    command.order_id,
+                    command.from_status.value,
+                    command.to_status.value,
+                    command.audit.user_id or "",
+                    command.changed_at,
+                )
+                append_audit(connection, command.audit)
+                return _required_order(
+                    _read_order(connection, command.organization_id, "", command.order_id)
+                )
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def refund(self, command: RefundCommand) -> CommerceOrder:
+        try:
+            with self._engine.begin() as connection:
+                replay = (
+                    connection.execute(
+                        select(commerce_refunds).where(
+                            commerce_refunds.c.organization_id == command.organization_id,
+                            commerce_refunds.c.idempotency_key == command.idempotency_key,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if replay is not None:
+                    if (
+                        replay["order_id"] != command.order_id
+                        or int(replay["amount_minor"]) != command.amount_minor
+                    ):
+                        raise RepositoryConflict()
+                    return _required_order(
+                        _read_order(connection, command.organization_id, "", command.order_id)
+                    )
+                payment = (
+                    connection.execute(
+                        select(
+                            commerce_payment_intents.c.amount_minor,
+                            commerce_payment_intents.c.refunded_minor,
+                            commerce_payment_intents.c.status,
+                        )
+                        .join(
+                            commerce_orders,
+                            commerce_orders.c.id == commerce_payment_intents.c.order_id,
+                        )
+                        .where(
+                            commerce_payment_intents.c.order_id == command.order_id,
+                            commerce_orders.c.organization_id == command.organization_id,
+                        )
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if payment is None:
+                    raise RepositoryNotFound()
+                if payment["status"] != PaymentStatus.SUCCEEDED.value:
+                    raise RepositoryConflict()
+                if int(payment["refunded_minor"]) + command.amount_minor > int(
+                    payment["amount_minor"]
+                ):
+                    raise RepositoryConflict()
+                _require_one(
+                    connection.execute(
+                        update(commerce_payment_intents)
+                        .where(commerce_payment_intents.c.order_id == command.order_id)
+                        .values(
+                            refunded_minor=commerce_payment_intents.c.refunded_minor
+                            + command.amount_minor,
+                            updated_at=command.changed_at,
+                        )
+                    ).rowcount
+                )
+                connection.execute(
+                    insert(commerce_refunds).values(
+                        id=command.refund_id,
+                        organization_id=command.organization_id,
+                        order_id=command.order_id,
+                        idempotency_key=command.idempotency_key,
+                        amount_minor=command.amount_minor,
+                        created_at=command.changed_at,
+                    )
+                )
+                append_audit(connection, command.audit)
+                return _required_order(
+                    _read_order(connection, command.organization_id, "", command.order_id)
+                )
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def create_campaign(self, campaign: Campaign, audit: AuditEvent) -> Campaign:
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(insert(commerce_campaigns).values(**_campaign_values(campaign)))
+                append_audit(connection, audit)
+            return campaign
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+    def list_campaigns(self, organization_id: str, cursor: str, limit: int) -> CampaignPageResult:
+        statement = select(commerce_campaigns).where(
+            commerce_campaigns.c.organization_id == organization_id
+        )
+        if cursor:
+            statement = statement.where(commerce_campaigns.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(commerce_campaigns.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_campaign(row) for row in rows]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return CampaignPageResult(values[:limit], next_cursor)
+
+    def transition_campaign(self, command: CampaignStatusCommand) -> Campaign:
+        with self._engine.begin() as connection:
+            _require_one(
+                connection.execute(
+                    update(commerce_campaigns)
+                    .where(
+                        commerce_campaigns.c.id == command.campaign_id,
+                        commerce_campaigns.c.organization_id == command.organization_id,
+                        commerce_campaigns.c.version == command.expected_version,
+                        commerce_campaigns.c.status == command.from_status.value,
+                    )
+                    .values(
+                        status=command.to_status.value,
+                        version=commerce_campaigns.c.version + 1,
+                        updated_at=command.changed_at,
+                    )
+                ).rowcount
+            )
+            append_audit(connection, command.audit)
+            row = (
+                connection.execute(
+                    select(commerce_campaigns).where(
+                        commerce_campaigns.c.id == command.campaign_id,
+                        commerce_campaigns.c.organization_id == command.organization_id,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            return _map_campaign(row)
+
+    def create_coupon(self, coupon: Coupon, audit: AuditEvent) -> Coupon:
+        try:
+            with self._engine.begin() as connection:
+                campaign = connection.execute(
+                    select(commerce_campaigns.c.id).where(
+                        commerce_campaigns.c.id == coupon.campaign_id,
+                        commerce_campaigns.c.organization_id == (coupon.organization_id or ""),
+                        commerce_campaigns.c.status != CampaignStatus.ARCHIVED.value,
+                    )
+                ).scalar_one_or_none()
+                if campaign is None:
+                    raise RepositoryNotFound()
+                connection.execute(
+                    insert(commerce_coupons).values(
+                        id=coupon.id,
+                        organization_id=coupon.organization_id or "",
+                        campaign_id=coupon.campaign_id,
+                        code=coupon.code,
+                        maximum_uses=int(coupon.maximum_uses),
+                        used_count=int(coupon.used_count),
+                        created_at=coupon.created_at,
+                    )
+                )
+                append_audit(connection, audit)
+            return coupon
+        except IntegrityError as error:
+            raise RepositoryConflict() from error
+
+
+def _read_cart(connection: Connection, cart_id: str) -> CommerceCart:
+    row = (
+        connection.execute(select(commerce_carts).where(commerce_carts.c.id == cart_id))
+        .mappings()
+        .one()
+    )
+    line_rows = (
+        connection.execute(
+            select(commerce_cart_lines)
+            .where(commerce_cart_lines.c.cart_id == cart_id)
+            .order_by(commerce_cart_lines.c.product_id)
+        )
+        .mappings()
+        .all()
+    )
+    lines = [_map_line(value) for value in line_rows]
+    return CommerceCart(
+        id=str(row["id"]),
+        organization_id=str(row["organization_id"]) or None,
+        customer_id=str(row["customer_id"]),
+        currency=str(row["currency"]),
+        status=str(row["status"]),
+        lines=lines,
+        subtotal_minor=str(sum(int(line.line_minor) for line in lines)),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _read_order(
+    connection: Connection,
+    organization_id: str,
+    customer_id: str,
+    order_id: str,
+) -> CommerceOrder | None:
+    statement = (
+        select(commerce_orders, commerce_payment_intents)
+        .join(
+            commerce_payment_intents,
+            commerce_payment_intents.c.order_id == commerce_orders.c.id,
+        )
+        .where(
+            commerce_orders.c.id == order_id,
+            commerce_orders.c.organization_id == organization_id,
+        )
+    )
+    if customer_id:
+        statement = statement.where(commerce_orders.c.customer_id == customer_id)
+    row = connection.execute(statement).mappings().first()
+    if row is None:
+        return None
+    lines = [
+        _map_line(value)
+        for value in (
+            connection.execute(
+                select(commerce_order_lines)
+                .where(commerce_order_lines.c.order_id == order_id)
+                .order_by(commerce_order_lines.c.product_id)
+            )
+            .mappings()
+            .all()
+        )
+    ]
+    return CommerceOrder(
+        id=str(row["id"]),
+        organization_id=str(row["organization_id"]) or None,
+        customer_id=str(row["customer_id"]),
+        status=OrderStatus(str(row["status"])),
+        currency=str(row["currency"]),
+        subtotal_minor=str(row["subtotal_minor"]),
+        discount_minor=str(row["discount_minor"]),
+        total_minor=str(row["total_minor"]),
+        campaign_id=str(row["campaign_id"]) if row["campaign_id"] is not None else None,
+        coupon_code=str(row["coupon_code"]) if row["coupon_code"] is not None else None,
+        lines=lines,
+        payment=PaymentIntent(
+            id=str(row["id_1"]),
+            provider=str(row["provider"]),
+            provider_ref=str(row["provider_ref"]),
+            status=PaymentStatus(str(row["status_1"])),
+            amount_minor=str(row["amount_minor"]),
+            refunded_minor=str(row["refunded_minor"]),
+            currency=str(row["currency_1"]),
+            updated_at=_utc(cast(datetime, row["updated_at_1"])),
+        ),
+        fulfillment_ref=(
+            str(row["fulfillment_ref"]) if row["fulfillment_ref"] is not None else None
+        ),
+        return_reason=str(row["return_reason"]) if row["return_reason"] is not None else None,
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _replay_checkout(
+    connection: Connection,
+    organization_id: str,
+    customer_id: str,
+    idempotency_key: str,
+    currency: str,
+    coupon_code: str,
+    cart_version: int,
+) -> CommerceOrder | None:
+    row = (
+        connection.execute(
+            select(commerce_checkout_idempotency).where(
+                commerce_checkout_idempotency.c.organization_id == organization_id,
+                commerce_checkout_idempotency.c.customer_id == customer_id,
+                commerce_checkout_idempotency.c.idempotency_key == idempotency_key,
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    if (
+        row["currency"] != currency
+        or row["coupon_code"] != coupon_code
+        or int(row["cart_version"]) != cart_version
+    ):
+        raise RepositoryConflict()
+    return _required_order(
+        _read_order(connection, organization_id, customer_id, str(row["order_id"]))
+    )
+
+
+def _map_line(row: RowMapping) -> CommerceLine:
+    return CommerceLine(
+        product_id=str(row["product_id"]),
+        sku=str(row["sku"]),
+        name=str(row["name"]),
+        unit_minor=str(row["unit_minor"]),
+        quantity=str(row["quantity"]),
+        line_minor=str(row["line_minor"]),
+    )
+
+
+def _map_campaign(row: RowMapping) -> Campaign:
+    return Campaign(
+        id=str(row["id"]),
+        organization_id=str(row["organization_id"]) or None,
+        name=str(row["name"]),
+        kind=str(row["discount_kind"]),
+        value=str(row["discount_value"]),
+        minimum_minor=str(row["minimum_minor"]),
+        currency=str(row["currency"]),
+        priority=int(row["priority"]),
+        coupon_required=bool(row["coupon_required"]),
+        status=CampaignStatus(str(row["status"])),
+        starts_at=_utc(cast(datetime, row["starts_at"])),
+        ends_at=_utc(cast(datetime, row["ends_at"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_coupon(row: RowMapping) -> Coupon:
+    return Coupon(
+        id=str(row["id"]),
+        organization_id=str(row["organization_id"]) or None,
+        campaign_id=str(row["campaign_id"]),
+        code=str(row["code"]),
+        maximum_uses=str(row["maximum_uses"]),
+        used_count=str(row["used_count"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+    )
+
+
+def _line_values(line: CommerceLine) -> dict[str, object]:
+    return {
+        "product_id": line.product_id,
+        "sku": line.sku,
+        "name": line.name,
+        "unit_minor": int(line.unit_minor),
+        "quantity": int(line.quantity),
+        "line_minor": int(line.line_minor),
+    }
+
+
+def _order_values(order: CommerceOrder) -> dict[str, object]:
+    return {
+        "id": order.id,
+        "organization_id": order.organization_id or "",
+        "customer_id": order.customer_id,
+        "status": order.status.value,
+        "currency": order.currency,
+        "subtotal_minor": int(order.subtotal_minor),
+        "discount_minor": int(order.discount_minor),
+        "total_minor": int(order.total_minor),
+        "campaign_id": order.campaign_id,
+        "coupon_code": order.coupon_code,
+        "fulfillment_ref": order.fulfillment_ref,
+        "return_reason": order.return_reason,
+        "version": int(order.version),
+        "created_at": order.created_at,
+        "updated_at": order.updated_at,
+    }
+
+
+def _payment_values(order_id: str, payment: PaymentIntent) -> dict[str, object]:
+    return {
+        "id": payment.id,
+        "order_id": order_id,
+        "provider": payment.provider,
+        "provider_ref": payment.provider_ref,
+        "status": payment.status.value,
+        "amount_minor": int(payment.amount_minor),
+        "refunded_minor": int(payment.refunded_minor),
+        "currency": payment.currency,
+        "updated_at": payment.updated_at,
+    }
+
+
+def _campaign_values(campaign: Campaign) -> dict[str, object]:
+    return {
+        "id": campaign.id,
+        "organization_id": campaign.organization_id or "",
+        "name": campaign.name,
+        "discount_kind": campaign.kind.value,
+        "discount_value": int(campaign.value),
+        "minimum_minor": int(campaign.minimum_minor),
+        "currency": campaign.currency,
+        "priority": campaign.priority,
+        "coupon_required": campaign.coupon_required,
+        "status": campaign.status.value,
+        "starts_at": campaign.starts_at,
+        "ends_at": campaign.ends_at,
+        "version": int(campaign.version),
+        "created_at": campaign.created_at,
+        "updated_at": campaign.updated_at,
+    }
+
+
+def _append_order_event(
+    connection: Connection,
+    order_id: str,
+    from_status: str,
+    to_status: str,
+    actor_id: str,
+    created_at: datetime,
+) -> None:
+    connection.execute(
+        insert(commerce_order_events).values(
+            id=str(uuid4()),
+            order_id=order_id,
+            from_status=from_status,
+            to_status=to_status,
+            actor_id=actor_id,
+            created_at=created_at,
+        )
+    )
+
+
+def _required_order(value: CommerceOrder | None) -> CommerceOrder:
+    if value is None:
+        raise RepositoryNotFound()
+    return value
+
+
+def _require_one(changed: int) -> None:
+    if changed != 1:
+        raise RepositoryConflict()
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

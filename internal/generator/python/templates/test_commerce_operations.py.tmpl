@@ -1,0 +1,560 @@
+"""Commerce state-machine, idempotency, pricing, and isolation contracts."""
+
+from datetime import UTC, datetime, timedelta
+from typing import cast
+
+import pytest
+
+from {{.PackageName}}.catalog.models import CatalogProduct, CatalogStatus
+from {{.PackageName}}.catalog.repository import CatalogRepository
+from {{.PackageName}}.commerce.gateway import (
+    GatewayConflict,
+    GatewayNotFound,
+    SandboxPaymentGateway,
+)
+from {{.PackageName}}.commerce.models import (
+    Campaign,
+    CampaignInput,
+    CampaignStatus,
+    CampaignTransition,
+    CartLineInput,
+    CheckoutInput,
+    CommerceCart,
+    CommerceError,
+    CommerceErrorKind,
+    CommerceOrder,
+    Coupon,
+    CouponInput,
+    DiscountKind,
+    OrderStatus,
+    OrderTransition,
+    PaymentStatus,
+    RefundInput,
+    ReturnInput,
+)
+from {{.PackageName}}.commerce.repository import (
+    CampaignPageResult,
+    CampaignStatusCommand,
+    CartLineCommand,
+    CheckoutCommand,
+    OrderPageResult,
+    OrderStatusCommand,
+    Promotion,
+    RefundCommand,
+    RepositoryConflict,
+)
+from {{.PackageName}}.commerce.service import CommerceService
+from {{.PackageName}}.customer_accounts.models import CustomerRecord, CustomerStatus
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+NOW = datetime(2026, 9, 2, 8, 0, tzinfo=UTC)
+SCOPE = "organization-one" if {{if .Tenancy}}True{{else}}False{{end}} else ""
+
+
+class MemoryCatalog:
+    def __init__(self) -> None:
+        self.product = CatalogProduct(
+            id="product-one",
+{{- if .Tenancy}}
+            organization_id=SCOPE,
+{{- end}}
+            sku="SKU-ONE",
+            name="Portable product",
+            description="",
+            price_minor="1000",
+            currency="USD",
+            status=CatalogStatus.ACTIVE,
+            version="1",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+
+    def get_public(self, organization_id: str, product_id: str) -> CatalogProduct | None:
+        if organization_id != SCOPE or product_id != self.product.id:
+            return None
+        return self.product
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.carts: dict[tuple[str, str, str], CommerceCart] = {}
+        self.orders: dict[str, CommerceOrder] = {}
+        self.checkout_keys: dict[tuple[str, str, str], tuple[str, str, str, int]] = {}
+        self.payment_events: dict[str, tuple[str, PaymentStatus]] = {}
+        self.refunds: dict[tuple[str, str], tuple[str, int]] = {}
+        self.campaign_values: dict[str, Campaign] = {}
+        self.coupons: dict[str, Coupon] = {}
+
+    def get_cart(
+        self, organization_id: str, customer_id: str, currency: str
+    ) -> CommerceCart | None:
+        return self.carts.get((organization_id, customer_id, currency))
+
+    def put_line(self, command: CartLineCommand) -> CommerceCart:
+        key = (command.organization_id, command.customer_id, command.currency)
+        current = self.carts.get(key)
+        actual = int(current.version) if current is not None else 0
+        if actual != command.expected_version:
+            raise RepositoryConflict()
+        lines = [] if current is None else list(current.lines)
+        lines = [line for line in lines if line.product_id != command.line.product_id]
+        lines.append(command.line)
+        lines.sort(key=lambda line: line.product_id)
+        value = CommerceCart(
+            id=command.cart_id if current is None else current.id,
+            organization_id=command.organization_id or None,
+            customer_id=command.customer_id,
+            currency=command.currency,
+            status="active",
+            lines=lines,
+            subtotal_minor=str(sum(int(line.line_minor) for line in lines)),
+            version=str(actual + 1),
+            created_at=command.changed_at if current is None else current.created_at,
+            updated_at=command.changed_at,
+        )
+        self.carts[key] = value
+        return value
+
+    def remove_line(
+        self,
+        organization_id: str,
+        customer_id: str,
+        currency: str,
+        product_id: str,
+        expected_version: int,
+        changed_at: datetime,
+    ) -> CommerceCart:
+        key = (organization_id, customer_id, currency)
+        current = self.carts.get(key)
+        if current is None or int(current.version) != expected_version:
+            raise RepositoryConflict()
+        lines = [line for line in current.lines if line.product_id != product_id]
+        if len(lines) == len(current.lines):
+            raise RepositoryConflict()
+        changed = current.model_copy(
+            update={
+                "lines": lines,
+                "subtotal_minor": str(sum(int(line.line_minor) for line in lines)),
+                "version": str(expected_version + 1),
+                "updated_at": changed_at,
+            }
+        )
+        self.carts[key] = changed
+        return changed
+
+    def replay_checkout(
+        self,
+        organization_id: str,
+        customer_id: str,
+        idempotency_key: str,
+        currency: str,
+        coupon_code: str,
+        cart_version: int,
+    ) -> CommerceOrder | None:
+        replay = self.checkout_keys.get((organization_id, customer_id, idempotency_key))
+        if replay is None:
+            return None
+        order_id, saved_currency, saved_coupon, saved_version = replay
+        if (saved_currency, saved_coupon, saved_version) != (currency, coupon_code, cart_version):
+            raise RepositoryConflict()
+        return self.orders[order_id]
+
+    def promotion(
+        self,
+        organization_id: str,
+        currency: str,
+        coupon_code: str,
+        subtotal_minor: int,
+        now: datetime,
+    ) -> Promotion | None:
+        values = sorted(
+            self.campaign_values.values(), key=lambda value: (-value.priority, value.id)
+        )
+        for campaign in values:
+            if (
+                (campaign.organization_id or "") != organization_id
+                or campaign.currency != currency
+                or campaign.status is not CampaignStatus.ACTIVE
+                or int(campaign.minimum_minor) > subtotal_minor
+                or not (campaign.starts_at <= now < campaign.ends_at)
+            ):
+                continue
+            if not campaign.coupon_required:
+                return Promotion(campaign, None)
+            coupon = self.coupons.get(coupon_code)
+            if (
+                coupon is not None
+                and coupon.campaign_id == campaign.id
+                and int(coupon.used_count) < int(coupon.maximum_uses)
+            ):
+                return Promotion(campaign, coupon)
+        return None
+
+    def checkout(self, command: CheckoutCommand) -> CommerceOrder:
+        scope = command.order.organization_id or ""
+        key = (scope, command.order.customer_id, command.order.currency)
+        cart = self.carts.get(key)
+        if cart is None or cart.id != command.cart_id or int(cart.version) != command.cart_version:
+            raise RepositoryConflict()
+        if command.promotion is not None and command.promotion.coupon is not None:
+            coupon = command.promotion.coupon
+            self.coupons[coupon.code] = coupon.model_copy(
+                update={"used_count": str(int(coupon.used_count) + 1)}
+            )
+        self.carts[key] = cart.model_copy(
+            update={"status": "checked_out", "version": str(command.cart_version + 1)}
+        )
+        self.orders[command.order.id] = command.order
+        self.checkout_keys[(scope, command.order.customer_id, command.idempotency_key)] = (
+            command.order.id,
+            command.order.currency,
+            command.order.coupon_code or "",
+            command.cart_version,
+        )
+        return command.order
+
+    def get_order(
+        self, organization_id: str, customer_id: str, order_id: str
+    ) -> CommerceOrder | None:
+        value = self.orders.get(order_id)
+        if value is None or (value.organization_id or "") != organization_id:
+            return None
+        if customer_id and value.customer_id != customer_id:
+            return None
+        return value
+
+    def list_orders(
+        self, organization_id: str, customer_id: str, cursor: str, limit: int
+    ) -> OrderPageResult:
+        values = sorted(
+            (
+                value
+                for value in self.orders.values()
+                if (value.organization_id or "") == organization_id
+                and (not customer_id or value.customer_id == customer_id)
+                and (not cursor or value.id > cursor)
+            ),
+            key=lambda value: value.id,
+        )
+        return OrderPageResult(values[:limit], values[limit - 1].id if len(values) > limit else "")
+
+    def apply_payment(
+        self,
+        provider_reference: str,
+        event_id: str,
+        status: PaymentStatus,
+        changed_at: datetime,
+    ) -> CommerceOrder:
+        replay = self.payment_events.get(event_id)
+        if replay is not None:
+            order_id, replay_status = replay
+            if replay_status is not status:
+                raise RepositoryConflict()
+            return self.orders[order_id]
+        for order_id, order in self.orders.items():
+            if order.payment.provider_ref != provider_reference:
+                continue
+            if order.payment.status is not PaymentStatus.REQUIRES_ACTION:
+                if order.payment.status is not status:
+                    raise RepositoryConflict()
+                self.payment_events[event_id] = (order_id, status)
+                return order
+            order_status = (
+                OrderStatus.CONFIRMED
+                if status is PaymentStatus.SUCCEEDED
+                else OrderStatus.CANCELLED
+            )
+            changed = order.model_copy(
+                update={
+                    "status": order_status,
+                    "payment": order.payment.model_copy(
+                        update={"status": status, "updated_at": changed_at}
+                    ),
+                    "version": str(int(order.version) + 1),
+                    "updated_at": changed_at,
+                }
+            )
+            self.orders[order_id] = changed
+            self.payment_events[event_id] = (order_id, status)
+            return changed
+        raise RepositoryConflict()
+
+    def transition_order(self, command: OrderStatusCommand) -> CommerceOrder:
+        current = self.get_order(command.organization_id, "", command.order_id)
+        if (
+            current is None
+            or int(current.version) != command.expected_version
+            or current.status is not command.from_status
+        ):
+            raise RepositoryConflict()
+        changed = current.model_copy(
+            update={
+                "status": command.to_status,
+                "fulfillment_ref": (
+                    command.reference
+                    if command.to_status is OrderStatus.FULFILLED
+                    else current.fulfillment_ref
+                ),
+                "return_reason": (
+                    command.reference
+                    if command.to_status is OrderStatus.RETURN_REQUESTED
+                    else current.return_reason
+                ),
+                "version": str(command.expected_version + 1),
+                "updated_at": command.changed_at,
+            }
+        )
+        self.orders[command.order_id] = changed
+        return changed
+
+    def refund(self, command: RefundCommand) -> CommerceOrder:
+        replay = self.refunds.get((command.organization_id, command.idempotency_key))
+        if replay is not None:
+            if replay != (command.order_id, command.amount_minor):
+                raise RepositoryConflict()
+            return self.orders[command.order_id]
+        order = self.get_order(command.organization_id, "", command.order_id)
+        if order is None or order.payment.status is not PaymentStatus.SUCCEEDED:
+            raise RepositoryConflict()
+        refunded = int(order.payment.refunded_minor) + command.amount_minor
+        if refunded > int(order.payment.amount_minor):
+            raise RepositoryConflict()
+        changed = order.model_copy(
+            update={
+                "payment": order.payment.model_copy(
+                    update={"refunded_minor": str(refunded), "updated_at": command.changed_at}
+                )
+            }
+        )
+        self.orders[command.order_id] = changed
+        self.refunds[(command.organization_id, command.idempotency_key)] = (
+            command.order_id,
+            command.amount_minor,
+        )
+        return changed
+
+    def create_campaign(self, campaign: Campaign, _audit: AuditEvent) -> Campaign:
+        self.campaign_values[campaign.id] = campaign
+        return campaign
+
+    def list_campaigns(self, organization_id: str, cursor: str, limit: int) -> CampaignPageResult:
+        values = sorted(
+            (
+                value
+                for value in self.campaign_values.values()
+                if (value.organization_id or "") == organization_id
+                and (not cursor or value.id > cursor)
+            ),
+            key=lambda value: value.id,
+        )
+        return CampaignPageResult(
+            values[:limit], values[limit - 1].id if len(values) > limit else ""
+        )
+
+    def transition_campaign(self, command: CampaignStatusCommand) -> Campaign:
+        current = self.campaign_values.get(command.campaign_id)
+        if (
+            current is None
+            or (current.organization_id or "") != command.organization_id
+            or int(current.version) != command.expected_version
+            or current.status is not command.from_status
+        ):
+            raise RepositoryConflict()
+        changed = current.model_copy(
+            update={
+                "status": command.to_status,
+                "version": str(command.expected_version + 1),
+                "updated_at": command.changed_at,
+            }
+        )
+        self.campaign_values[command.campaign_id] = changed
+        return changed
+
+    def create_coupon(self, coupon: Coupon, _audit: AuditEvent) -> Coupon:
+        if coupon.campaign_id not in self.campaign_values or coupon.code in self.coupons:
+            raise RepositoryConflict()
+        self.coupons[coupon.code] = coupon
+        return coupon
+
+
+def _actor(scope: str = SCOPE) -> Principal:
+    return Principal(
+        user_id="admin-one",
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=scope,
+{{- end}}
+    )
+
+
+def _customer(scope: str = SCOPE, customer_id: str = "customer-one") -> CustomerRecord:
+    return CustomerRecord(
+        id=customer_id,
+        organization_id=scope,
+        email=f"{customer_id}@example.com",
+        password_hash="unused",
+        display_name="Customer",
+        status=CustomerStatus.ACTIVE,
+        version=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def _service(
+    repository: MemoryRepository | None = None,
+) -> tuple[CommerceService, MemoryRepository, SandboxPaymentGateway]:
+    values = repository or MemoryRepository()
+    gateway = SandboxPaymentGateway()
+    catalog = cast(CatalogRepository, MemoryCatalog())
+    return CommerceService(values, catalog, gateway, lambda: NOW), values, gateway
+
+
+def _campaign_input(priority: int = 10, coupon_required: bool = False) -> CampaignInput:
+    return CampaignInput(
+        name="Launch discount",
+        kind=DiscountKind.PERCENT,
+        value="2500",
+        minimum_minor="1000",
+        currency="usd",
+        priority=priority,
+        coupon_required=coupon_required,
+        starts_at=NOW - timedelta(days=1),
+        ends_at=NOW + timedelta(days=1),
+    )
+
+
+def test_cart_checkout_promotion_and_replay_are_deterministic() -> None:
+    service, repository, gateway = _service()
+    customer = _customer()
+    assert service.cart(customer, "usd").version == "0"
+    cart = service.put_line(
+        customer,
+        "product-one",
+        CartLineInput(currency="usd", quantity="2", version="0"),
+    )
+    assert cart.subtotal_minor == "2000"
+    campaign = service.create_campaign(_campaign_input(), _actor())
+    campaign = service.activate_campaign(campaign.id, CampaignTransition(version="1"), _actor())
+    assert campaign.status is CampaignStatus.ACTIVE
+    checkout = CheckoutInput(
+        currency="USD",
+        version="1",
+        coupon_code="",
+        idempotency_key="checkout-one",
+    )
+    order = service.checkout(customer, checkout)
+    assert order.total_minor == "1500"
+    assert order.lines[0].unit_minor == "1000"
+    assert service.checkout(customer, checkout) == order
+    with pytest.raises(CommerceError) as conflict:
+        service.checkout(customer, checkout.model_copy(update={"coupon_code": "DIFFERENT"}))
+    assert conflict.value.kind is CommerceErrorKind.CONFLICT
+    gateway.complete(order.payment.provider_ref, "succeeded")
+    confirmed = service.complete_payment(
+        order.payment.provider_ref, "provider-event-one", "succeeded"
+    )
+    assert confirmed.status is OrderStatus.CONFIRMED
+    assert (
+        service.complete_payment(order.payment.provider_ref, "provider-event-one", "succeeded")
+        == confirmed
+    )
+    assert repository.carts[(SCOPE, customer.id, "USD")].status == "checked_out"
+
+
+def test_coupon_refund_fulfillment_return_and_tenant_isolation() -> None:
+    service, _repository, gateway = _service()
+    customer = _customer()
+    campaign = service.create_campaign(_campaign_input(coupon_required=True), _actor())
+    service.activate_campaign(campaign.id, CampaignTransition(version="1"), _actor())
+    coupon = service.create_coupon(
+        CouponInput(campaign_id=campaign.id, code="save25", maximum_uses="1"), _actor()
+    )
+    assert coupon.code == "SAVE25"
+    service.put_line(
+        customer,
+        "product-one",
+        CartLineInput(currency="USD", quantity="1", version="0"),
+    )
+    order = service.checkout(
+        customer,
+        CheckoutInput(
+            currency="USD",
+            version="1",
+            coupon_code="SAVE25",
+            idempotency_key="coupon-checkout",
+        ),
+    )
+    gateway.complete(order.payment.provider_ref, "succeeded")
+    order = service.complete_payment(order.payment.provider_ref, "paid", "succeeded")
+    order = service.start_fulfillment(order.id, OrderTransition(version="2"), _actor())
+    order = service.complete_fulfillment(
+        order.id,
+        OrderTransition(version="3", reference="shipment-one"),
+        _actor(),
+    )
+    assert order.fulfillment_ref == "shipment-one"
+    order = service.request_return(customer, order.id, ReturnInput(version="4", reason="damaged"))
+    assert order.return_reason == "damaged"
+    order = service.complete_return(order.id, OrderTransition(version="5"), _actor())
+    assert order.status is OrderStatus.RETURNED
+    refunded = service.refund(
+        order.id,
+        RefundInput(amount_minor="250", idempotency_key="refund-one"),
+        _actor(),
+    )
+    assert refunded.payment.refunded_minor == "250"
+    assert (
+        service.refund(
+            order.id,
+            RefundInput(amount_minor="250", idempotency_key="refund-one"),
+            _actor(),
+        ).payment.refunded_minor
+        == "250"
+    )
+{{- if .Tenancy}}
+    with pytest.raises(CommerceError) as hidden:
+        service.order(order.id, _actor("organization-two"))
+    assert hidden.value.kind is CommerceErrorKind.NOT_FOUND
+{{- end}}
+
+
+def test_validation_conflicts_and_sandbox_gateway_are_bounded() -> None:
+    service, _repository, gateway = _service()
+    customer = _customer()
+    with pytest.raises(CommerceError):
+        service.cart(customer, "invalid")
+    with pytest.raises(CommerceError):
+        service.put_line(
+            customer,
+            "missing",
+            CartLineInput(currency="USD", quantity="1", version="0"),
+        )
+    with pytest.raises(GatewayConflict):
+        gateway.create_intent("order", -1, "USD", "key")
+    with pytest.raises(GatewayNotFound):
+        gateway.fetch_status("missing")
+    campaign = service.create_campaign(_campaign_input(), _actor())
+    assert service.campaigns("", 20, _actor()).items == [campaign]
+    archived = service.archive_campaign(
+        service.activate_campaign(campaign.id, CampaignTransition(version="1"), _actor()).id,
+        CampaignTransition(version="2"),
+        _actor(),
+    )
+    assert archived.status is CampaignStatus.ARCHIVED
+    with pytest.raises(CommerceError) as duplicate:
+        service.create_coupon(
+            CouponInput(campaign_id="missing", code="CODE", maximum_uses="1"), _actor()
+        )
+    assert duplicate.value.kind is CommerceErrorKind.CONFLICT
+
+    class FailingRepository(MemoryRepository):
+        def create_campaign(self, _campaign: Campaign, _audit: AuditEvent) -> Campaign:
+            raise RuntimeError()
+
+    service, _repository, _gateway = _service(FailingRepository())
+    with pytest.raises(CommerceError) as storage:
+        service.create_campaign(_campaign_input(), _actor())
+    assert storage.value.kind is CommerceErrorKind.STORAGE

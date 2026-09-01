@@ -1,0 +1,173 @@
+"""Commerce transport routes, stable errors, and sandbox opt-in contracts."""
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from starlette.requests import Request
+from test_commerce_operations import _actor, _campaign_input, _customer, _service
+
+from {{.PackageName}}.commerce.http import (
+    activate_campaign,
+    archive_campaign,
+    checkout,
+    complete_fulfillment,
+    complete_return,
+    complete_sandbox_payment,
+    create_campaign,
+    create_coupon,
+    customer_order,
+    customer_orders,
+    install_error_handlers,
+    list_campaigns,
+    list_orders,
+    reconcile,
+    refund,
+    request_return,
+    router,
+    start_fulfillment,
+)
+from {{.PackageName}}.commerce.models import (
+    CampaignTransition,
+    CartLineInput,
+    CheckoutInput,
+    CommerceError,
+    CommerceErrorKind,
+    CouponInput,
+    OrderTransition,
+    RefundInput,
+    ReturnInput,
+    SandboxCompletion,
+)
+from {{.PackageName}}.customer_accounts.http import current_customer
+
+
+def _application(sandbox_enabled: bool = False) -> FastAPI:
+    service, _repository, gateway = _service()
+    application = FastAPI()
+    application.state.commerce_service = service
+    application.state.commerce_sandbox_gateway = gateway
+    application.state.commerce_sandbox_enabled = sandbox_enabled
+    application.dependency_overrides[current_customer] = _customer
+    install_error_handlers(application)
+    application.include_router(router)
+    return application
+
+
+def test_customer_cart_routes_and_stable_errors() -> None:
+    client = TestClient(_application())
+    empty = client.get("/api/v1/storefront/cart?currency=USD")
+    assert empty.status_code == 200
+    assert empty.json()["version"] == "0"
+    changed = client.put(
+        "/api/v1/storefront/cart/lines/product-one",
+        json={"currency": "USD", "quantity": "2", "version": "0"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["subtotal_minor"] == "2000"
+    conflict = client.put(
+        "/api/v1/storefront/cart/lines/product-one",
+        json={"currency": "USD", "quantity": "2", "version": "0"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "commerce.conflict"
+    removed = client.post(
+        "/api/v1/storefront/cart/lines/product-one/remove",
+        json={"currency": "USD", "version": "1"},
+    )
+    assert removed.status_code == 200
+    assert removed.json()["lines"] == []
+
+
+def test_sandbox_completion_is_disabled_by_default() -> None:
+    client = TestClient(_application())
+    response = client.post(
+        "/api/v1/storefront/sandbox/payments/missing/complete",
+        json={"event_id": "event-one", "status": "succeeded"},
+    )
+    assert response.status_code == 404
+
+
+def test_transport_functions_cover_the_complete_commerce_lifecycle() -> None:
+    service, _repository, gateway = _service()
+    customer = _customer()
+    actor = _actor()
+    campaign = create_campaign(_campaign_input(coupon_required=True), actor, service)
+    coupon = create_coupon(
+        CouponInput(campaign_id=campaign.id, code="route25", maximum_uses="2"),
+        actor,
+        service,
+    )
+    assert coupon.code == "ROUTE25"
+    campaign = activate_campaign(campaign.id, CampaignTransition(version="1"), actor, service)
+    assert list_campaigns(actor, service).items == [campaign]
+
+    cart = service.put_line(
+        customer,
+        "product-one",
+        CartLineInput(currency="USD", quantity="1", version="0"),
+    )
+    order = checkout(
+        CheckoutInput(
+            currency="USD",
+            version=cart.version,
+            coupon_code=coupon.code,
+            idempotency_key="route-checkout",
+        ),
+        customer,
+        service,
+    )
+    assert customer_orders(customer, service).items == [order]
+    assert customer_order(order.id, customer, service) == order
+    assert list_orders(actor, service).items == [order]
+
+    application = FastAPI()
+    application.state.commerce_sandbox_enabled = True
+    application.state.commerce_sandbox_gateway = gateway
+    request = Request({"type": "http", "app": application})
+    order = complete_sandbox_payment(
+        order.payment.provider_ref,
+        SandboxCompletion(event_id="route-paid", status="succeeded"),
+        request,
+        service,
+    )
+    assert reconcile(order.id, actor, service) == order
+    with pytest.raises(CommerceError) as missing_gateway:
+        complete_sandbox_payment(
+            "missing",
+            SandboxCompletion(event_id="missing", status="succeeded"),
+            request,
+            service,
+        )
+    assert missing_gateway.value.kind is CommerceErrorKind.NOT_FOUND
+    with pytest.raises(CommerceError) as conflicting_gateway:
+        complete_sandbox_payment(
+            order.payment.provider_ref,
+            SandboxCompletion(event_id="route-failed", status="failed"),
+            request,
+            service,
+        )
+    assert conflicting_gateway.value.kind is CommerceErrorKind.CONFLICT
+
+    order = start_fulfillment(order.id, OrderTransition(version="2"), actor, service)
+    order = complete_fulfillment(
+        order.id,
+        OrderTransition(version="3", reference="route-shipment"),
+        actor,
+        service,
+    )
+    order = request_return(
+        order.id,
+        ReturnInput(version="4", reason="route return"),
+        customer,
+        service,
+    )
+    order = complete_return(order.id, OrderTransition(version="5"), actor, service)
+    order = refund(
+        order.id,
+        RefundInput(amount_minor="100", idempotency_key="route-refund"),
+        actor,
+        service,
+    )
+    assert order.payment.refunded_minor == "100"
+    archived = archive_campaign(campaign.id, CampaignTransition(version="2"), actor, service)
+    assert archived.status.value == "archived"

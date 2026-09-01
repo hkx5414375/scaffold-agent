@@ -1,0 +1,639 @@
+"""Provider-neutral commerce use cases and deterministic state machines."""
+
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.catalog.repository import CatalogRepository
+from {{.PackageName}}.commerce.gateway import GatewayConflict, GatewayNotFound, PaymentGateway
+from {{.PackageName}}.commerce.models import (
+    Campaign,
+    CampaignInput,
+    CampaignPage,
+    CampaignStatus,
+    CampaignTransition,
+    CartLineInput,
+    CartMutation,
+    CheckoutInput,
+    CommerceCart,
+    CommerceError,
+    CommerceErrorKind,
+    CommerceLine,
+    CommerceOrder,
+    CommerceOrderPage,
+    Coupon,
+    CouponInput,
+    DiscountKind,
+    OrderStatus,
+    OrderTransition,
+    PaymentIntent,
+    PaymentStatus,
+    RefundInput,
+    ReturnInput,
+)
+from {{.PackageName}}.commerce.repository import (
+    CampaignStatusCommand,
+    CartLineCommand,
+    CheckoutCommand,
+    CommerceRepository,
+    OrderStatusCommand,
+    RefundCommand,
+    RepositoryConflict,
+    RepositoryNotFound,
+)
+from {{.PackageName}}.customer_accounts.models import CustomerRecord, CustomerStatus
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+MAXIMUM_INTEGER = 2**63 - 1
+MAXIMUM_IDENTIFIER_LENGTH = 191
+CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
+COUPON_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,63}$")
+
+
+class CommerceService:
+    """Coordinate carts, orders, payment state, fulfillment, returns, and promotions."""
+
+    def __init__(
+        self,
+        repository: CommerceRepository,
+        catalog_repository: CatalogRepository,
+        payment_gateway: PaymentGateway,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._catalog_repository = catalog_repository
+        self._payment_gateway = payment_gateway
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def cart(self, customer: CustomerRecord, currency: str) -> CommerceCart:
+        _require_customer(customer)
+        normalized_currency = _currency(currency)
+        value = self._repository.get_cart(
+            _customer_scope(customer), customer.id, normalized_currency
+        )
+        if value is not None:
+            return value
+        return CommerceCart(
+            id=None,
+            organization_id=_optional_scope(_customer_scope(customer)),
+            customer_id=customer.id,
+            currency=normalized_currency,
+            status="active",
+            lines=[],
+            subtotal_minor="0",
+            version="0",
+        )
+
+    def put_line(
+        self,
+        customer: CustomerRecord,
+        product_id: str,
+        value: CartLineInput,
+    ) -> CommerceCart:
+        _require_customer(customer)
+        scope = _customer_scope(customer)
+        normalized_product_id = _identifier(product_id)
+        currency = _currency(value.currency)
+        quantity = _integer(value.quantity, 1, 999)
+        version = _integer(value.version, 0, MAXIMUM_INTEGER)
+        product = self._catalog_repository.get_public(scope, normalized_product_id)
+        if product is None:
+            raise _not_found()
+        if product.currency != currency:
+            raise _conflict()
+        unit_minor = _integer(product.price_minor, 0, MAXIMUM_INTEGER)
+        if unit_minor and quantity > MAXIMUM_INTEGER // unit_minor:
+            raise _conflict()
+        line = CommerceLine(
+            product_id=product.id,
+            sku=product.sku,
+            name=product.name,
+            unit_minor=str(unit_minor),
+            quantity=str(quantity),
+            line_minor=str(unit_minor * quantity),
+        )
+        return _repository_call(
+            lambda: self._repository.put_line(
+                CartLineCommand(
+                    cart_id=str(uuid4()),
+                    organization_id=scope,
+                    customer_id=customer.id,
+                    currency=currency,
+                    line=line,
+                    expected_version=version,
+                    changed_at=_now(self._clock),
+                )
+            )
+        )
+
+    def remove_line(
+        self,
+        customer: CustomerRecord,
+        product_id: str,
+        value: CartMutation,
+    ) -> CommerceCart:
+        _require_customer(customer)
+        return _repository_call(
+            lambda: self._repository.remove_line(
+                _customer_scope(customer),
+                customer.id,
+                _currency(value.currency),
+                _identifier(product_id),
+                _integer(value.version, 1, MAXIMUM_INTEGER),
+                _now(self._clock),
+            )
+        )
+
+    def checkout(self, customer: CustomerRecord, value: CheckoutInput) -> CommerceOrder:
+        _require_customer(customer)
+        scope = _customer_scope(customer)
+        currency = _currency(value.currency)
+        version = _integer(value.version, 1, MAXIMUM_INTEGER)
+        key = _required(value.idempotency_key, MAXIMUM_IDENTIFIER_LENGTH)
+        coupon_code = _optional_coupon(value.coupon_code)
+        replay = _repository_call(
+            lambda: self._repository.replay_checkout(
+                scope,
+                customer.id,
+                key,
+                currency,
+                coupon_code,
+                version,
+            )
+        )
+        if replay is not None:
+            return replay
+        cart = self._repository.get_cart(scope, customer.id, currency)
+        if (
+            cart is None
+            or cart.status != "active"
+            or int(cart.version) != version
+            or not cart.lines
+        ):
+            raise _conflict()
+        subtotal = _integer(cart.subtotal_minor, 0, MAXIMUM_INTEGER)
+        now = _now(self._clock)
+        promotion = _repository_call(
+            lambda: self._repository.promotion(scope, currency, coupon_code, subtotal, now)
+        )
+        discount = _discount(subtotal, promotion.campaign if promotion is not None else None)
+        order_id = str(uuid4())
+        try:
+            intent = self._payment_gateway.create_intent(
+                order_id,
+                subtotal - discount,
+                currency,
+                key,
+            )
+        except GatewayConflict as error:
+            raise _conflict() from error
+        order = CommerceOrder(
+            id=order_id,
+            organization_id=_optional_scope(scope),
+            customer_id=customer.id,
+            status=OrderStatus.PENDING_PAYMENT,
+            currency=currency,
+            subtotal_minor=str(subtotal),
+            discount_minor=str(discount),
+            total_minor=str(subtotal - discount),
+            campaign_id=promotion.campaign.id if promotion is not None else None,
+            coupon_code=(
+                promotion.coupon.code if promotion is not None and promotion.coupon else None
+            ),
+            lines=list(cart.lines),
+            payment=PaymentIntent(
+                id=str(uuid4()),
+                provider=intent.provider,
+                provider_ref=intent.provider_reference,
+                status=PaymentStatus(intent.status),
+                amount_minor=str(subtotal - discount),
+                refunded_minor="0",
+                currency=currency,
+                updated_at=now,
+            ),
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        return _repository_call(
+            lambda: self._repository.checkout(
+                CheckoutCommand(
+                    order=order,
+                    cart_id=cart.id or "",
+                    cart_version=version,
+                    idempotency_key=key,
+                    promotion=promotion,
+                    audit=_customer_audit("commerce.checkout", order.id, now),
+                )
+            )
+        )
+
+    def customer_order(self, customer: CustomerRecord, order_id: str) -> CommerceOrder:
+        _require_customer(customer)
+        value = self._repository.get_order(
+            _customer_scope(customer), customer.id, _identifier(order_id)
+        )
+        if value is None:
+            raise _not_found()
+        return value
+
+    def customer_orders(
+        self,
+        customer: CustomerRecord,
+        cursor: str,
+        limit: int,
+    ) -> CommerceOrderPage:
+        _require_customer(customer)
+        normalized_cursor, normalized_limit = _page(cursor, limit)
+        result = self._repository.list_orders(
+            _customer_scope(customer), customer.id, normalized_cursor, normalized_limit
+        )
+        return CommerceOrderPage(items=result.items, next_cursor=result.next_cursor)
+
+    def request_return(
+        self,
+        customer: CustomerRecord,
+        order_id: str,
+        value: ReturnInput,
+    ) -> CommerceOrder:
+        current = self.customer_order(customer, order_id)
+        version = _integer(value.version, 1, MAXIMUM_INTEGER)
+        if current.status is not OrderStatus.FULFILLED or int(current.version) != version:
+            raise _conflict()
+        now = _now(self._clock)
+        return _repository_call(
+            lambda: self._repository.transition_order(
+                OrderStatusCommand(
+                    organization_id=_customer_scope(customer),
+                    order_id=current.id,
+                    expected_version=version,
+                    from_status=OrderStatus.FULFILLED,
+                    to_status=OrderStatus.RETURN_REQUESTED,
+                    reference=_required(value.reason, 500),
+                    changed_at=now,
+                    audit=_customer_audit("commerce.return.request", current.id, now),
+                )
+            )
+        )
+
+    def complete_payment(
+        self, provider_reference: str, event_id: str, status: str
+    ) -> CommerceOrder:
+        if status not in {PaymentStatus.SUCCEEDED.value, PaymentStatus.FAILED.value}:
+            raise _invalid()
+        return _repository_call(
+            lambda: self._repository.apply_payment(
+                _identifier(provider_reference),
+                _required(event_id, MAXIMUM_IDENTIFIER_LENGTH),
+                PaymentStatus(status),
+                _now(self._clock),
+            )
+        )
+
+    def order(self, order_id: str, actor: Principal) -> CommerceOrder:
+        value = self._repository.get_order(_actor_scope(actor), "", _identifier(order_id))
+        if value is None:
+            raise _not_found()
+        return value
+
+    def orders(self, cursor: str, limit: int, actor: Principal) -> CommerceOrderPage:
+        normalized_cursor, normalized_limit = _page(cursor, limit)
+        result = self._repository.list_orders(
+            _actor_scope(actor), "", normalized_cursor, normalized_limit
+        )
+        return CommerceOrderPage(items=result.items, next_cursor=result.next_cursor)
+
+    def start_fulfillment(
+        self, order_id: str, value: OrderTransition, actor: Principal
+    ) -> CommerceOrder:
+        return self._staff_transition(
+            order_id, value, OrderStatus.CONFIRMED, OrderStatus.FULFILLING, "", actor
+        )
+
+    def complete_fulfillment(
+        self, order_id: str, value: OrderTransition, actor: Principal
+    ) -> CommerceOrder:
+        return self._staff_transition(
+            order_id,
+            value,
+            OrderStatus.FULFILLING,
+            OrderStatus.FULFILLED,
+            _required(value.reference, MAXIMUM_IDENTIFIER_LENGTH),
+            actor,
+        )
+
+    def complete_return(
+        self, order_id: str, value: OrderTransition, actor: Principal
+    ) -> CommerceOrder:
+        return self._staff_transition(
+            order_id, value, OrderStatus.RETURN_REQUESTED, OrderStatus.RETURNED, "", actor
+        )
+
+    def _staff_transition(
+        self,
+        order_id: str,
+        value: OrderTransition,
+        from_status: OrderStatus,
+        to_status: OrderStatus,
+        reference: str,
+        actor: Principal,
+    ) -> CommerceOrder:
+        normalized_id = _identifier(order_id)
+        version = _integer(value.version, 1, MAXIMUM_INTEGER)
+        now = _now(self._clock)
+        return _repository_call(
+            lambda: self._repository.transition_order(
+                OrderStatusCommand(
+                    organization_id=_actor_scope(actor),
+                    order_id=normalized_id,
+                    expected_version=version,
+                    from_status=from_status,
+                    to_status=to_status,
+                    reference=reference,
+                    changed_at=now,
+                    audit=_audit(actor, f"commerce.order.{to_status.value}", normalized_id, now),
+                )
+            )
+        )
+
+    def reconcile(self, order_id: str, actor: Principal) -> CommerceOrder:
+        order = self.order(order_id, actor)
+        try:
+            status = self._payment_gateway.fetch_status(order.payment.provider_ref)
+        except GatewayNotFound as error:
+            raise _not_found() from error
+        if status == order.payment.status.value:
+            return order
+        return self.complete_payment(
+            order.payment.provider_ref,
+            f"reconcile-{order.id}-{status}",
+            status,
+        )
+
+    def refund(self, order_id: str, value: RefundInput, actor: Principal) -> CommerceOrder:
+        normalized_id = _identifier(order_id)
+        amount = _integer(value.amount_minor, 1, MAXIMUM_INTEGER)
+        key = _required(value.idempotency_key, MAXIMUM_IDENTIFIER_LENGTH)
+        current = self.order(normalized_id, actor)
+        if current.payment.status is not PaymentStatus.SUCCEEDED:
+            raise _conflict()
+        remaining = int(current.payment.amount_minor) - int(current.payment.refunded_minor)
+        if amount > remaining:
+            raise _conflict()
+        now = _now(self._clock)
+        return _repository_call(
+            lambda: self._repository.refund(
+                RefundCommand(
+                    refund_id=str(uuid4()),
+                    organization_id=_actor_scope(actor),
+                    order_id=normalized_id,
+                    amount_minor=amount,
+                    idempotency_key=key,
+                    changed_at=now,
+                    audit=_audit(actor, "commerce.payment.refund", normalized_id, now),
+                )
+            )
+        )
+
+    def create_campaign(self, value: CampaignInput, actor: Principal) -> Campaign:
+        name = _required(value.name, 160)
+        currency = _currency(value.currency)
+        amount = _integer(value.value, 1, MAXIMUM_INTEGER)
+        minimum = _integer(value.minimum_minor, 0, MAXIMUM_INTEGER)
+        starts_at = value.starts_at.astimezone(UTC)
+        ends_at = value.ends_at.astimezone(UTC)
+        if starts_at >= ends_at or (value.kind is DiscountKind.PERCENT and amount > 10_000):
+            raise _invalid()
+        now = _now(self._clock)
+        campaign = Campaign(
+            id=str(uuid4()),
+            organization_id=_optional_scope(_actor_scope(actor)),
+            name=name,
+            kind=value.kind,
+            value=str(amount),
+            minimum_minor=str(minimum),
+            currency=currency,
+            priority=value.priority,
+            coupon_required=value.coupon_required,
+            status=CampaignStatus.DRAFT,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        return _repository_call(
+            lambda: self._repository.create_campaign(
+                campaign,
+                _audit(actor, "commerce.campaign.create", campaign.id, now),
+            )
+        )
+
+    def campaigns(self, cursor: str, limit: int, actor: Principal) -> CampaignPage:
+        normalized_cursor, normalized_limit = _page(cursor, limit)
+        result = self._repository.list_campaigns(
+            _actor_scope(actor), normalized_cursor, normalized_limit
+        )
+        return CampaignPage(items=result.items, next_cursor=result.next_cursor)
+
+    def activate_campaign(
+        self, campaign_id: str, value: CampaignTransition, actor: Principal
+    ) -> Campaign:
+        return self._transition_campaign(
+            campaign_id, value, CampaignStatus.DRAFT, CampaignStatus.ACTIVE, actor
+        )
+
+    def archive_campaign(
+        self, campaign_id: str, value: CampaignTransition, actor: Principal
+    ) -> Campaign:
+        return self._transition_campaign(
+            campaign_id, value, CampaignStatus.ACTIVE, CampaignStatus.ARCHIVED, actor
+        )
+
+    def _transition_campaign(
+        self,
+        campaign_id: str,
+        value: CampaignTransition,
+        from_status: CampaignStatus,
+        to_status: CampaignStatus,
+        actor: Principal,
+    ) -> Campaign:
+        normalized_id = _identifier(campaign_id)
+        version = _integer(value.version, 1, MAXIMUM_INTEGER)
+        now = _now(self._clock)
+        return _repository_call(
+            lambda: self._repository.transition_campaign(
+                CampaignStatusCommand(
+                    organization_id=_actor_scope(actor),
+                    campaign_id=normalized_id,
+                    expected_version=version,
+                    from_status=from_status,
+                    to_status=to_status,
+                    changed_at=now,
+                    audit=_audit(
+                        actor,
+                        f"commerce.campaign.{to_status.value}",
+                        normalized_id,
+                        now,
+                    ),
+                )
+            )
+        )
+
+    def create_coupon(self, value: CouponInput, actor: Principal) -> Coupon:
+        now = _now(self._clock)
+        coupon = Coupon(
+            id=str(uuid4()),
+            organization_id=_optional_scope(_actor_scope(actor)),
+            campaign_id=_identifier(value.campaign_id),
+            code=_optional_coupon(value.code),
+            maximum_uses=str(_integer(value.maximum_uses, 1, MAXIMUM_INTEGER)),
+            used_count="0",
+            created_at=now,
+        )
+        return _repository_call(
+            lambda: self._repository.create_coupon(
+                coupon,
+                _audit(actor, "commerce.coupon.create", coupon.id, now),
+            )
+        )
+
+
+def _repository_call[T](operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except RepositoryNotFound as error:
+        raise _not_found() from error
+    except RepositoryConflict as error:
+        raise _conflict() from error
+    except CommerceError:
+        raise
+    except Exception as error:
+        raise CommerceError(CommerceErrorKind.STORAGE, "commerce storage failed") from error
+
+
+def _discount(subtotal: int, campaign: Campaign | None) -> int:
+    if campaign is None:
+        return 0
+    value = int(campaign.value)
+    discount = value if campaign.kind is DiscountKind.FIXED else subtotal * value // 10_000
+    return min(discount, subtotal)
+
+
+def _customer_scope(customer: CustomerRecord) -> str:
+{{- if .Tenancy}}
+    return _identifier(customer.organization_id)
+{{- else}}
+    del customer
+    return ""
+{{- end}}
+
+
+def _actor_scope(actor: Principal) -> str:
+{{- if .Tenancy}}
+    return _identifier(actor.organization_id or "")
+{{- else}}
+    del actor
+    return ""
+{{- end}}
+
+
+def _require_customer(customer: CustomerRecord) -> None:
+    if customer.status is not CustomerStatus.ACTIVE:
+        raise _conflict()
+
+
+def _currency(value: str) -> str:
+    normalized = value.strip().upper()
+    if CURRENCY_PATTERN.fullmatch(normalized) is None:
+        raise _invalid()
+    return normalized
+
+
+def _optional_coupon(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized and COUPON_PATTERN.fullmatch(normalized) is None:
+        raise _invalid()
+    return normalized
+
+
+def _identifier(value: str) -> str:
+    return _required(value, MAXIMUM_IDENTIFIER_LENGTH)
+
+
+def _required(value: str, maximum: int) -> str:
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or any(not char.isprintable() for char in normalized)
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _integer(value: str, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise _invalid() from error
+    if str(parsed) != value or parsed < minimum or parsed > maximum:
+        raise _invalid()
+    return parsed
+
+
+def _page(cursor: str, limit: int) -> tuple[str, int]:
+    normalized = cursor.strip()
+    if len(normalized) > MAXIMUM_IDENTIFIER_LENGTH or limit < 1 or limit > 100:
+        raise _invalid()
+    return normalized, limit
+
+
+def _optional_scope(value: str) -> str | None:
+    return value or None
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _customer_audit(action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=None,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _invalid() -> CommerceError:
+    return CommerceError(CommerceErrorKind.INVALID, "commerce input is invalid")
+
+
+def _not_found() -> CommerceError:
+    return CommerceError(CommerceErrorKind.NOT_FOUND, "commerce record was not found")
+
+
+def _conflict() -> CommerceError:
+    return CommerceError(CommerceErrorKind.CONFLICT, "commerce state conflicts with the request")

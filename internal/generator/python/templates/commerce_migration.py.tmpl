@@ -1,0 +1,79 @@
+"""Create portable commerce operations storage and separated permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+from {{.PackageName}}.commerce import models as commerce_models
+
+revision: str = "000300_commerce"
+down_revision: str | None = {{if .Inventory}}"000290_erp_inventory"{{else if .CRM}}"000280_crm"{{else}}"000270_customer_accounts"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+TABLES = [
+    "commerce_carts",
+    "commerce_cart_lines",
+    "commerce_campaigns",
+    "commerce_coupons",
+    "commerce_orders",
+    "commerce_order_lines",
+    "commerce_checkout_idempotency",
+    "commerce_payment_intents",
+    "commerce_payment_events",
+    "commerce_refunds",
+    "commerce_fulfillments",
+    "commerce_returns",
+    "commerce_order_events",
+]
+PERMISSIONS = [
+    {"code": "commerce:orders:read", "description": "Read commerce orders"},
+    {
+        "code": "commerce:fulfillment:manage",
+        "description": "Manage fulfillment and returns",
+    },
+    {"code": "commerce:marketing:manage", "description": "Manage campaigns and coupons"},
+    {
+        "code": "commerce:payments:manage",
+        "description": "Reconcile and refund payments",
+    },
+]
+
+
+def upgrade() -> None:
+    """Create commerce tables and grant each separated permission to administrators."""
+    connection = op.get_bind()
+    for name in TABLES:
+        commerce_models.commerce_metadata.tables[name].create(connection, checkfirst=False)
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    op.bulk_insert(permissions, PERMISSIONS)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in PERMISSIONS],
+    )
+
+
+def downgrade() -> None:
+    """Remove commerce tables and their grants."""
+    connection = op.get_bind()
+    for name in reversed(TABLES):
+        commerce_models.commerce_metadata.tables[name].drop(connection, checkfirst=False)
+    codes = [row["code"] for row in PERMISSIONS]
+    role_permissions = sa.table(
+        "identity_role_permissions", sa.column("permission_code", sa.String)
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

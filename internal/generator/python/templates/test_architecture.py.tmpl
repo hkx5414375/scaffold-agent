@@ -55,6 +55,27 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/customers/{id}/suspend", "post"),
         ("/api/v1/customers/{id}/reactivate", "post"),
 {{- end}}
+{{- if .Commerce}}
+        ("/api/v1/storefront/cart", "get"),
+        ("/api/v1/storefront/cart/lines/{product_id}", "put"),
+        ("/api/v1/storefront/cart/lines/{product_id}/remove", "post"),
+        ("/api/v1/storefront/checkout", "post"),
+        ("/api/v1/storefront/orders", "get"),
+        ("/api/v1/storefront/orders/{id}", "get"),
+        ("/api/v1/storefront/orders/{id}/return", "post"),
+        ("/api/v1/storefront/sandbox/payments/{provider_ref}/complete", "post"),
+        ("/api/v1/commerce/orders", "get"),
+        ("/api/v1/commerce/orders/{id}/fulfillment/start", "post"),
+        ("/api/v1/commerce/orders/{id}/fulfillment/complete", "post"),
+        ("/api/v1/commerce/orders/{id}/return/complete", "post"),
+        ("/api/v1/commerce/orders/{id}/refund", "post"),
+        ("/api/v1/commerce/orders/{id}/reconcile", "post"),
+        ("/api/v1/commerce/campaigns", "get"),
+        ("/api/v1/commerce/campaigns", "post"),
+        ("/api/v1/commerce/campaigns/{id}/activate", "post"),
+        ("/api/v1/commerce/campaigns/{id}/archive", "post"),
+        ("/api/v1/commerce/coupons", "post"),
+{{- end}}
 {{- if .CRM}}
         ("/api/v1/crm/accounts", "post"),
         ("/api/v1/crm/accounts", "get"),
@@ -308,6 +329,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert inventory_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
+{{- if .Commerce}}
+
+    commerce_tree = ast.parse((PACKAGE / "commerce" / "service.py").read_text(encoding="utf-8"))
+    commerce_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(commerce_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert commerce_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

@@ -1,0 +1,297 @@
+"""Commerce migrations, transactions, replay, permissions, and scope contracts."""
+
+import os
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.catalog.models import (
+    CatalogStatus,
+    CatalogTransition,
+    CatalogWrite,
+    catalog_products,
+)
+from {{.PackageName}}.catalog.repository import SQLAlchemyCatalogRepository
+from {{.PackageName}}.catalog.service import CatalogService
+from {{.PackageName}}.commerce.gateway import SandboxPaymentGateway
+from {{.PackageName}}.commerce.models import (
+    CampaignInput,
+    CampaignTransition,
+    CartLineInput,
+    CartMutation,
+    CheckoutInput,
+    CouponInput,
+    DiscountKind,
+    OrderTransition,
+    PaymentStatus,
+    RefundInput,
+    ReturnInput,
+    commerce_campaigns,
+    commerce_cart_lines,
+    commerce_carts,
+    commerce_checkout_idempotency,
+    commerce_coupons,
+    commerce_fulfillments,
+    commerce_order_events,
+    commerce_order_lines,
+    commerce_orders,
+    commerce_payment_events,
+    commerce_payment_intents,
+    commerce_refunds,
+    commerce_returns,
+)
+from {{.PackageName}}.commerce.repository import SQLAlchemyCommerceRepository
+from {{.PackageName}}.commerce.service import CommerceService
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerRegistration,
+    customer_accounts,
+    customer_sessions,
+)
+from {{.PackageName}}.customer_accounts.repository import SQLAlchemyCustomerRepository
+from {{.PackageName}}.customer_accounts.service import CustomerAccountService
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import Principal, audit_events, role_permissions, users
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    user_id = "commerce-admin-" + suffix
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=suffix + "@example.com",
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    actor = Principal(
+        user_id=user_id,
+        email=suffix + "@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+{{- if .Tenancy}}
+    organization = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now).create(
+        "Commerce " + suffix, actor
+    )
+    actor = actor.model_copy(update={"organization_id": organization.id})
+    scope = organization.id
+{{- else}}
+    scope = ""
+{{- end}}
+    customer_service = CustomerAccountService(SQLAlchemyCustomerRepository(engine), lambda: now)
+    registered = customer_service.register(
+        scope,
+        CustomerRegistration(
+            email=suffix + "-customer@example.com",
+            password="correct-password",
+            display_name="Commerce customer",
+        ),
+        "127.0.0.1",
+        "pytest",
+    )
+    customer = customer_service.authenticate(scope, registered.token)
+    catalog = CatalogService(SQLAlchemyCatalogRepository(engine), lambda: now)
+    product = catalog.create(
+        CatalogWrite(
+            sku="SKU-" + suffix[:12],
+            name="Commerce product",
+            description="",
+            price_minor="1200",
+            currency="USD",
+        ),
+        actor,
+    )
+    product = catalog.publish(product.id, CatalogTransition(version="1"), actor)
+    assert product.status is CatalogStatus.ACTIVE
+    repository = SQLAlchemyCommerceRepository(engine)
+    gateway = SandboxPaymentGateway()
+    service = CommerceService(repository, SQLAlchemyCatalogRepository(engine), gateway, lambda: now)
+    campaign = service.create_campaign(
+        CampaignInput(
+            name="Database discount",
+            kind=DiscountKind.FIXED,
+            value="200",
+            minimum_minor="1000",
+            currency="USD",
+            priority=10,
+            starts_at=now - timedelta(hours=1),
+            ends_at=now + timedelta(hours=1),
+        ),
+        actor,
+    )
+    campaign = service.activate_campaign(campaign.id, CampaignTransition(version="1"), actor)
+    coupon = service.create_coupon(
+        CouponInput(campaign_id=campaign.id, code="db-save", maximum_uses="2"), actor
+    )
+    assert coupon.code == "DB-SAVE"
+    assert service.campaigns("", 20, actor).items == [campaign]
+    cart = service.put_line(
+        customer,
+        product.id,
+        CartLineInput(currency="USD", quantity="2", version="0"),
+    )
+    cart = service.remove_line(
+        customer,
+        product.id,
+        CartMutation(currency="USD", version=cart.version),
+    )
+    assert cart.lines == []
+    cart = service.put_line(
+        customer,
+        product.id,
+        CartLineInput(currency="USD", quantity="2", version=cart.version),
+    )
+    order = service.checkout(
+        customer,
+        CheckoutInput(
+            currency="USD",
+            version=cart.version,
+            coupon_code="",
+            idempotency_key="checkout-" + suffix,
+        ),
+    )
+    assert order.total_minor == "2200"
+    assert (
+        service.checkout(
+            customer,
+            CheckoutInput(
+                currency="USD",
+                version=cart.version,
+                coupon_code="",
+                idempotency_key="checkout-" + suffix,
+            ),
+        ).id
+        == order.id
+    )
+    gateway.complete(order.payment.provider_ref, PaymentStatus.SUCCEEDED.value)
+    order = service.complete_payment(order.payment.provider_ref, "event-" + suffix, "succeeded")
+    assert order.status.value == "confirmed"
+    assert (
+        service.complete_payment(order.payment.provider_ref, "event-" + suffix, "succeeded").id
+        == order.id
+    )
+    assert service.customer_order(customer, order.id).id == order.id
+    assert service.customer_orders(customer, "", 20).items[0].id == order.id
+    assert service.orders("", 20, actor).items[0].id == order.id
+    order = service.start_fulfillment(order.id, OrderTransition(version="2"), actor)
+    order = service.complete_fulfillment(
+        order.id,
+        OrderTransition(version="3", reference="shipment-" + suffix),
+        actor,
+    )
+    order = service.request_return(
+        customer,
+        order.id,
+        ReturnInput(version="4", reason="database contract return"),
+    )
+    order = service.complete_return(order.id, OrderTransition(version="5"), actor)
+    assert order.status.value == "returned"
+    assert (
+        service.refund(
+            order.id,
+            RefundInput(amount_minor="100", idempotency_key="refund-" + suffix),
+            actor,
+        ).payment.refunded_minor
+        == "100"
+    )
+    assert (
+        service.refund(
+            order.id,
+            RefundInput(amount_minor="100", idempotency_key="refund-" + suffix),
+            actor,
+        ).payment.refunded_minor
+        == "100"
+    )
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(commerce_carts)) == 1
+        assert connection.scalar(select(func.count()).select_from(commerce_orders)) == 1
+        assert connection.scalar(select(func.count()).select_from(commerce_campaigns)) == 1
+        codes = {
+            row[0]
+            for row in connection.execute(
+                select(role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.like("commerce:%")
+                )
+            )
+        }
+    assert codes == {
+        "commerce:orders:read",
+        "commerce:fulfillment:manage",
+        "commerce:marketing:manage",
+        "commerce:payments:manage",
+    }
+    with engine.begin() as connection:
+        connection.execute(delete(commerce_order_events))
+        connection.execute(delete(commerce_returns))
+        connection.execute(delete(commerce_fulfillments))
+        connection.execute(delete(commerce_refunds))
+        connection.execute(delete(commerce_payment_events))
+        connection.execute(delete(commerce_payment_intents))
+        connection.execute(delete(commerce_checkout_idempotency))
+        connection.execute(delete(commerce_order_lines))
+        connection.execute(delete(commerce_orders))
+        connection.execute(delete(commerce_coupons))
+        connection.execute(delete(commerce_cart_lines))
+        connection.execute(delete(commerce_carts))
+        connection.execute(delete(commerce_campaigns))
+        connection.execute(delete(catalog_products).where(catalog_products.c.id == product.id))
+        connection.execute(
+            delete(customer_sessions).where(customer_sessions.c.customer_id == customer.id)
+        )
+        connection.execute(delete(customer_accounts).where(customer_accounts.c.id == customer.id))
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_sqlite_transaction_contract() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_transaction_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _contract(engine)
+    finally:
+        engine.dispose()
