@@ -1,0 +1,168 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}};
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.List;
+import java.util.Objects;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcCSVTransferRepository implements CSVTransferRepository {
+
+    private static final String SELECT_COLUMNS =
+            "id{{if .Tenancy}}, organization_id{{end}}"
+{{- range .Business.Fields}}
+                    + ", {{javaSQL .Name}}"
+{{- end}}
+                    + ", version, created_at, updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcCSVTransferRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public void importBatch(
+            List<{{.Business.EntityClass}}> values, AuditEvent auditEvent) {
+        if (values == null || values.isEmpty() || values.size() > CSVTransferService.MAXIMUM_ROWS) {
+            throw new CSVTransferException(
+                    CSVTransferException.Kind.INVALID, "CSV import batch is invalid");
+        }
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        for ({{.Business.EntityClass}} value : values) {
+                            jdbcTemplate.update(
+                                    "insert into {{javaSQL .Business.TableName}} "
+                                            + "(id{{if .Tenancy}}, organization_id{{end}}"
+{{- range .Business.Fields}}
+                                            + ", {{javaSQL .Name}}"
+{{- end}}
+                                            + ", version, created_at, updated_at) "
+                                            + "values (?{{if .Tenancy}}, ?{{end}}{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)",
+                                    value.id(),
+{{- if .Tenancy}}
+                                    value.organizationId(),
+{{- end}}
+{{- range .Business.Fields}}
+                                    value.{{.JavaName}}(),
+{{- end}}
+                                    value.version(),
+                                    Timestamp.from(value.createdAt()),
+                                    Timestamp.from(value.updatedAt()));
+                        }
+                        appendAudit(auditEvent);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw new CSVTransferException(
+                    CSVTransferException.Kind.CONFLICT,
+                    "one or more rows conflict with existing data",
+                    exception);
+        }
+    }
+
+    @Override
+    public List<{{.Business.EntityClass}}> export(
+            String organizationId, int maximumRows, AuditEvent auditEvent) {
+        if (maximumRows < 1 || maximumRows > CSVTransferService.MAXIMUM_ROWS) {
+            throw new CSVTransferException(
+                    CSVTransferException.Kind.INVALID, "CSV export limit is invalid");
+        }
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            List<{{.Business.EntityClass}}> values =
+                                    jdbcTemplate.query(
+                                            "select " + SELECT_COLUMNS
+                                                    + " from {{javaSQL .Business.TableName}}"
+{{- if .Tenancy}}
+                                                    + " where organization_id = ?"
+{{- end}}
+                                                    + " order by id limit ?",
+                                            JdbcCSVTransferRepository::mapValue,
+                                            {{if .Tenancy}}new Object[] {organizationId, maximumRows + 1}{{else}}new Object[] {maximumRows + 1}{{end}});
+                            if (values.size() > maximumRows) {
+                                throw CSVTransferService.tooManyRows();
+                            }
+                            int bytes = CSVTransferService.headerSize();
+                            for ({{.Business.EntityClass}} value : values) {
+                                int rowBytes = CSVTransferService.recordSize(value);
+                                if (rowBytes > CSVTransferService.MAXIMUM_BYTES - bytes) {
+                                    throw CSVTransferService.tooLarge();
+                                }
+                                bytes += rowBytes;
+                            }
+                            appendAudit(auditEvent);
+                            return List.copyOf(values);
+                        }));
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static {{.Business.EntityClass}} mapValue(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new {{.Business.EntityClass}}(
+                resultSet.getString("id"),
+{{- if .Tenancy}}
+                resultSet.getString("organization_id"),
+{{- end}}
+{{- range .Business.Fields}}
+{{- if eq .JavaType "String"}}
+                resultSet.getString("{{.Name}}"),
+{{- else if eq .JavaType "Boolean"}}
+{{- if .Required}}
+                resultSet.getBoolean("{{.Name}}"),
+{{- else}}
+                resultSet.getObject("{{.Name}}", Boolean.class),
+{{- end}}
+{{- else if eq .JavaType "Long"}}
+{{- if .Required}}
+                resultSet.getLong("{{.Name}}"),
+{{- else}}
+                resultSet.getObject("{{.Name}}", Long.class),
+{{- end}}
+{{- else}}
+                instant(resultSet.getTimestamp("{{.Name}}")),
+{{- end}}
+{{- end}}
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+}

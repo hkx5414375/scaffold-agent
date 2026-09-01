@@ -42,6 +42,8 @@ const (
 	jobAdminVersion         = "0.1.0"
 	observabilityOwner      = "observability"
 	observabilityVersion    = "0.1.0"
+	csvTransferOwner        = "csv-import-export"
+	csvTransferVersion      = "0.1.0"
 )
 
 //go:embed all:templates
@@ -73,6 +75,7 @@ type databaseData struct {
 	FilesMigrationTemplate            string
 	CacheMigrationTemplate            string
 	JobAdminMigrationTemplate         string
+	CSVTransferMigrationTemplate      string
 }
 
 var databases = map[string]databaseData{
@@ -92,6 +95,7 @@ var databases = map[string]databaseData{
 		FilesMigrationTemplate:            "templates/files_postgresql.sql.tmpl",
 		CacheMigrationTemplate:            "templates/cache_postgresql.sql.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_postgresql.sql.tmpl",
+		CSVTransferMigrationTemplate:      "templates/csv_transfer_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -109,6 +113,7 @@ var databases = map[string]databaseData{
 		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
 		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
+		CSVTransferMigrationTemplate:      "templates/csv_transfer_mysql.sql.tmpl",
 	},
 }
 
@@ -119,6 +124,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: csvTransferOwner, Version: csvTransferVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Atomic bounded CSV import and audited spreadsheet-safe export.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -325,6 +340,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	cacheEnabled := false
 	jobAdminEnabled := false
 	observabilityEnabled := false
+	csvTransferEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -352,10 +368,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == observabilityOwner {
 			observabilityEnabled = true
 		}
+		if pack.Metadata.Name == csvTransferOwner {
+			csvTransferEnabled = true
+		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
 	if err != nil {
 		return generator.Result{}, err
+	}
+	if csvTransferEnabled && business == nil {
+		return generator.Result{}, fmt.Errorf("csv-import-export requires one generated business entity")
 	}
 
 	migrationCount := 1
@@ -383,6 +405,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if jobAdminEnabled {
 		migrationCount++
 	}
+	if csvTransferEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -401,6 +426,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Cache:            cacheEnabled,
 		JobAdmin:         jobAdminEnabled,
 		Observability:    observabilityEnabled,
+		CSVTransfer:      csvTransferEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -416,6 +442,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	cachePaths := make(map[string]struct{}, 9)
 	jobAdminPaths := make(map[string]struct{}, 11)
 	observabilityPaths := make(map[string]struct{}, 7)
+	csvTransferPaths := make(map[string]struct{}, 9)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -466,6 +493,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addObservabilityTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		observabilityPaths[path] = struct{}{}
+	}
+	addCSVTransferTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		csvTransferPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -688,6 +719,43 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		)
 		capabilityLock[observabilityOwner] = observabilityVersion
 	}
+	if csvTransferEnabled {
+		businessRoot := mainRoot + "/" + business.PackagePath + "/transfer"
+		businessTestRoot := testRoot + "/" + business.PackagePath + "/transfer"
+		addCSVTransferTarget(
+			businessRoot+"/CSVTransferException.java",
+			"templates/CSVTransferException.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessRoot+"/CSVTransferRepository.java",
+			"templates/CSVTransferRepository.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessRoot+"/JdbcCSVTransferRepository.java",
+			"templates/JdbcCSVTransferRepository.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessRoot+"/CSVTransferService.java",
+			"templates/CSVTransferService.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessRoot+"/CSVTransferController.java",
+			"templates/CSVTransferController.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessTestRoot+"/CSVTransferServiceTest.java",
+			"templates/CSVTransferServiceTest.java.tmpl",
+		)
+		addCSVTransferTarget(
+			businessTestRoot+"/CSVTransferDatabaseIntegrationTest.java",
+			"templates/CSVTransferDatabaseIntegrationTest.java.tmpl",
+		)
+		addCSVTransferTarget(
+			"src/main/resources/db/migration/V000240__csv_import_export.sql",
+			database.CSVTransferMigrationTemplate,
+		)
+		capabilityLock[csvTransferOwner] = csvTransferVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -759,6 +827,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isObservabilityPath := observabilityPaths[path]; isObservabilityPath {
 			owner = observabilityOwner
+		}
+		if _, isCSVTransferPath := csvTransferPaths[path]; isCSVTransferPath {
+			owner = csvTransferOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

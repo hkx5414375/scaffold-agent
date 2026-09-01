@@ -27,6 +27,8 @@ spec:
       version: 0.1.0
     - name: observability
       version: 0.1.0
+    - name: csv-import-export
+      version: 0.1.0
   modules:
     - name: tasks
       entities:

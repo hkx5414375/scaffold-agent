@@ -381,7 +381,7 @@ func TestJavaMySQLTenantJobAdministrationPlanApplyVerifyEndToEnd(t *testing.T) {
 
 func TestJavaPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
 	runGeneratedJavaCapabilities(
-		t, "postgresql", true, true, "0.3.0", false, true, true, true, true, true,
+		t, "postgresql", true, true, "0.3.0", false, true, true, true, true, true, true,
 	)
 }
 
@@ -391,6 +391,18 @@ func TestJavaPostgreSQLObservabilityPlanApplyVerifyEndToEnd(t *testing.T) {
 
 func TestJavaMySQLObservabilityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaObservabilityReference(t, "mysql", true, false, "")
+}
+
+func TestJavaPostgreSQLCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCSVTransferReference(t, "postgresql", true, "")
+}
+
+func TestJavaPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCSVTransferReference(t, "postgresql", true, "0.3.0")
+}
+
+func TestJavaMySQLTenantCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCSVTransferReference(t, "mysql", true, "0.3.0")
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -653,49 +665,56 @@ func runGeneratedJavaReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaJobsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaNotificationsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false, false, false, false, false)
 }
 
 func runGeneratedJavaFilesReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true, false, false, false, false)
 }
 
 func runGeneratedJavaCacheReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, true, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, true, false, false, false)
 }
 
 func runGeneratedJavaJobAdministrationReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, true, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, true, false, false)
 }
 
 func runGeneratedJavaObservabilityReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, true)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, true, false)
+}
+
+func runGeneratedJavaCSVTransferReference(
+	t *testing.T, database string, admin bool, tenancyVersion string,
+) {
+	t.Helper()
+	runGeneratedJavaCapabilities(t, database, true, admin, tenancyVersion, false, false, false, false, false, false, true)
 }
 
 func runGeneratedJavaCapabilities(
@@ -710,6 +729,7 @@ func runGeneratedJavaCapabilities(
 	cache bool,
 	jobAdmin bool,
 	observability bool,
+	csvTransfer bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -793,6 +813,14 @@ MODULES
       version: 0.1.0
 `
 	}
+	if csvTransfer {
+		if capabilities == "" {
+			capabilities = "  capabilities:\n"
+		}
+		capabilities += `    - name: csv-import-export
+      version: 0.1.0
+`
+	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
 	if business {
@@ -868,6 +896,9 @@ MODULES
 	if observability {
 		wantChanges += 6
 	}
+	if csvTransfer {
+		wantChanges += 8
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -900,6 +931,9 @@ MODULES
 	}
 	if observability && plannedData.CapabilityLock["observability"] != "0.1.0" {
 		t.Fatalf("Plan() observability lock = %#v", plannedData.CapabilityLock)
+	}
+	if csvTransfer && plannedData.CapabilityLock["csv-import-export"] != "0.1.0" {
+		t.Fatalf("Plan() CSV transfer lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

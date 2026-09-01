@@ -136,6 +136,21 @@ only `ready` or `unavailable`; `GET /healthz` remains independent of the databas
 Protect operational endpoints at the ingress or private-network boundary. Metrics
 reset when the process restarts and are not aggregated across replicas.
 {{end}}
+{{if .CSVTransfer}}
+
+## CSV import and export
+
+The administration API exposes `{{.Business.RoutePath}}/import`,
+`{{.Business.RoutePath}}/import-template`, and `{{.Business.RoutePath}}/export`
+with separate `:import` and `:export` permissions. CSV columns always follow the
+Blueprint field order. Each document is limited to 5 MiB and 1,000 data rows.
+
+Import is create-only: the complete document is parsed before persistence, and all
+rows plus one audit event commit in one transaction. Export uses one bounded,
+organization-scoped query and emits no partial document. Text cells that could be
+spreadsheet formulas use a reversible apostrophe escape. Use a background-job and
+object-storage workflow for larger migrations; do not relax these synchronous limits.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

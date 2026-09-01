@@ -1,0 +1,370 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}};
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class CSVTransferService {
+
+    public static final int MAXIMUM_ROWS = 1000;
+    public static final int MAXIMUM_BYTES = 5 << 20;
+
+    private static final List<String> HEADER =
+            List.of({{range $index, $field := .Business.Fields}}{{if $index}}, {{end}}"{{$field.Name}}"{{end}});
+
+    private final CSVTransferRepository repository;
+    private final Clock clock;
+
+    public CSVTransferService(CSVTransferRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    CSVTransferService(CSVTransferRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public int importCSV(InputStream source, Principal actor) {
+        String organizationId = actorScope(actor);
+        List<List<String>> records = parse(readBounded(source));
+        if (records.size() < 2) {
+            throw invalid("at least one data row is required");
+        }
+        List<String> actualHeader = new ArrayList<>(records.getFirst());
+        if (!actualHeader.isEmpty()) {
+            actualHeader.set(0, actualHeader.getFirst().replaceFirst("^\\uFEFF", ""));
+        }
+        if (!HEADER.equals(actualHeader)) {
+            throw invalid("CSV header does not match the generated contract");
+        }
+        if (records.size() - 1 > MAXIMUM_ROWS) {
+            throw tooManyRows();
+        }
+        Instant now = clock.instant();
+        List<{{.Business.EntityClass}}> values = new ArrayList<>(records.size() - 1);
+        for (int index = 1; index < records.size(); index++) {
+            List<String> record = records.get(index);
+            if (record.size() != HEADER.size()) {
+                throw invalid("row " + (index + 1) + " has an invalid field count");
+            }
+            values.add(decode(record, organizationId, now, index + 1));
+        }
+        repository.importBatch(
+                List.copyOf(values),
+                audit(actor, "{{.Business.PermissionPrefix}}:import", Integer.toString(values.size()), now));
+        return values.size();
+    }
+
+    public Export exportCSV(Principal actor) {
+        String organizationId = actorScope(actor);
+        Instant now = clock.instant();
+        List<{{.Business.EntityClass}}> values =
+                repository.export(
+                        organizationId,
+                        MAXIMUM_ROWS,
+                        audit(actor, "{{.Business.PermissionPrefix}}:export", "csv", now));
+        byte[] document = encodeDocument(values);
+        return new Export(document, values.size());
+    }
+
+    public byte[] templateCSV() {
+        return encodeRows(List.of(HEADER));
+    }
+
+    static int headerSize() {
+        return encodeRows(List.of(HEADER)).length;
+    }
+
+    static int recordSize({{.Business.EntityClass}} value) {
+        return encodeRows(List.of(record(value))).length;
+    }
+
+    private static {{.Business.EntityClass}} decode(
+            List<String> record, String organizationId, Instant now, int rowNumber) {
+{{- range $index, $field := .Business.Fields}}
+        String raw{{$field.GoName}} = decodeSpreadsheetCell(record.get({{$index}}));
+        validateText(raw{{$field.GoName}}, "{{$field.Name}}", rowNumber);
+{{- if $field.Required}}
+        if (raw{{$field.GoName}}.isEmpty()) {
+            throw invalid("row " + rowNumber + ": {{$field.Name}} is required");
+        }
+{{- end}}
+{{- if eq $field.JavaType "String"}}
+        if (!raw{{$field.GoName}}.isEmpty()
+                && (raw{{$field.GoName}}.isBlank()
+                        || raw{{$field.GoName}}.codePointCount(0, raw{{$field.GoName}}.length()) > {{$field.MaximumLength}})) {
+            throw invalid("row " + rowNumber + ": {{$field.Name}} is invalid");
+        }
+        String {{$field.JavaName}} = raw{{$field.GoName}}.isEmpty() ? null : raw{{$field.GoName}};
+{{- else if eq $field.JavaType "Boolean"}}
+        {{if $field.Required}}boolean{{else}}Boolean{{end}} {{$field.JavaName}};
+        if (raw{{$field.GoName}}.isEmpty()) {
+            {{$field.JavaName}} = {{if $field.Required}}false{{else}}null{{end}};
+        } else if ("true".equals(raw{{$field.GoName}}) || "false".equals(raw{{$field.GoName}})) {
+            {{$field.JavaName}} = Boolean.parseBoolean(raw{{$field.GoName}});
+        } else {
+            throw invalid("row " + rowNumber + ": {{$field.Name}} must be true or false");
+        }
+{{- else if eq $field.JavaType "Long"}}
+        {{if $field.Required}}long{{else}}Long{{end}} {{$field.JavaName}};
+        try {
+            {{$field.JavaName}} = raw{{$field.GoName}}.isEmpty() ? {{if $field.Required}}0L{{else}}null{{end}} : Long.parseLong(raw{{$field.GoName}});
+        } catch (NumberFormatException exception) {
+            throw invalid("row " + rowNumber + ": {{$field.Name}} must be a base-10 int64");
+        }
+{{- else}}
+        Instant {{$field.JavaName}};
+        try {
+            {{$field.JavaName}} = raw{{$field.GoName}}.isEmpty() ? null : Instant.parse(raw{{$field.GoName}});
+        } catch (DateTimeParseException exception) {
+            throw invalid("row " + rowNumber + ": {{$field.Name}} must use RFC3339");
+        }
+{{- end}}
+{{- end}}
+        return new {{.Business.EntityClass}}(
+                UUID.randomUUID().toString(),
+{{- if .Tenancy}}
+                organizationId,
+{{- end}}
+{{- range .Business.Fields}}
+                {{.JavaName}},
+{{- end}}
+                1L,
+                now,
+                now);
+    }
+
+    private static byte[] encodeDocument(List<{{.Business.EntityClass}}> values) {
+        if (values.size() > MAXIMUM_ROWS) {
+            throw tooManyRows();
+        }
+        List<List<String>> rows = new ArrayList<>(values.size() + 1);
+        rows.add(HEADER);
+        for ({{.Business.EntityClass}} value : values) {
+            rows.add(record(value));
+        }
+        return encodeRows(rows);
+    }
+
+    private static List<String> record({{.Business.EntityClass}} value) {
+        return List.of(
+{{- range $index, $field := .Business.Fields}}
+                {{if $index}},{{end}}{{if eq $field.JavaType "String"}}encodeSpreadsheetCell(value.{{$field.JavaName}}()){{else if eq $field.JavaType "Boolean"}}{{if $field.Required}}Boolean.toString(value.{{$field.JavaName}}()){{else}}value.{{$field.JavaName}}() == null ? "" : Boolean.toString(value.{{$field.JavaName}}()){{end}}{{else if eq $field.JavaType "Long"}}{{if $field.Required}}Long.toString(value.{{$field.JavaName}}()){{else}}value.{{$field.JavaName}}() == null ? "" : Long.toString(value.{{$field.JavaName}}()){{end}}{{else}}{{if $field.Required}}value.{{$field.JavaName}}().toString(){{else}}value.{{$field.JavaName}}() == null ? "" : value.{{$field.JavaName}}().toString(){{end}}{{end}}
+{{- end}});
+    }
+
+    private static byte[] encodeRows(List<List<String>> rows) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        for (List<String> row : rows) {
+            for (int index = 0; index < row.size(); index++) {
+                if (index > 0) {
+                    output.write(',');
+                }
+                writeCell(output, row.get(index));
+            }
+            output.write('\n');
+            if (output.size() > MAXIMUM_BYTES) {
+                throw tooLarge();
+            }
+        }
+        return output.toByteArray();
+    }
+
+    private static void writeCell(ByteArrayOutputStream output, String value) {
+        String normalized = value == null ? "" : value;
+        boolean quoted = normalized.indexOf(',') >= 0
+                || normalized.indexOf('"') >= 0
+                || normalized.indexOf('\r') >= 0
+                || normalized.indexOf('\n') >= 0;
+        String encoded = quoted ? "\"" + normalized.replace("\"", "\"\"") + "\"" : normalized;
+        byte[] bytes = encoded.getBytes(StandardCharsets.UTF_8);
+        output.writeBytes(bytes);
+        if (output.size() > MAXIMUM_BYTES) {
+            throw tooLarge();
+        }
+    }
+
+    private static List<List<String>> parse(byte[] payload) {
+        String document;
+        try {
+            document = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(payload))
+                    .toString();
+        } catch (CharacterCodingException exception) {
+            throw invalid("CSV must use valid UTF-8");
+        }
+        List<List<String>> records = new ArrayList<>();
+        List<String> row = new ArrayList<>();
+        StringBuilder field = new StringBuilder();
+        boolean quoted = false;
+        boolean afterQuote = false;
+        for (int index = 0; index < document.length(); index++) {
+            char character = document.charAt(index);
+            if (quoted) {
+                if (character == '"') {
+                    if (index + 1 < document.length() && document.charAt(index + 1) == '"') {
+                        field.append('"');
+                        index++;
+                    } else {
+                        quoted = false;
+                        afterQuote = true;
+                    }
+                } else {
+                    field.append(character);
+                }
+                continue;
+            }
+            if (afterQuote && character != ',' && character != '\r' && character != '\n') {
+                throw invalid("characters after a quoted field are invalid");
+            }
+            if (character == '"') {
+                if (field.length() != 0 || afterQuote) {
+                    throw invalid("quote placement is invalid");
+                }
+                quoted = true;
+            } else if (character == ',') {
+                row.add(field.toString());
+                field.setLength(0);
+                afterQuote = false;
+            } else if (character == '\n' || character == '\r') {
+                if (character == '\r'
+                        && index + 1 < document.length()
+                        && document.charAt(index + 1) == '\n') {
+                    index++;
+                }
+                row.add(field.toString());
+                field.setLength(0);
+                records.add(List.copyOf(row));
+                row.clear();
+                afterQuote = false;
+                if (records.size() > MAXIMUM_ROWS + 1) {
+                    throw tooManyRows();
+                }
+            } else {
+                field.append(character);
+            }
+        }
+        if (quoted) {
+            throw invalid("quoted field is not closed");
+        }
+        if (field.length() > 0 || !row.isEmpty() || afterQuote) {
+            row.add(field.toString());
+            records.add(List.copyOf(row));
+        }
+        return List.copyOf(records);
+    }
+
+    private static byte[] readBounded(InputStream source) {
+        if (source == null) {
+            throw invalid("CSV body is required");
+        }
+        try {
+            byte[] payload = source.readNBytes(MAXIMUM_BYTES + 1);
+            if (payload.length > MAXIMUM_BYTES) {
+                throw tooLarge();
+            }
+            return payload;
+        } catch (IOException exception) {
+            throw new CSVTransferException(
+                    CSVTransferException.Kind.INVALID, "CSV body could not be read", exception);
+        }
+    }
+
+    private static void validateText(String value, String name, int rowNumber) {
+        if (value.indexOf('\0') >= 0
+                || value.codePoints().anyMatch(Character::isISOControl)) {
+            throw invalid("row " + rowNumber + ": " + name + " contains invalid text");
+        }
+    }
+
+    private static String encodeSpreadsheetCell(String value) {
+        if (value == null || value.isEmpty()) {
+            return value == null ? "" : value;
+        }
+        char first = value.charAt(0);
+        return first == '\'' || first == '=' || first == '+' || first == '-' || first == '@'
+                ? "'" + value
+                : value;
+    }
+
+    private static String decodeSpreadsheetCell(String value) {
+        if (value.startsWith("''")) {
+            return value.substring(1);
+        }
+        if (value.length() > 1 && value.charAt(0) == '\'') {
+            char marker = value.charAt(1);
+            if (marker == '=' || marker == '+' || marker == '-' || marker == '@') {
+                return value.substring(1);
+            }
+        }
+        return value;
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || actor.userId() == null || actor.userId().isBlank(){{if .Tenancy}}
+                || actor.organizationId() == null || actor.organizationId().isBlank(){{end}}) {
+            throw invalid("authenticated actor is required");
+        }
+{{- if .Tenancy}}
+        return actor.organizationId().trim();
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(
+                UUID.randomUUID().toString(),
+                actor.userId(),
+                action,
+                "succeeded",
+                target,
+                "",
+                "",
+                now);
+    }
+
+    private static CSVTransferException invalid(String message) {
+        return new CSVTransferException(CSVTransferException.Kind.INVALID, message);
+    }
+
+    static CSVTransferException tooLarge() {
+        return new CSVTransferException(
+                CSVTransferException.Kind.TOO_LARGE, "CSV exceeds the byte limit");
+    }
+
+    static CSVTransferException tooManyRows() {
+        return new CSVTransferException(
+                CSVTransferException.Kind.TOO_MANY_ROWS, "CSV exceeds the row limit");
+    }
+
+    public record Export(byte[] document, int count) {
+
+        public Export {
+            document = document.clone();
+        }
+
+        @Override
+        public byte[] document() {
+            return document.clone();
+        }
+    }
+}

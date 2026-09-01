@@ -1,0 +1,100 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}};
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class CSVTransferServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final String HEADER = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{$field.Name}}{{end}}\n";
+
+    @Test
+    void importsExportsAndEscapesSpreadsheetFormulas() {
+        FakeRepository repository = new FakeRepository();
+        CSVTransferService service =
+                new CSVTransferService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+        String document = HEADER + "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if eq $field.JavaType "String"}}{{if eq $index 0}}'=formula{{else}}sample{{end}}{{else if eq $field.JavaType "Boolean"}}true{{else if eq $field.JavaType "Long"}}1{{else}}2026-09-01T00:00:00Z{{end}}{{end}}\n";
+
+        int imported =
+                service.importCSV(
+                        new ByteArrayInputStream(document.getBytes(StandardCharsets.UTF_8)),
+                        actor("admin-1"));
+        CSVTransferService.Export exported = service.exportCSV(actor("admin-1"));
+
+        assertThat(imported).isEqualTo(1);
+        assertThat(repository.values).hasSize(1);
+        assertThat(repository.values.getFirst().version()).isEqualTo(1L);
+{{- if .Tenancy}}
+        assertThat(repository.values.getFirst().organizationId()).isEqualTo("organization-1");
+{{- end}}
+        assertThat(new String(exported.document(), StandardCharsets.UTF_8))
+                .startsWith(HEADER)
+                .contains("'=formula");
+        assertThat(repository.auditEvent.action()).isEqualTo("{{.Business.PermissionPrefix}}:export");
+        assertThat(service.templateCSV()).isEqualTo(HEADER.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void rejectsInvalidAndUnboundedDocumentsBeforePersistence() {
+        FakeRepository repository = new FakeRepository();
+        CSVTransferService service =
+                new CSVTransferService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertThatThrownBy(
+                        () ->
+                                service.importCSV(
+                                        new ByteArrayInputStream("wrong\nvalue\n".getBytes(StandardCharsets.UTF_8)),
+                                        actor("admin-1")))
+                .isInstanceOf(CSVTransferException.class)
+                .hasFieldOrPropertyWithValue("kind", CSVTransferException.Kind.INVALID);
+        byte[] tooLarge = new byte[CSVTransferService.MAXIMUM_BYTES + 1];
+        assertThatThrownBy(
+                        () ->
+                                service.importCSV(
+                                        new ByteArrayInputStream(tooLarge), actor("admin-1")))
+                .isInstanceOf(CSVTransferException.class)
+                .hasFieldOrPropertyWithValue("kind", CSVTransferException.Kind.TOO_LARGE);
+        assertThat(repository.values).isEmpty();
+    }
+
+    private static Principal actor(String userId) {
+        return new Principal(
+                userId,
+                "admin@example.com",
+                "admin",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+    private static final class FakeRepository implements CSVTransferRepository {
+
+        private List<{{.Business.EntityClass}}> values = new ArrayList<>();
+        private AuditEvent auditEvent;
+
+        @Override
+        public void importBatch(
+                List<{{.Business.EntityClass}}> imported, AuditEvent audit) {
+            values = new ArrayList<>(imported);
+            auditEvent = audit;
+        }
+
+        @Override
+        public List<{{.Business.EntityClass}}> export(
+                String organizationId, int maximumRows, AuditEvent audit) {
+            auditEvent = audit;
+            return List.copyOf(values);
+        }
+    }
+}

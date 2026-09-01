@@ -1,0 +1,162 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class CSVTransferDatabaseIntegrationTest {
+
+    private static final String HEADER = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{$field.Name}}{{end}}\n";
+    private static final String ROW_ONE = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if eq $field.JavaType "String"}}{{if eq $index 0}}'=formula{{else}}first{{end}}{{else if eq $field.JavaType "Boolean"}}true{{else if eq $field.JavaType "Long"}}1{{else}}2026-09-01T00:00:00Z{{end}}{{end}}\n";
+    private static final String ROW_TWO = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if eq $field.JavaType "String"}}second{{else if eq $field.JavaType "Boolean"}}false{{else if eq $field.JavaType "Long"}}2{{else}}2026-09-02T00:00:00Z{{end}}{{end}}\n";
+
+    @Test
+    @Timeout(45)
+    void importsAtomicallyAndExportsOnlyTheActorScope() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_csv_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal loginActor =
+                    identity.login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+            Principal actor = loginActor;
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Acme", loginActor);
+            actor = scoped(loginActor, organization.id());
+{{- end}}
+            Principal scopedActor = actor;
+            CSVTransferService service =
+                    new CSVTransferService(
+                            new JdbcCSVTransferRepository(jdbc, transactions));
+            int imported = service.importCSV(stream(HEADER + ROW_ONE), scopedActor);
+            assertThat(imported).isEqualTo(1);
+
+            Principal unknown =
+                    new Principal(
+                            "missing-user",
+                            "missing@example.com",
+                            "admin",
+                            "session"{{if .Tenancy}},
+                            scopedActor.organizationId(){{end}});
+            assertThatThrownBy(() -> service.importCSV(stream(HEADER + ROW_TWO), unknown))
+                    .isInstanceOf(RuntimeException.class);
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from {{javaSQL .Business.TableName}}",
+                            Integer.class))
+                    .isEqualTo(1);
+{{- if .Tenancy}}
+            Organization other = tenancy.create("Other", loginActor);
+            service.importCSV(stream(HEADER + ROW_TWO), scoped(loginActor, other.id()));
+{{- end}}
+
+            CSVTransferService.Export exported = service.exportCSV(scopedActor);
+            String document = new String(exported.document(), StandardCharsets.UTF_8);
+            assertThat(exported.count()).isEqualTo(1);
+            assertThat(document).startsWith(HEADER).contains("'=formula").doesNotContain("second");
+            assertThat(jdbc.queryForObject(
+                            "select count(*) from audit_events where action in (?, ?)",
+                            Integer.class,
+                            "{{.Business.PermissionPrefix}}:import",
+                            "{{.Business.PermissionPrefix}}:export"))
+                    .isEqualTo({{if .Tenancy}}3{{else}}2{{end}});
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+{{- if .Tenancy}}
+    private static Principal scoped(Principal actor, String organizationId) {
+        return new Principal(
+                actor.userId(), actor.email(), actor.role(), actor.method(), organizationId);
+    }
+
+{{- end}}
+    private static ByteArrayInputStream stream(String value) {
+        return new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

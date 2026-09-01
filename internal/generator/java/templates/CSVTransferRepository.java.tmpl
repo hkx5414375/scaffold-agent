@@ -1,0 +1,13 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}};
+import java.util.List;
+
+public interface CSVTransferRepository {
+
+    void importBatch(List<{{.Business.EntityClass}}> values, AuditEvent auditEvent);
+
+    List<{{.Business.EntityClass}}> export(
+            String organizationId, int maximumRows, AuditEvent auditEvent);
+}

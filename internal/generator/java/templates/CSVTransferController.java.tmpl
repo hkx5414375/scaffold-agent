@@ -1,0 +1,94 @@
+package {{.PackageName}}.{{.Business.PackageName}}.transfer;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("{{.Business.RoutePath}}")
+public final class CSVTransferController {
+
+    private final CSVTransferService service;
+
+    public CSVTransferController(CSVTransferService service) {
+        this.service = service;
+    }
+
+    @PostMapping("/import")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:import"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<ImportResult> importCSV(
+            HttpServletRequest request,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        requireCSV(request.getContentType());
+        try {
+            int imported = service.importCSV(request.getInputStream(), actor);
+            return ResponseEntity.status(HttpStatus.CREATED).body(new ImportResult(imported));
+        } catch (IOException exception) {
+            throw new CSVTransferException(
+                    CSVTransferException.Kind.INVALID,
+                    "CSV body could not be read",
+                    exception);
+        }
+    }
+
+    @GetMapping("/import-template")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:import"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<byte[]> template() {
+        return csv("{{.Business.ModuleName}}-{{.Business.EntityName}}-template.csv", service.templateCSV(), null);
+    }
+
+    @GetMapping("/export")
+    @RequirePermission(value = "{{.Business.PermissionPrefix}}:export"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<byte[]> export(
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        CSVTransferService.Export result = service.exportCSV(actor);
+        return csv("{{.Business.ModuleName}}-{{.Business.EntityName}}.csv", result.document(), result.count());
+    }
+
+    private static ResponseEntity<byte[]> csv(String filename, byte[] document, Integer count) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(new MediaType("text", "csv", StandardCharsets.UTF_8));
+        headers.setContentDisposition(
+                ContentDisposition.attachment().filename(filename, StandardCharsets.UTF_8).build());
+        headers.setCacheControl(CacheControl.noStore());
+        headers.set("X-Content-Type-Options", "nosniff");
+        if (count != null) {
+            headers.set("X-Exported-Count", Integer.toString(count));
+        }
+        return ResponseEntity.ok().headers(headers).body(document.clone());
+    }
+
+    private static void requireCSV(String contentType) {
+        try {
+            MediaType mediaType = MediaType.parseMediaType(contentType == null ? "" : contentType);
+            if (!"text".equalsIgnoreCase(mediaType.getType())
+                    || !"csv".equalsIgnoreCase(mediaType.getSubtype())) {
+                throw unsupportedMediaType();
+            }
+        } catch (IllegalArgumentException exception) {
+            throw unsupportedMediaType();
+        }
+    }
+
+    private static CSVTransferException unsupportedMediaType() {
+        return new CSVTransferException(
+                CSVTransferException.Kind.UNSUPPORTED_MEDIA_TYPE,
+                "Content-Type must be text/csv");
+    }
+
+    public record ImportResult(int imported) {}
+}

@@ -7,6 +7,9 @@ import {{.PackageName}}.files.FileAssetException;
 {{- if .JobAdmin}}
 import {{.PackageName}}.jobadmin.JobAdministrationException;
 {{- end}}
+{{- if .CSVTransfer}}
+import {{.PackageName}}.{{.Business.PackageName}}.transfer.CSVTransferException;
+{{- end}}
 {{- if .Business}}
 import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}}Exception;
 {{- end}}
@@ -157,6 +160,29 @@ public final class ApiExceptionHandler {
                     response(HttpStatus.NOT_FOUND, "jobs.not_found", exception.getMessage());
             case CONFLICT ->
                     response(HttpStatus.CONFLICT, "jobs.not_retryable", exception.getMessage());
+        };
+    }
+{{- end}}
+{{- if .CSVTransfer}}
+    @ExceptionHandler(CSVTransferException.class)
+    public ResponseEntity<ApiError> csvTransfer(CSVTransferException exception) {
+        return switch (exception.kind()) {
+            case INVALID ->
+                    response(HttpStatus.BAD_REQUEST, "csv.invalid", exception.getMessage());
+            case TOO_LARGE ->
+                    response(HttpStatus.PAYLOAD_TOO_LARGE, "csv.too_large", exception.getMessage());
+            case TOO_MANY_ROWS ->
+                    response(
+                            HttpStatus.valueOf(422),
+                            "csv.too_many_rows",
+                            exception.getMessage());
+            case CONFLICT ->
+                    response(HttpStatus.CONFLICT, "csv.conflict", exception.getMessage());
+            case UNSUPPORTED_MEDIA_TYPE ->
+                    response(
+                            HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                            "csv.unsupported_media_type",
+                            exception.getMessage());
         };
     }
 {{- end}}

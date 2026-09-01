@@ -642,6 +642,101 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 {{- end}}
+{{- if .CSVTransfer}}
+  {{.Business.RoutePath}}/import:
+    post:
+      operationId: import{{.Business.EntityClass}}CSV
+      x-required-permission: {{.Business.PermissionPrefix}}:import
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+{{- if .Tenancy}}
+      parameters:
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Entire validated CSV batch inserted atomically
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CSVImportResult"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "415":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+  {{.Business.RoutePath}}/import-template:
+    get:
+      operationId: download{{.Business.EntityClass}}CSVTemplate
+      x-required-permission: {{.Business.PermissionPrefix}}:import
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+{{- if .Tenancy}}
+      parameters:
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+      responses:
+        "200":
+          description: Header-only generated CSV template
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  {{.Business.RoutePath}}/export:
+    get:
+      operationId: export{{.Business.EntityClass}}CSV
+      x-required-permission: {{.Business.PermissionPrefix}}:export
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+{{- if .Tenancy}}
+      parameters:
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+      responses:
+        "200":
+          description: Bounded tenant-scoped spreadsheet-safe CSV export
+          headers:
+            X-Exported-Count:
+              schema:
+                type: integer
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+{{- end}}
 {{- if .Business}}
   {{.Business.RoutePath}}:
     post:
@@ -949,6 +1044,17 @@ components:
             $ref: "#/components/schemas/JobAdministrationItem"
         next_cursor:
           type: string
+{{- end}}
+{{- if .CSVTransfer}}
+    CSVImportResult:
+      type: object
+      additionalProperties: false
+      required: [imported]
+      properties:
+        imported:
+          type: integer
+          minimum: 1
+          maximum: 1000
 {{- end}}
     StatusResponse:
       type: object

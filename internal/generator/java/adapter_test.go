@@ -753,6 +753,64 @@ func TestGenerateObservabilityForBothDatabases(t *testing.T) {
 	}
 }
 
+func TestGenerateCSVImportExportForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Modules = []spec.Module{businessModule()}
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: csvTransferOwner, Version: csvTransferVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 48 ||
+				result.CapabilityLock[csvTransferOwner] != csvTransferVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/tasks/transfer/CSVTransferService.java",
+				"src/main/java/com/scaffold/generated/demoservice/tasks/transfer/JdbcCSVTransferRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/tasks/transfer/CSVTransferController.java",
+				"src/test/java/com/scaffold/generated/demoservice/tasks/transfer/CSVTransferDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000240__csv_import_export.sql",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != csvTransferOwner {
+					t.Errorf("Generate() CSV transfer output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated CSV OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/tasks/import:") ||
+				!strings.Contains(string(openAPI), "tasks:task:export") {
+				t.Fatalf("generated CSV OpenAPI is incomplete:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestGenerateCSVImportExportRequiresBusinessEntity(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: csvTransferOwner, Version: csvTransferVersion,
+	}}
+	_, err := New().Generate(context.Background(), project)
+	if err == nil || !strings.Contains(err.Error(), "requires one generated business entity") {
+		t.Fatalf("Generate() error = %v", err)
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 
