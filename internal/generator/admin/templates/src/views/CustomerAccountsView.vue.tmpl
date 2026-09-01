@@ -1,0 +1,140 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import type { CustomerAccount, CustomerPage, CustomerStatus } from "../types";
+
+const resourcePath = "/api/v1/customers";
+const rows = ref<CustomerAccount[]>([]);
+const loading = ref(false);
+const filter = ref<CustomerStatus | "">("");
+const currentCursor = ref("");
+const nextCursor = ref("");
+const cursorHistory = ref<string[]>([]);
+
+onMounted(() => loadPage(""));
+
+async function loadPage(cursor: string): Promise<void> {
+  loading.value = true;
+  try {
+    const query = new URLSearchParams({ limit: "20" });
+    if (cursor) query.set("cursor", cursor);
+    if (filter.value) query.set("status", filter.value);
+    const page = await request<CustomerPage>(`${resourcePath}?${query}`);
+    rows.value = page.items;
+    currentCursor.value = cursor;
+    nextCursor.value = page.next_cursor ?? "";
+  } catch (error) {
+    showError(error, "Customers could not be loaded");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function transition(customer: CustomerAccount, action: "suspend" | "reactivate"): Promise<void> {
+  if (action === "suspend") {
+    try {
+      await ElMessageBox.confirm(
+        "Suspension immediately revokes every storefront session for this customer.",
+        "Suspend customer",
+        { type: "warning", confirmButtonText: "Suspend" },
+      );
+    } catch {
+      return;
+    }
+  }
+  try {
+    await request<CustomerAccount>(`${resourcePath}/${customer.id}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: customer.version }),
+    });
+    ElMessage.success(action === "suspend" ? "Customer suspended" : "Customer reactivated");
+    await loadPage(currentCursor.value);
+  } catch (error) {
+    showError(error, `Customer could not be ${action === "suspend" ? "suspended" : "reactivated"}`);
+  }
+}
+
+async function nextPage(): Promise<void> {
+  if (!nextCursor.value) return;
+  cursorHistory.value.push(currentCursor.value);
+  await loadPage(nextCursor.value);
+}
+
+async function previousPage(): Promise<void> {
+  const cursor = cursorHistory.value.pop();
+  if (cursor === undefined) return;
+  await loadPage(cursor);
+}
+
+function resetFilter(): void {
+  cursorHistory.value = [];
+  void loadPage("");
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section>
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">Storefront identity</p>
+        <h1>Customer accounts</h1>
+        <p class="muted">Customer sessions and identities remain separate from staff access.</p>
+      </div>
+      <el-select
+        v-model="filter"
+        aria-label="Customer status"
+        clearable
+        placeholder="All statuses"
+        @change="resetFilter"
+      >
+        <el-option label="Active" value="active" />
+        <el-option label="Suspended" value="suspended" />
+        <el-option label="Closed" value="closed" />
+      </el-select>
+    </div>
+
+    <el-card shadow="never">
+      <el-table v-loading="loading" :data="rows" row-key="id">
+        <el-table-column label="Customer" prop="display_name" min-width="180" />
+        <el-table-column label="Email" prop="email" min-width="240" />
+        <el-table-column label="Status" width="120">
+          <template #default="scope">
+            <el-tag effect="plain" :type="scope.row.status === 'active' ? 'success' : 'info'">
+              {{ "{{" }} scope.row.status {{ "}}" }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="Version" prop="version" width="100" />
+        <el-table-column label="Actions" width="150" fixed="right">
+          <template #default="scope">
+            <el-button
+              v-if="scope.row.status === 'active'"
+              link
+              type="danger"
+              @click="transition(scope.row, 'suspend')"
+              >Suspend</el-button
+            >
+            <el-button
+              v-else-if="scope.row.status === 'suspended'"
+              link
+              type="success"
+              @click="transition(scope.row, 'reactivate')"
+              >Reactivate</el-button
+            >
+            <span v-else class="muted">Terminal</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="pagination-actions">
+        <el-button :disabled="cursorHistory.length === 0" @click="previousPage">Previous</el-button>
+        <el-button :disabled="!nextCursor" @click="nextPage">Next</el-button>
+      </div>
+    </el-card>
+  </section>
+</template>

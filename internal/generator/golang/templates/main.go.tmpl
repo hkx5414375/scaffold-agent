@@ -29,6 +29,11 @@ import (
 	cataloghttp "{{.ModulePath}}/internal/catalog/httpapi"
 	catalogdatabase "{{.ModulePath}}/internal/catalog/{{.Database.PackageName}}"
 {{- end}}
+{{- if .CustomerAccounts}}
+	"{{.ModulePath}}/internal/customeraccounts"
+	customerhttp "{{.ModulePath}}/internal/customeraccounts/httpapi"
+	customerdatabase "{{.ModulePath}}/internal/customeraccounts/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Files}}
 	"{{.ModulePath}}/internal/files"
 	fileshttp "{{.ModulePath}}/internal/files/httpapi"
@@ -129,6 +134,10 @@ func run() error {
 	catalogService := catalog.NewService(catalogdatabase.New(pool))
 	catalogAPI := cataloghttp.New(catalogService)
 {{- end}}
+{{- if .CustomerAccounts}}
+	customerService := customeraccounts.NewService(customerdatabase.New(pool))
+	customerAPI := customerhttp.New(customerService, secureCookies)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -162,6 +171,9 @@ func run() error {
 {{- end}}
 {{- if .Catalog}}
 		catalogAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .CustomerAccounts}}
+		customerAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .JobAdmin}}
 		jobAdminAPI.Register(mux, identityAPI)

@@ -47,6 +47,11 @@ separate submitter and reviewer permissions, optimistic transitions, and immutab
 It also contains `commerce-catalog` with canonical SKUs, integer minor-unit
 prices, audited publication, optimistic concurrency, and active-only public reads.
 {{end}}
+{{if .CustomerAccounts}}
+It also contains `customer-accounts` with a customer-only session cookie,
+scoped email identity, optimistic lifecycle management, session revocation, and
+employee administration permissions that remain separate from storefront identity.
+{{end}}
 
 ## Requirements
 
@@ -176,6 +181,19 @@ runtime secret store; queued message bodies are sensitive database content.
 - `GET /api/v1/storefront/products`
 - `GET /api/v1/storefront/products/{id}`
 {{end}}
+{{if .CustomerAccounts}}
+- `POST /api/v1/storefront/account/register`
+- `POST /api/v1/storefront/account/login`
+- `POST /api/v1/storefront/account/logout`
+- `GET /api/v1/storefront/account/me`
+- `PUT /api/v1/storefront/account/profile`
+- `PUT /api/v1/storefront/account/password`
+- `POST /api/v1/storefront/account/close`
+- `GET /api/v1/customers`
+- `GET /api/v1/customers/{id}`
+- `POST /api/v1/customers/{id}/suspend`
+- `POST /api/v1/customers/{id}/reactivate`
+{{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
 - `GET {{.Business.RoutePath}}`
@@ -234,6 +252,16 @@ organization. Prices and optimistic versions are decimal strings in JSON, so
 browser clients do not lose `int64` precision. Public routes require no login but
 return active products only; tenant projects require `X-Organization-ID` and hide
 products while that organization is inactive.
+{{end}}
+{{if .CustomerAccounts}}
+
+Storefront customer accounts do not use staff roles, staff API tokens, or the
+`scaffold_session` cookie. Their raw 30-day token is returned only as the
+`scaffold_customer_session` HttpOnly cookie, while the database stores SHA-256
+digests. Password changes, self-closure, suspension, and reactivation revoke all
+customer sessions. Closed accounts are retained as terminal principals for
+future order references. This version intentionally does not generate email
+verification or password recovery without a notification-dependent capability.
 {{end}}
 {{if .Admin}}
 ## Administration UI

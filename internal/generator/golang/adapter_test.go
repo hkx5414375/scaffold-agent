@@ -881,6 +881,95 @@ func TestCommerceCatalogRequiresLifecycleTenancyWhenScoped(t *testing.T) {
 	}
 }
 
+func TestGenerateCustomerAccountsAcrossDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, engine := range []string{"postgresql", "mysql"} {
+		engine := engine
+		t.Run(engine, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = engine
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+				{Name: customerCapability, Version: customerVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if generated.CapabilityLock[customerCapability] != customerVersion {
+				t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+			}
+			storePath := "internal/customeraccounts/" + databaseTemplates[engine].Data.PackageName + "/store.go"
+			for _, path := range []string{
+				"internal/customeraccounts/accounts.go",
+				"internal/customeraccounts/accounts_test.go",
+				"internal/customeraccounts/httpapi/handler.go",
+				"internal/customeraccounts/httpapi/handler_test.go",
+				storePath,
+				"internal/platform/migrate/migrations/000270_customer_accounts.sql",
+				"web/admin/src/views/CustomerAccountsView.vue",
+				"web/storefront/app/pages/account/index.vue",
+				"web/storefront/app/pages/account/login.vue",
+				"web/storefront/server/api/storefront/account/login.post.ts",
+				"web/storefront/server/utils/customer.ts",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != customerCapability {
+					t.Errorf("Generate() customer output %s is missing or has the wrong owner", path)
+				}
+			}
+			for _, output := range generated.Outputs {
+				if !strings.HasSuffix(output.Path, ".go") {
+					continue
+				}
+				formatted, err := format.Source(output.Content)
+				if err != nil {
+					t.Fatalf("generated %q is invalid Go: %v\n%s", output.Path, err, output.Content)
+				}
+				if !bytes.Equal(formatted, output.Content) {
+					t.Fatalf("generated %q is not gofmt formatted", output.Path)
+				}
+			}
+			mainSource := string(outputContent(generated, "cmd/server/main.go"))
+			if !strings.Contains(mainSource, "customerAPI.Register") || !strings.Contains(mainSource, "secureCookies") {
+				t.Fatal("Generate() did not wire customer routes with the shared secure cookie setting")
+			}
+			openAPI := outputContent(generated, "api/openapi.yaml")
+			var document struct {
+				Paths map[string]any `yaml:"paths"`
+			}
+			if err := yaml.Unmarshal(openAPI, &document); err != nil {
+				t.Fatalf("generated customer OpenAPI is invalid YAML: %v\n%s", err, openAPI)
+			}
+			for _, path := range []string{
+				"/api/v1/storefront/account/register", "/api/v1/storefront/account/password",
+				"/api/v1/customers", "/api/v1/customers/{id}/suspend",
+			} {
+				if document.Paths[path] == nil {
+					t.Errorf("generated customer OpenAPI is missing %s", path)
+				}
+			}
+		})
+	}
+}
+
+func TestCustomerAccountsRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyMembersVersion},
+		{Name: customerCapability, Version: customerVersion},
+	}
+	if _, err := New().Generate(context.Background(), project); err == nil ||
+		!strings.Contains(err.Error(), "customer-accounts with organization-tenancy requires organization-tenancy 0.3.0") {
+		t.Fatalf("Generate() error = %v, want lifecycle tenancy requirement", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

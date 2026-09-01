@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在还能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座。M7 第一条真实业务纵切 `commerce-catalog` `0.1.0` 已完成 Go、Java 两套 PostgreSQL/MySQL 实现、共用 Vue 商品管理，以及 Nuxt 公开商品列表和详情页。Python 商品目录对齐与购物车、结算等后续能力仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在都能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座，以及 `commerce-catalog` `0.1.0` 的 PostgreSQL/MySQL、共用 Vue 商品管理和 Nuxt 商品列表/详情页。Go 还已完成 `customer-accounts` `0.1.0` 参考实现，包含独立顾客身份、共用 Vue 顾客管理和 Nuxt 账户页；Java、Python 对齐及购物车、结算等后续能力仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 
@@ -72,6 +72,8 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-ser
 go run ./cmd/scaffold-agent validate --project-root ./examples/storefront-foundation --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-go --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-java --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-python --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-go --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

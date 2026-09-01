@@ -20,13 +20,14 @@ const (
 
 // Data is the backend-neutral storefront template input.
 type Data struct {
-	ProjectName     string
-	DisplayNameHTML string
-	DisplayNameJSON string
-	DescriptionJSON string
-	DescriptionLong bool
-	Catalog         bool
-	Tenancy         bool
+	ProjectName      string
+	DisplayNameHTML  string
+	DisplayNameJSON  string
+	DescriptionJSON  string
+	DescriptionLong  bool
+	Catalog          bool
+	CustomerAccounts bool
+	Tenancy          bool
 }
 
 // NewData normalizes optional project display metadata for shared templates.
@@ -88,6 +89,24 @@ var CatalogTemplates = map[string]string{
 	"web/storefront/shared/types/catalog.ts":                    "templates/shared/types/catalog.ts",
 	"web/storefront/app/utils/catalog.ts":                       "templates/app/utils/catalog.ts",
 	"web/storefront/test/catalog.test.ts":                       "templates/test/catalog.test.ts",
+}
+
+// CustomerAccountTemplates maps the composable storefront customer identity outputs.
+var CustomerAccountTemplates = map[string]string{
+	"web/storefront/app/assets/css/account.css":                     "templates/app/assets/css/account.css",
+	"web/storefront/app/pages/account/index.vue":                    "templates/app/pages/account/index.vue",
+	"web/storefront/app/pages/account/login.vue":                    "templates/app/pages/account/login.vue",
+	"web/storefront/app/pages/account/register.vue":                 "templates/app/pages/account/register.vue",
+	"web/storefront/server/api/storefront/account/close.post.ts":    "templates/server/api/storefront/account/close.post.ts",
+	"web/storefront/server/api/storefront/account/login.post.ts":    "templates/server/api/storefront/account/login.post.ts",
+	"web/storefront/server/api/storefront/account/logout.post.ts":   "templates/server/api/storefront/account/logout.post.ts",
+	"web/storefront/server/api/storefront/account/me.get.ts":        "templates/server/api/storefront/account/me.get.ts",
+	"web/storefront/server/api/storefront/account/password.put.ts":  "templates/server/api/storefront/account/password.put.ts",
+	"web/storefront/server/api/storefront/account/profile.put.ts":   "templates/server/api/storefront/account/profile.put.ts",
+	"web/storefront/server/api/storefront/account/register.post.ts": "templates/server/api/storefront/account/register.post.ts",
+	"web/storefront/server/utils/customer.ts":                       "templates/server/utils/customer.ts",
+	"web/storefront/shared/types/customer.ts":                       "templates/shared/types/customer.ts",
+	"web/storefront/test/customer.test.ts":                          "templates/test/customer.test.ts",
 }
 
 // Render executes one shared template against a backend-neutral data shape.

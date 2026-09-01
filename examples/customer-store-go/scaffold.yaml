@@ -1,0 +1,19 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: customer-store-go
+  display_name: Customer Store
+spec:
+  stack:
+    backend: go
+    admin_ui: element-plus
+    storefront: nuxt
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: customer-accounts
+      version: 0.1.0

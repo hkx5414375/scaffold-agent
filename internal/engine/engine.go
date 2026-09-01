@@ -90,6 +90,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"atomic-bounded-csv-import-export",
 				"portable-approval-workflows",
 				"portable-commerce-catalog",
+				"go-customer-accounts",
 				"java-spring-boot-foundation",
 				"java-session-token-identity",
 				"python-fastapi-foundation",

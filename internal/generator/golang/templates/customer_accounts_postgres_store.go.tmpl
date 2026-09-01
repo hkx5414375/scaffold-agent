@@ -1,0 +1,321 @@
+// Package postgres persists storefront customer accounts in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/customeraccounts"
+	"{{.ModulePath}}/internal/identity"
+)
+
+const cleanupTimeout = 5 * time.Second
+
+// Store is the PostgreSQL customer account repository.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL customer account store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Register atomically creates one account, initial session, and audit event.
+func (store *Store) Register(ctx context.Context, account customeraccounts.Account, session customeraccounts.Session, audit identity.AuditEvent) error {
+	return store.mutate(ctx, "registration", func(transaction pgx.Tx) error {
+{{- if .Tenancy}}
+		command, err := transaction.Exec(ctx, `
+			insert into customer_accounts (
+				id, organization_id, email, password_hash, display_name,
+				status, version, created_at, updated_at
+			)
+			select @id, @organization_id, @email, @password_hash, @display_name,
+				@status, @version, @created_at, @updated_at
+			from organizations where id = @organization_id and status = 'active'`, pgx.NamedArgs{
+{{- else}}
+		command, err := transaction.Exec(ctx, `
+			insert into customer_accounts (
+				id, organization_id, email, password_hash, display_name,
+				status, version, created_at, updated_at
+			) values (@id, null, @email, @password_hash, @display_name,
+				@status, @version, @created_at, @updated_at)`, pgx.NamedArgs{
+{{- end}}
+			"id": account.ID, "organization_id": account.OrganizationID, "email": account.Email,
+			"password_hash": account.PasswordHash, "display_name": account.DisplayName,
+			"status": account.Status, "version": account.Version,
+			"created_at": account.CreatedAt, "updated_at": account.UpdatedAt,
+		})
+		if err != nil {
+			return persistenceError(err)
+		}
+		if command.RowsAffected() != 1 {
+			return customeraccounts.ErrNotFound
+		}
+		if err := insertSession(ctx, transaction, session); err != nil {
+			return err
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+}
+
+// AccountByEmail returns one scoped account and hides inactive organizations.
+func (store *Store) AccountByEmail(ctx context.Context, organizationID, email string) (customeraccounts.Account, error) {
+	return scanAccount(store.pool.QueryRow(ctx, `
+		select account.id, coalesce(account.organization_id, ''), account.email,
+			account.password_hash, account.display_name, account.status,
+			account.version, account.created_at, account.updated_at
+		from customer_accounts account
+{{- if .Tenancy}}
+		join organizations organization on organization.id = account.organization_id
+{{- end}}
+		where coalesce(account.organization_id, '') = $1 and account.email = $2
+{{- if .Tenancy}}
+			and organization.status = 'active'
+{{- end}}`, organizationID, email))
+}
+
+// CreateSession atomically persists a successful login and its audit event.
+func (store *Store) CreateSession(ctx context.Context, session customeraccounts.Session, audit identity.AuditEvent) error {
+	return store.mutate(ctx, "login", func(transaction pgx.Tx) error {
+		if err := insertSession(ctx, transaction, session); err != nil {
+			return err
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+}
+
+// AccountBySession resolves an unexpired active customer inside one explicit scope.
+func (store *Store) AccountBySession(ctx context.Context, organizationID string, tokenHash []byte, now time.Time) (customeraccounts.Account, error) {
+	return scanAccount(store.pool.QueryRow(ctx, `
+		select account.id, coalesce(account.organization_id, ''), account.email,
+			account.password_hash, account.display_name, account.status,
+			account.version, account.created_at, account.updated_at
+		from customer_sessions session
+		join customer_accounts account on account.id = session.customer_id
+{{- if .Tenancy}}
+		join organizations organization on organization.id = account.organization_id
+{{- end}}
+		where session.token_hash = $1 and session.expires_at > $2
+			and coalesce(account.organization_id, '') = $3 and account.status = 'active'
+{{- if .Tenancy}}
+			and organization.status = 'active'
+{{- end}}`, tokenHash, now, organizationID))
+}
+
+// DeleteSession atomically revokes one customer session and records logout.
+func (store *Store) DeleteSession(ctx context.Context, tokenHash []byte, audit identity.AuditEvent) error {
+	return store.mutate(ctx, "logout", func(transaction pgx.Tx) error {
+		command, err := transaction.Exec(ctx, `delete from customer_sessions where token_hash = $1`, tokenHash)
+		if err != nil {
+			return fmt.Errorf("delete customer session: %w", err)
+		}
+		if command.RowsAffected() != 1 {
+			return customeraccounts.ErrNotFound
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+}
+
+// AppendAudit records a denied public authentication attempt without storing secrets.
+func (store *Store) AppendAudit(ctx context.Context, audit identity.AuditEvent) error {
+	_, err := store.pool.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, null, $2, $3, nullif($4, ''), nullif($5, ''), nullif($6, ''), $7)`,
+		audit.ID, audit.Action, audit.Outcome, audit.Target,
+		audit.IPAddress, audit.UserAgent, audit.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append customer audit event: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile atomically applies one optimistic profile mutation and audit event.
+func (store *Store) UpdateProfile(ctx context.Context, organizationID, id, displayName string, version int64, now time.Time, audit identity.AuditEvent) (customeraccounts.Account, error) {
+	return store.update(ctx, "profile update", func(transaction pgx.Tx) (customeraccounts.Account, error) {
+		return scanMutation(transaction.QueryRow(ctx, `
+			update customer_accounts set display_name = $1, version = version + 1, updated_at = $2
+			where id = $3 and coalesce(organization_id, '') = $4 and version = $5 and status = 'active'
+			returning id, coalesce(organization_id, ''), email, password_hash, display_name,
+				status, version, created_at, updated_at`, displayName, now, id, organizationID, version))
+	}, audit, false)
+}
+
+// ChangePassword atomically changes the hash, revokes all sessions, and records audit.
+func (store *Store) ChangePassword(ctx context.Context, organizationID, id, passwordHash string, version int64, now time.Time, audit identity.AuditEvent) (customeraccounts.Account, error) {
+	return store.update(ctx, "password change", func(transaction pgx.Tx) (customeraccounts.Account, error) {
+		return scanMutation(transaction.QueryRow(ctx, `
+			update customer_accounts set password_hash = $1, version = version + 1, updated_at = $2
+			where id = $3 and coalesce(organization_id, '') = $4 and version = $5 and status = 'active'
+			returning id, coalesce(organization_id, ''), email, password_hash, display_name,
+				status, version, created_at, updated_at`, passwordHash, now, id, organizationID, version))
+	}, audit, true)
+}
+
+// Get returns one scoped account for administration.
+func (store *Store) Get(ctx context.Context, organizationID, id string) (customeraccounts.Account, error) {
+	return scanAccount(store.pool.QueryRow(ctx, `
+		select id, coalesce(organization_id, ''), email, password_hash, display_name,
+			status, version, created_at, updated_at
+		from customer_accounts
+		where id = $1 and coalesce(organization_id, '') = $2`, id, organizationID))
+}
+
+// List returns one bounded administration page.
+func (store *Store) List(ctx context.Context, organizationID string, status customeraccounts.Status, cursor string, limit int) ([]customeraccounts.Account, string, error) {
+	rows, err := store.pool.Query(ctx, `
+		select id, coalesce(organization_id, ''), email, password_hash, display_name,
+			status, version, created_at, updated_at
+		from customer_accounts
+		where coalesce(organization_id, '') = $1 and ($2 = '' or status = $2)
+			and ($3 = '' or id > $3)
+		order by id limit $4`, organizationID, status, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query customer account page: %w", err)
+	}
+	defer rows.Close()
+	items := make([]customeraccounts.Account, 0, limit)
+	for rows.Next() {
+		account, err := scanAccount(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("read customer account page: %w", err)
+	}
+	nextCursor := ""
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+// Transition atomically changes an exact state, revokes all sessions, and records audit.
+func (store *Store) Transition(ctx context.Context, organizationID, id string, version int64, from, to customeraccounts.Status, now time.Time, audit identity.AuditEvent) (customeraccounts.Account, error) {
+	return store.update(ctx, "state transition", func(transaction pgx.Tx) (customeraccounts.Account, error) {
+		return scanMutation(transaction.QueryRow(ctx, `
+			update customer_accounts set status = $1, version = version + 1, updated_at = $2
+			where id = $3 and coalesce(organization_id, '') = $4 and version = $5 and status = $6
+			returning id, coalesce(organization_id, ''), email, password_hash, display_name,
+				status, version, created_at, updated_at`, to, now, id, organizationID, version, from))
+	}, audit, true)
+}
+
+func (store *Store) update(ctx context.Context, operation string, mutate func(pgx.Tx) (customeraccounts.Account, error), audit identity.AuditEvent, revokeSessions bool) (customeraccounts.Account, error) {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return customeraccounts.Account{}, fmt.Errorf("begin customer %s: %w", operation, err)
+	}
+	account, err := mutate(transaction)
+	if err != nil {
+		return customeraccounts.Account{}, rollback(transaction, err)
+	}
+	if revokeSessions {
+		if _, err := transaction.Exec(ctx, `delete from customer_sessions where customer_id = $1`, account.ID); err != nil {
+			return customeraccounts.Account{}, rollback(transaction, fmt.Errorf("revoke customer sessions: %w", err))
+		}
+	}
+	if err := appendAudit(ctx, transaction, audit); err != nil {
+		return customeraccounts.Account{}, rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return customeraccounts.Account{}, fmt.Errorf("commit customer %s: %w", operation, err)
+	}
+	return account, nil
+}
+
+func (store *Store) mutate(ctx context.Context, operation string, apply func(pgx.Tx) error) error {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin customer %s: %w", operation, err)
+	}
+	if err := apply(transaction); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit customer %s: %w", operation, err)
+	}
+	return nil
+}
+
+func insertSession(ctx context.Context, transaction pgx.Tx, session customeraccounts.Session) error {
+	_, err := transaction.Exec(ctx, `
+		insert into customer_sessions (token_hash, customer_id, expires_at, created_at)
+		values ($1, $2, $3, now())`, session.TokenHash, session.CustomerID, session.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("insert customer session: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {
+	_, err := transaction.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target,
+		event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append customer audit event: %w", err)
+	}
+	return nil
+}
+
+func scanMutation(row rowScanner) (customeraccounts.Account, error) {
+	account, err := scanAccount(row)
+	if errors.Is(err, customeraccounts.ErrNotFound) {
+		return customeraccounts.Account{}, customeraccounts.ErrConflict
+	}
+	return account, persistenceError(err)
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanAccount(row rowScanner) (customeraccounts.Account, error) {
+	var account customeraccounts.Account
+	if err := row.Scan(
+		&account.ID, &account.OrganizationID, &account.Email, &account.PasswordHash,
+		&account.DisplayName, &account.Status, &account.Version,
+		&account.CreatedAt, &account.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return customeraccounts.Account{}, customeraccounts.ErrNotFound
+		}
+		return customeraccounts.Account{}, fmt.Errorf("scan customer account: %w", err)
+	}
+	return account, nil
+}
+
+func persistenceError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var databaseError *pgconn.PgError
+	if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+		return customeraccounts.ErrConflict
+	}
+	return err
+}
+
+func rollback(transaction pgx.Tx, cause error) error {
+	rollbackContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := transaction.Rollback(rollbackContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return errors.Join(cause, fmt.Errorf("roll back customer mutation: %w", err))
+	}
+	return cause
+}
+
+var _ customeraccounts.Store = (*Store)(nil)

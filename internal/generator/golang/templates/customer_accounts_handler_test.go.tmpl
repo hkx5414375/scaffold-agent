@@ -1,0 +1,36 @@
+package httpapi
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestCustomerSessionCookieIsSeparateAndHardened(t *testing.T) {
+	t.Parallel()
+	handler := &Handler{secureCookies: true}
+	recorder := httptest.NewRecorder()
+	handler.setSessionCookie(recorder, "raw-secret", customerSessionMaxAge)
+
+	response := recorder.Result()
+	cookies := response.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("Cookies() length = %d, want 1", len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Name != customerSessionCookie || cookie.Name == "scaffold_session" || !cookie.HttpOnly || !cookie.Secure ||
+		cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != customerSessionMaxAge {
+		t.Fatalf("customer session cookie = %#v", cookie)
+	}
+}
+
+func TestClearCustomerSessionCookieExpiresIt(t *testing.T) {
+	t.Parallel()
+	handler := &Handler{}
+	recorder := httptest.NewRecorder()
+	handler.clearSessionCookie(recorder)
+	cookie := recorder.Result().Cookies()[0]
+	if cookie.Name != customerSessionCookie || cookie.Value != "" || cookie.MaxAge != -1 || !cookie.HttpOnly {
+		t.Fatalf("cleared customer session cookie = %#v", cookie)
+	}
+}

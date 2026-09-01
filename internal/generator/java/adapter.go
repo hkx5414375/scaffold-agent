@@ -276,6 +276,7 @@ type templateData struct {
 	CSVTransfer      bool
 	Approvals        bool
 	Catalog          bool
+	CustomerAccounts bool
 	MigrationCount   int
 }
 

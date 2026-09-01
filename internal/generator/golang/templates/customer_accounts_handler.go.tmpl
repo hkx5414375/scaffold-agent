@@ -1,0 +1,276 @@
+// Package httpapi exposes separate storefront customer and employee administration routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/customeraccounts"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const (
+	customerSessionCookie = "scaffold_customer_session"
+	customerSessionMaxAge = 30 * 24 * 60 * 60
+	organizationHeader    = "X-Organization-ID"
+	defaultPageLimit      = 20
+)
+
+// Handler maps customer account use cases to HTTP.
+type Handler struct {
+	service       *customeraccounts.Service
+	secureCookies bool
+}
+
+// New returns a customer account HTTP adapter.
+func New(service *customeraccounts.Service, secureCookies bool) *Handler {
+	return &Handler{service: service, secureCookies: secureCookies}
+}
+
+// Register adds customer public/self-service routes and employee administration routes.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/storefront/account/register", handler.register)
+	mux.HandleFunc("POST /api/v1/storefront/account/login", handler.login)
+	mux.HandleFunc("POST /api/v1/storefront/account/logout", handler.logout)
+	mux.HandleFunc("GET /api/v1/storefront/account/me", handler.authenticated(handler.me))
+	mux.HandleFunc("PUT /api/v1/storefront/account/profile", handler.authenticated(handler.updateProfile))
+	mux.HandleFunc("PUT /api/v1/storefront/account/password", handler.authenticated(handler.changePassword))
+	mux.HandleFunc("POST /api/v1/storefront/account/close", handler.authenticated(handler.close))
+
+	mux.HandleFunc("GET /api/v1/customers", security.Authorized("customers:accounts:read", handler.list))
+	mux.HandleFunc("GET /api/v1/customers/{id}", security.Authorized("customers:accounts:read", handler.get))
+	mux.HandleFunc("POST /api/v1/customers/{id}/suspend", security.Authorized("customers:accounts:manage", handler.suspend))
+	mux.HandleFunc("POST /api/v1/customers/{id}/reactivate", security.Authorized("customers:accounts:manage", handler.reactivate))
+}
+
+func (handler *Handler) register(response http.ResponseWriter, request *http.Request) {
+	var input customeraccounts.RegisterInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	token, account, err := handler.service.Register(
+		request.Context(), request.Header.Get(organizationHeader), input, clientIP(request), request.UserAgent(),
+	)
+	if err != nil {
+		handleError(response, "register customer", err)
+		return
+	}
+	handler.setSessionCookie(response, token, customerSessionMaxAge)
+	httpjson.Write(response, http.StatusCreated, map[string]any{"customer": account})
+}
+
+func (handler *Handler) login(response http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	token, account, err := handler.service.Login(
+		request.Context(), request.Header.Get(organizationHeader), input.Email, input.Password,
+		clientIP(request), request.UserAgent(),
+	)
+	if errors.Is(err, customeraccounts.ErrInvalidCredentials) {
+		httpjson.WriteError(response, http.StatusUnauthorized, "customer.invalid_credentials", "email or password is incorrect")
+		return
+	}
+	if err != nil {
+		handleError(response, "log in customer", err)
+		return
+	}
+	handler.setSessionCookie(response, token, customerSessionMaxAge)
+	httpjson.Write(response, http.StatusOK, map[string]any{"customer": account})
+}
+
+func (handler *Handler) logout(response http.ResponseWriter, request *http.Request) {
+	rawToken := customerCookie(request)
+	if err := handler.service.Logout(
+		request.Context(), request.Header.Get(organizationHeader), rawToken, clientIP(request), request.UserAgent(),
+	); err != nil {
+		handleError(response, "log out customer", err)
+		return
+	}
+	handler.clearSessionCookie(response)
+	response.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *Handler) me(response http.ResponseWriter, _ *http.Request, account customeraccounts.Account) {
+	httpjson.Write(response, http.StatusOK, map[string]any{"customer": account})
+}
+
+func (handler *Handler) updateProfile(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input customeraccounts.ProfileInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	updated, err := handler.service.UpdateProfile(request.Context(), account, input, clientIP(request), request.UserAgent())
+	if err != nil {
+		handleError(response, "update customer profile", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, map[string]any{"customer": updated})
+}
+
+func (handler *Handler) changePassword(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input customeraccounts.PasswordInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	updated, err := handler.service.ChangePassword(request.Context(), account, input, clientIP(request), request.UserAgent())
+	if err != nil {
+		handleError(response, "change customer password", err)
+		return
+	}
+	handler.clearSessionCookie(response)
+	httpjson.Write(response, http.StatusOK, map[string]any{"customer": updated, "reauthentication_required": true})
+}
+
+func (handler *Handler) close(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input customeraccounts.TransitionInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	updated, err := handler.service.Close(request.Context(), account, input, clientIP(request), request.UserAgent())
+	if err != nil {
+		handleError(response, "close customer account", err)
+		return
+	}
+	handler.clearSessionCookie(response)
+	httpjson.Write(response, http.StatusOK, map[string]any{"customer": updated})
+}
+
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	account, err := handler.service.Get(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "get customer account", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, account)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit := defaultPageLimit
+	if rawLimit := request.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer")
+			return
+		}
+		limit = parsed
+	}
+	page, err := handler.service.List(
+		request.Context(), customeraccounts.Status(request.URL.Query().Get("status")),
+		request.URL.Query().Get("cursor"), limit, actor,
+	)
+	if err != nil {
+		handleError(response, "list customer accounts", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) suspend(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transition(response, request, actor, handler.service.Suspend, "suspend customer account")
+}
+
+func (handler *Handler) reactivate(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transition(response, request, actor, handler.service.Reactivate, "reactivate customer account")
+}
+
+func (handler *Handler) transition(
+	response http.ResponseWriter,
+	request *http.Request,
+	actor identity.Principal,
+	operation func(context.Context, string, customeraccounts.TransitionInput, identity.Principal) (customeraccounts.Account, error),
+	operationName string,
+) {
+	var input customeraccounts.TransitionInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	account, err := operation(request.Context(), request.PathValue("id"), input, actor)
+	if err != nil {
+		handleError(response, operationName, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, account)
+}
+
+type customerHandler func(http.ResponseWriter, *http.Request, customeraccounts.Account)
+
+func (handler *Handler) authenticated(next customerHandler) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		account, err := handler.service.Authenticate(
+			request.Context(), request.Header.Get(organizationHeader), customerCookie(request),
+		)
+		if errors.Is(err, customeraccounts.ErrInvalidCredentials) {
+			httpjson.WriteError(response, http.StatusUnauthorized, "customer.unauthenticated", "customer authentication is required")
+			return
+		}
+		if err != nil {
+			slog.Error("authenticate customer", "error", err)
+			httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+			return
+		}
+		next(response, request, account)
+	}
+}
+
+func (handler *Handler) setSessionCookie(response http.ResponseWriter, token string, maxAge int) {
+	http.SetCookie(response, &http.Cookie{
+		Name: customerSessionCookie, Value: token, Path: "/", MaxAge: maxAge,
+		HttpOnly: true, Secure: handler.secureCookies, SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (handler *Handler) clearSessionCookie(response http.ResponseWriter) {
+	handler.setSessionCookie(response, "", -1)
+}
+
+func customerCookie(request *http.Request) string {
+	cookie, err := request.Cookie(customerSessionCookie)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func clientIP(request *http.Request) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	if net.ParseIP(request.RemoteAddr) != nil {
+		return request.RemoteAddr
+	}
+	return ""
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, customeraccounts.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "customer.invalid", "customer account data is invalid")
+	case errors.Is(err, customeraccounts.ErrInvalidCredentials):
+		httpjson.WriteError(response, http.StatusUnauthorized, "customer.invalid_credentials", "customer credentials are invalid")
+	case errors.Is(err, customeraccounts.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "customer.not_found", "customer account was not found")
+	case errors.Is(err, customeraccounts.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "customer.conflict", "customer account changed or the email is already registered")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

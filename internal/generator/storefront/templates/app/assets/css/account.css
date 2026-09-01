@@ -1,0 +1,132 @@
+.account-page {
+  width: min(980px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 96px 0 120px;
+}
+
+.account-narrow {
+  width: min(620px, calc(100% - 40px));
+}
+
+.account-page h1 {
+  max-width: 860px;
+  font-size: clamp(3.1rem, 8vw, 6.8rem);
+}
+
+.account-summary,
+.account-card p,
+.account-card small,
+.account-danger p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.account-heading,
+.account-danger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.account-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.account-card,
+.account-danger {
+  padding: 30px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+}
+
+.account-card h2 {
+  margin-bottom: 24px;
+  font-size: 2.2rem;
+}
+
+.account-form {
+  display: grid;
+  gap: 20px;
+}
+
+.account-form label {
+  display: grid;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.account-form input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 14px;
+  color: var(--ink);
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font: inherit;
+}
+
+.account-form input:focus {
+  border-color: var(--accent);
+  outline: 3px solid rgb(20 107 79 / 16%);
+}
+
+.account-error {
+  color: #9d2d24 !important;
+}
+
+.account-notice {
+  color: var(--accent) !important;
+}
+
+.account-switch {
+  margin-bottom: 0;
+  text-align: center;
+}
+
+.account-danger {
+  margin-top: 20px;
+  border-color: rgb(157 45 36 / 35%);
+}
+
+.account-danger p {
+  margin: 6px 0 0;
+}
+
+.danger-action,
+.account-refresh {
+  padding: 12px 18px;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.danger-action {
+  color: #9d2d24;
+  background: transparent;
+  border: 1px solid #9d2d24;
+}
+
+.account-refresh {
+  margin-top: 18px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+}
+
+@media (max-width: 720px) {
+  .account-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .account-heading,
+  .account-danger {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

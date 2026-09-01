@@ -6,6 +6,9 @@ import (
 	{{- end}}
 	"context"
 	"crypto/rand"
+{{- if .CustomerAccounts}}
+	"crypto/sha256"
+{{- end}}
 {{- if or .Cache .JobAdmin (and .Jobs (not .Notifications))}}
 	"encoding/json"
 {{- end}}
@@ -29,6 +32,10 @@ import (
 	{{- if .Catalog}}
 	"{{.ModulePath}}/internal/catalog"
 	catalogpostgres "{{.ModulePath}}/internal/catalog/postgres"
+	{{- end}}
+	{{- if .CustomerAccounts}}
+	"{{.ModulePath}}/internal/customeraccounts"
+	customerpostgres "{{.ModulePath}}/internal/customeraccounts/postgres"
 	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
@@ -326,6 +333,125 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	}
 	if _, err := catalogService.GetPublic(ctx, organizationID, product.ID); !errors.Is(err, catalog.ErrNotFound) {
 		t.Fatalf("catalog GetPublic(archived) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+
+{{- if .CustomerAccounts}}
+	for _, permission := range []string{"customers:accounts:read", "customers:accounts:manage"} {
+		allowed, err := identityStore.HasPermission(ctx, "admin", permission)
+		if err != nil || !allowed {
+			t.Fatalf("HasPermission(admin, %s) = %t, %v", permission, allowed, err)
+		}
+		allowed, err = identityStore.HasPermission(ctx, "user", permission)
+		if err != nil || allowed {
+			t.Fatalf("HasPermission(user, %s) = %t, %v, want denied", permission, allowed, err)
+		}
+	}
+	customerStore := customerpostgres.New(pool)
+	rolledBackDigest := sha256.Sum256([]byte("rolled-back-customer-session"))
+	rolledBackCustomer := customeraccounts.Account{
+		ID: "customer-rolled-back", OrganizationID: organizationID,
+		Email: "rolled-back@example.com", PasswordHash: "integration-only-hash",
+		DisplayName: "Rolled Back", Status: customeraccounts.StatusActive,
+		Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := customerStore.Register(ctx, rolledBackCustomer, customeraccounts.Session{
+		TokenHash: rolledBackDigest[:], CustomerID: rolledBackCustomer.ID, ExpiresAt: now.Add(time.Hour),
+	}, duplicateAudit); err == nil {
+		t.Fatal("customer Register(duplicate audit) error = nil, want transaction failure")
+	}
+	if _, err := customerStore.Get(ctx, organizationID, rolledBackCustomer.ID); !errors.Is(err, customeraccounts.ErrNotFound) {
+		t.Fatalf("customer Get(rolled-back) error = %v, want ErrNotFound", err)
+	}
+
+	customerDigest := sha256.Sum256([]byte("active-customer-session"))
+	customer := customeraccounts.Account{
+		ID: "integration-customer", OrganizationID: organizationID,
+		Email: "customer@example.com", PasswordHash: "integration-only-hash",
+		DisplayName: "Integration Customer", Status: customeraccounts.StatusActive,
+		Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := customerStore.Register(ctx, customer, customeraccounts.Session{
+		TokenHash: customerDigest[:], CustomerID: customer.ID, ExpiresAt: now.Add(time.Hour),
+	}, audit("", "customer.register", customer.ID, now)); err != nil {
+		t.Fatalf("customer Register() error = %v", err)
+	}
+	loadedCustomer, err := customerStore.AccountByEmail(ctx, organizationID, customer.Email)
+	if err != nil || loadedCustomer.ID != customer.ID || loadedCustomer.Status != customeraccounts.StatusActive {
+		t.Fatalf("customer AccountByEmail() = %#v, %v", loadedCustomer, err)
+	}
+	if authenticated, err := customerStore.AccountBySession(ctx, organizationID, customerDigest[:], now); err != nil || authenticated.ID != customer.ID {
+		t.Fatalf("customer AccountBySession() = %#v, %v", authenticated, err)
+	}
+{{- if .Tenancy}}
+	if _, err := customerStore.Get(ctx, "different-organization", customer.ID); !errors.Is(err, customeraccounts.ErrNotFound) {
+		t.Fatalf("customer Get(cross-organization) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+{{- if .TenancyLifecycle}}
+	if _, err := lifecycle.Deactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("customer Deactivate() error = %v", err)
+	}
+	if _, err := customerStore.AccountBySession(ctx, organizationID, customerDigest[:], now); !errors.Is(err, customeraccounts.ErrNotFound) {
+		t.Fatalf("customer AccountBySession(inactive organization) error = %v, want ErrNotFound", err)
+	}
+	if _, err := lifecycle.Reactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("customer Reactivate organization() error = %v", err)
+	}
+{{- end}}
+	updatedCustomer, err := customerStore.UpdateProfile(
+		ctx, organizationID, customer.ID, "Updated Customer", customer.Version, now.Add(time.Second),
+		audit("", "customer.profile.update", customer.ID, now.Add(time.Second)),
+	)
+	if err != nil || updatedCustomer.DisplayName != "Updated Customer" || updatedCustomer.Version != 2 {
+		t.Fatalf("customer UpdateProfile() = %#v, %v", updatedCustomer, err)
+	}
+	if _, err := customerStore.UpdateProfile(
+		ctx, organizationID, customer.ID, "Stale", customer.Version, now.Add(2*time.Second),
+		audit("", "customer.profile.update", customer.ID, now.Add(2*time.Second)),
+	); !errors.Is(err, customeraccounts.ErrConflict) {
+		t.Fatalf("customer UpdateProfile(stale) error = %v, want ErrConflict", err)
+	}
+	staffActor := identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID}
+	customerService := customeraccounts.NewService(customerStore)
+	suspendedCustomer, err := customerService.Suspend(
+		ctx, customer.ID, customeraccounts.TransitionInput{Version: updatedCustomer.Version}, staffActor,
+	)
+	if err != nil || suspendedCustomer.Status != customeraccounts.StatusSuspended || suspendedCustomer.Version != 3 {
+		t.Fatalf("customer Suspend() = %#v, %v", suspendedCustomer, err)
+	}
+	if _, err := customerStore.AccountBySession(ctx, organizationID, customerDigest[:], now); !errors.Is(err, customeraccounts.ErrNotFound) {
+		t.Fatalf("customer AccountBySession(suspended) error = %v, want ErrNotFound", err)
+	}
+	reactivatedCustomer, err := customerService.Reactivate(
+		ctx, customer.ID, customeraccounts.TransitionInput{Version: suspendedCustomer.Version}, staffActor,
+	)
+	if err != nil || reactivatedCustomer.Status != customeraccounts.StatusActive || reactivatedCustomer.Version != 4 {
+		t.Fatalf("customer Reactivate() = %#v, %v", reactivatedCustomer, err)
+	}
+	passwordDigest := sha256.Sum256([]byte("password-change-session"))
+	if err := customerStore.CreateSession(ctx, customeraccounts.Session{
+		TokenHash: passwordDigest[:], CustomerID: customer.ID, ExpiresAt: now.Add(time.Hour),
+	}, audit("", "customer.login", customer.ID, now)); err != nil {
+		t.Fatalf("customer CreateSession() error = %v", err)
+	}
+	passwordChanged, err := customerStore.ChangePassword(
+		ctx, organizationID, customer.ID, "changed-integration-hash", reactivatedCustomer.Version,
+		now.Add(3*time.Second), audit("", "customer.password.change", customer.ID, now.Add(3*time.Second)),
+	)
+	if err != nil || passwordChanged.PasswordHash != "changed-integration-hash" || passwordChanged.Version != 5 {
+		t.Fatalf("customer ChangePassword() = %#v, %v", passwordChanged, err)
+	}
+	if _, err := customerStore.AccountBySession(ctx, organizationID, passwordDigest[:], now); !errors.Is(err, customeraccounts.ErrNotFound) {
+		t.Fatalf("customer AccountBySession(password changed) error = %v, want ErrNotFound", err)
+	}
+	listedCustomers, nextCustomerCursor, err := customerStore.List(ctx, organizationID, customeraccounts.StatusActive, "", 20)
+	if err != nil || len(listedCustomers) != 1 || listedCustomers[0].ID != customer.ID || nextCustomerCursor != "" {
+		t.Fatalf("customer List() = %#v, %q, %v", listedCustomers, nextCustomerCursor, err)
+	}
+	var customerAuditCount int
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where target = $1 and action like 'customer%'`, customer.ID).Scan(&customerAuditCount); err != nil || customerAuditCount < 5 {
+		t.Fatalf("customer audit count = %d, %v, want at least 5", customerAuditCount, err)
 	}
 {{- end}}
 

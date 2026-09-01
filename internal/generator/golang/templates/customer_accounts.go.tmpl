@@ -1,0 +1,418 @@
+// Package customeraccounts owns storefront customer identities separately from staff identity.
+package customeraccounts
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumIdentifierLength = 191
+	maximumDisplayNameLength = 160
+	maximumCursorLength      = 191
+	customerSessionLifetime  = 30 * 24 * time.Hour
+	dummyPasswordHash        = "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+var (
+	// ErrNotFound hides missing and cross-organization customer accounts.
+	ErrNotFound = errors.New("customer account not found")
+	// ErrConflict represents duplicate email, invalid state, or optimistic version conflict.
+	ErrConflict = errors.New("customer account conflicts with current state")
+	// ErrInvalidInput represents a malformed portable customer request.
+	ErrInvalidInput = errors.New("customer account input is invalid")
+	// ErrInvalidCredentials deliberately hides email, password, status, and scope details.
+	ErrInvalidCredentials = errors.New("invalid customer credentials")
+)
+
+// Status is the portable customer lifecycle state.
+type Status string
+
+const (
+	// StatusActive permits storefront authentication.
+	StatusActive Status = "active"
+	// StatusSuspended retains the account but revokes storefront access.
+	StatusSuspended Status = "suspended"
+	// StatusClosed is terminal and preserves stable references for future orders.
+	StatusClosed Status = "closed"
+)
+
+// Account is a storefront customer principal. PasswordHash is never serialized.
+type Account struct {
+	ID             string    `json:"id"`
+	OrganizationID string    `json:"organization_id,omitempty"`
+	Email          string    `json:"email"`
+	PasswordHash   string    `json:"-"`
+	DisplayName    string    `json:"display_name"`
+	Status         Status    `json:"status"`
+	Version        int64     `json:"version,string"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// Session is a persisted customer browser session. Only a SHA-256 digest is stored.
+type Session struct {
+	TokenHash  []byte
+	CustomerID string
+	ExpiresAt  time.Time
+}
+
+// RegisterInput creates one active customer account.
+type RegisterInput struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"display_name"`
+}
+
+// ProfileInput replaces the mutable customer profile with optimistic concurrency.
+type ProfileInput struct {
+	DisplayName string `json:"display_name"`
+	Version     int64  `json:"version,string"`
+}
+
+// PasswordInput changes a password and revokes every customer session.
+type PasswordInput struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+	Version         int64  `json:"version,string"`
+}
+
+// TransitionInput supplies the current optimistic version.
+type TransitionInput struct {
+	Version int64 `json:"version,string"`
+}
+
+// Page is one bounded keyset customer page.
+type Page struct {
+	Items      []Account `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// Store is the atomic customer persistence boundary.
+type Store interface {
+	Register(context.Context, Account, Session, identity.AuditEvent) error
+	AccountByEmail(context.Context, string, string) (Account, error)
+	CreateSession(context.Context, Session, identity.AuditEvent) error
+	AccountBySession(context.Context, string, []byte, time.Time) (Account, error)
+	DeleteSession(context.Context, []byte, identity.AuditEvent) error
+	AppendAudit(context.Context, identity.AuditEvent) error
+	UpdateProfile(context.Context, string, string, string, int64, time.Time, identity.AuditEvent) (Account, error)
+	ChangePassword(context.Context, string, string, string, int64, time.Time, identity.AuditEvent) (Account, error)
+	Get(context.Context, string, string) (Account, error)
+	List(context.Context, string, Status, string, int) ([]Account, string, error)
+	Transition(context.Context, string, string, int64, Status, Status, time.Time, identity.AuditEvent) (Account, error)
+}
+
+// Service implements customer rules independently from HTTP and SQL.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns a customer account application service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Register creates an active customer and returns a raw browser token exactly once.
+func (service *Service) Register(ctx context.Context, organizationID string, input RegisterInput, ipAddress, userAgent string) (string, Account, error) {
+	organizationID, err := publicScope(organizationID)
+	if err != nil {
+		return "", Account{}, err
+	}
+	email, err := normalizeEmail(input.Email)
+	if err != nil {
+		return "", Account{}, err
+	}
+	displayName, err := normalizeDisplayName(input.DisplayName)
+	if err != nil {
+		return "", Account{}, err
+	}
+	passwordHash, err := identity.HashPassword(input.Password)
+	if err != nil {
+		return "", Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	account := Account{
+		ID: newID(), OrganizationID: organizationID, Email: email, PasswordHash: passwordHash,
+		DisplayName: displayName, Status: StatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	rawToken := rand.Text()
+	session := Session{TokenHash: tokenDigest(rawToken), CustomerID: account.ID, ExpiresAt: now.Add(customerSessionLifetime)}
+	if err := service.store.Register(ctx, account, session, customerAudit("customer.register", account.ID, ipAddress, userAgent, now)); err != nil {
+		return "", Account{}, fmt.Errorf("register customer account: %w", err)
+	}
+	return rawToken, account, nil
+}
+
+// Login verifies one scoped active customer and returns a raw browser token exactly once.
+func (service *Service) Login(ctx context.Context, organizationID, email, password, ipAddress, userAgent string) (string, Account, error) {
+	organizationID, scopeErr := publicScope(organizationID)
+	normalizedEmail, emailErr := normalizeEmail(email)
+	if scopeErr != nil || emailErr != nil {
+		identity.VerifyPassword(dummyPasswordHash, password)
+		return "", Account{}, service.denyLogin(ctx, "", ipAddress, userAgent)
+	}
+	account, err := service.store.AccountByEmail(ctx, organizationID, normalizedEmail)
+	if errors.Is(err, ErrNotFound) {
+		identity.VerifyPassword(dummyPasswordHash, password)
+		return "", Account{}, service.denyLogin(ctx, "", ipAddress, userAgent)
+	}
+	if err != nil {
+		return "", Account{}, fmt.Errorf("look up customer login account: %w", err)
+	}
+	if account.Status != StatusActive || !identity.VerifyPassword(account.PasswordHash, password) {
+		return "", Account{}, service.denyLogin(ctx, account.ID, ipAddress, userAgent)
+	}
+	now := service.now().UTC()
+	rawToken := rand.Text()
+	session := Session{TokenHash: tokenDigest(rawToken), CustomerID: account.ID, ExpiresAt: now.Add(customerSessionLifetime)}
+	if err := service.store.CreateSession(ctx, session, customerAudit("customer.login", account.ID, ipAddress, userAgent, now)); err != nil {
+		return "", Account{}, fmt.Errorf("create customer session: %w", err)
+	}
+	return rawToken, account, nil
+}
+
+// Authenticate resolves one customer cookie inside its explicit storefront scope.
+func (service *Service) Authenticate(ctx context.Context, organizationID, rawToken string) (Account, error) {
+	organizationID, err := publicScope(organizationID)
+	if err != nil || strings.TrimSpace(rawToken) == "" {
+		return Account{}, ErrInvalidCredentials
+	}
+	account, err := service.store.AccountBySession(ctx, organizationID, tokenDigest(rawToken), service.now().UTC())
+	if errors.Is(err, ErrNotFound) || (err == nil && account.Status != StatusActive) {
+		return Account{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return Account{}, fmt.Errorf("look up customer session: %w", err)
+	}
+	return account, nil
+}
+
+// Logout revokes the current customer session without revealing invalid cookies.
+func (service *Service) Logout(ctx context.Context, organizationID, rawToken, ipAddress, userAgent string) error {
+	account, err := service.Authenticate(ctx, organizationID, rawToken)
+	if errors.Is(err, ErrInvalidCredentials) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	now := service.now().UTC()
+	if err := service.store.DeleteSession(ctx, tokenDigest(rawToken), customerAudit("customer.logout", account.ID, ipAddress, userAgent, now)); err != nil {
+		return fmt.Errorf("delete customer session: %w", err)
+	}
+	return nil
+}
+
+// UpdateProfile changes the display name for the authenticated account.
+func (service *Service) UpdateProfile(ctx context.Context, account Account, input ProfileInput, ipAddress, userAgent string) (Account, error) {
+	displayName, err := normalizeDisplayName(input.DisplayName)
+	if err != nil || input.Version < 1 || account.ID == "" {
+		return Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	updated, err := service.store.UpdateProfile(
+		ctx, account.OrganizationID, account.ID, displayName, input.Version, now,
+		customerAudit("customer.profile.update", account.ID, ipAddress, userAgent, now),
+	)
+	if err != nil {
+		return Account{}, fmt.Errorf("update customer profile: %w", err)
+	}
+	return updated, nil
+}
+
+// ChangePassword verifies the current secret, changes it, and revokes every session.
+func (service *Service) ChangePassword(ctx context.Context, account Account, input PasswordInput, ipAddress, userAgent string) (Account, error) {
+	if input.Version < 1 || account.ID == "" || !identity.VerifyPassword(account.PasswordHash, input.CurrentPassword) {
+		return Account{}, ErrInvalidCredentials
+	}
+	passwordHash, err := identity.HashPassword(input.NewPassword)
+	if err != nil {
+		return Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	updated, err := service.store.ChangePassword(
+		ctx, account.OrganizationID, account.ID, passwordHash, input.Version, now,
+		customerAudit("customer.password.change", account.ID, ipAddress, userAgent, now),
+	)
+	if err != nil {
+		return Account{}, fmt.Errorf("change customer password: %w", err)
+	}
+	return updated, nil
+}
+
+// Close permanently closes the authenticated account and revokes every session.
+func (service *Service) Close(ctx context.Context, account Account, input TransitionInput, ipAddress, userAgent string) (Account, error) {
+	if input.Version < 1 || account.ID == "" {
+		return Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	updated, err := service.store.Transition(
+		ctx, account.OrganizationID, account.ID, input.Version, StatusActive, StatusClosed, now,
+		customerAudit("customer.close", account.ID, ipAddress, userAgent, now),
+	)
+	if err != nil {
+		return Account{}, fmt.Errorf("close customer account: %w", err)
+	}
+	return updated, nil
+}
+
+// Get returns one customer in the employee's current organization scope.
+func (service *Service) Get(ctx context.Context, id string, actor identity.Principal) (Account, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Account{}, err
+	}
+	id, err = identifier(id)
+	if err != nil {
+		return Account{}, err
+	}
+	account, err := service.store.Get(ctx, organizationID, id)
+	if err != nil {
+		return Account{}, fmt.Errorf("get customer account: %w", err)
+	}
+	return account, nil
+}
+
+// List returns one bounded keyset customer page for administration.
+func (service *Service) List(ctx context.Context, status Status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Page{}, err
+	}
+	cursor = strings.TrimSpace(cursor)
+	if limit < 1 || limit > 100 || len(cursor) > maximumCursorLength || !printable(cursor) ||
+		(status != "" && status != StatusActive && status != StatusSuspended && status != StatusClosed) {
+		return Page{}, ErrInvalidInput
+	}
+	items, nextCursor, err := service.store.List(ctx, organizationID, status, cursor, limit)
+	if err != nil {
+		return Page{}, fmt.Errorf("list customer accounts: %w", err)
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+// Suspend revokes every session and blocks storefront authentication.
+func (service *Service) Suspend(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Account, error) {
+	return service.transition(ctx, id, input.Version, StatusActive, StatusSuspended, "customers:accounts:suspend", actor)
+}
+
+// Reactivate restores storefront authentication without restoring prior sessions.
+func (service *Service) Reactivate(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Account, error) {
+	return service.transition(ctx, id, input.Version, StatusSuspended, StatusActive, "customers:accounts:reactivate", actor)
+}
+
+func (service *Service) transition(ctx context.Context, id string, version int64, from, to Status, action string, actor identity.Principal) (Account, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Account{}, err
+	}
+	id, err = identifier(id)
+	if err != nil || version < 1 {
+		return Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	updated, err := service.store.Transition(
+		ctx, organizationID, id, version, from, to, now,
+		identity.AuditEvent{ID: newID(), UserID: actor.UserID, Action: action, Outcome: "succeeded", Target: id, CreatedAt: now},
+	)
+	if err != nil {
+		return Account{}, fmt.Errorf("transition customer account: %w", err)
+	}
+	return updated, nil
+}
+
+func (service *Service) denyLogin(ctx context.Context, customerID, ipAddress, userAgent string) error {
+	if err := service.store.AppendAudit(ctx, identity.AuditEvent{
+		ID: newID(), Action: "customer.login", Outcome: "denied", Target: customerID,
+		IPAddress: ipAddress, UserAgent: userAgent, CreatedAt: service.now().UTC(),
+	}); err != nil {
+		return fmt.Errorf("record denied customer login: %w", err)
+	}
+	return ErrInvalidCredentials
+}
+
+func publicScope(organizationID string) (string, error) {
+	organizationID = strings.TrimSpace(organizationID)
+{{- if .Tenancy}}
+	if organizationID == "" || len(organizationID) > maximumIdentifierLength || !printable(organizationID) {
+		return "", ErrInvalidInput
+	}
+{{- else}}
+	if organizationID != "" {
+		return "", ErrInvalidInput
+	}
+{{- end}}
+	return organizationID, nil
+}
+
+func administrationScope(actor identity.Principal) (string, error) {
+	if actor.UserID == "" || len(actor.UserID) > maximumIdentifierLength || !printable(actor.UserID) {
+		return "", identity.ErrInvalidCredentials
+	}
+{{- if .Tenancy}}
+	organizationID := strings.TrimSpace(actor.OrganizationID)
+	if organizationID == "" || len(organizationID) > maximumIdentifierLength || !printable(organizationID) {
+		return "", identity.ErrInvalidCredentials
+	}
+	return organizationID, nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func normalizeEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || len(value) > 254 || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func normalizeDisplayName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || utf8.RuneCountInString(value) > maximumDisplayNameLength || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func identifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maximumIdentifierLength || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func printable(value string) bool {
+	return strings.IndexFunc(value, func(character rune) bool { return !unicode.IsGraphic(character) }) < 0
+}
+
+func tokenDigest(value string) []byte {
+	sum := sha256.Sum256([]byte(value))
+	return sum[:]
+}
+
+func customerAudit(action, target, ipAddress, userAgent string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: newID(), Action: action, Outcome: "succeeded", Target: target,
+		IPAddress: ipAddress, UserAgent: userAgent, CreatedAt: now,
+	}
+}
+
+func newID() string {
+	return rand.Text()
+}

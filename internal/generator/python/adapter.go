@@ -236,6 +236,7 @@ type templateData struct {
 	Observability         bool
 	Approvals             bool
 	Catalog               bool
+	CustomerAccounts      bool
 	CSVTransfer           bool
 }
 

@@ -154,6 +154,26 @@ export interface CatalogPage {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .CustomerAccounts}}
+
+export type CustomerStatus = "active" | "suspended" | "closed";
+
+export interface CustomerAccount {
+  id: string;
+  organization_id?: string;
+  email: string;
+  display_name: string;
+  status: CustomerStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerPage {
+  items: CustomerAccount[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

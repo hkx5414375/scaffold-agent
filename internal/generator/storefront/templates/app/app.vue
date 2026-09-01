@@ -8,7 +8,8 @@
       </NuxtLink>
       <nav aria-label="Primary navigation">
         <NuxtLink to="/">Home</NuxtLink>[[if .Catalog]]
-        <NuxtLink to="/products">Products</NuxtLink>[[end]]
+        <NuxtLink to="/products">Products</NuxtLink>[[end]][[if .CustomerAccounts]]
+        <NuxtLink to="/account">Account</NuxtLink>[[end]]
       </nav>
     </header>
     <main>

@@ -279,6 +279,22 @@ func TestGoTenantCommerceCatalogMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCatalogSelection, "0.3.0", 75, false)
 }
 
+func TestGoTenantCustomerAccountsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCustomerSelection, "0.3.0", 74, false)
+}
+
+func TestGoTenantCustomerAccountsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCustomerSelection, "0.3.0", 75, false)
+}
+
+func TestGoCustomerAccountsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", customerSelection, "", 54, false)
+}
+
+func TestGoCustomerAccountsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", customerSelection, "", 55, false)
+}
+
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
@@ -566,6 +582,18 @@ const tenancyCatalogSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyCustomerSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: customer-accounts
+      version: 0.1.0
+`
+
+const customerSelection = `  capabilities:
+    - name: customer-accounts
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -658,6 +686,9 @@ WORKFLOWS
 	}
 	if strings.Contains(capabilities, "commerce-catalog") && plannedData.CapabilityLock["commerce-catalog"] != "0.1.0" {
 		t.Fatalf("Plan() commerce catalog lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "customer-accounts") && plannedData.CapabilityLock["customer-accounts"] != "0.1.0" {
+		t.Fatalf("Plan() customer accounts lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

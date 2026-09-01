@@ -1,0 +1,261 @@
+package customeraccounts
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestRegisterNormalizesAndAuthenticatesCustomer(t *testing.T) {
+	t.Parallel()
+	store := newMemoryStore()
+	service := NewService(store)
+	now := time.Date(2026, time.September, 1, 8, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+
+	token, account, err := service.Register(
+		context.Background(), testScope(),
+		RegisterInput{Email: " Customer@Example.COM ", Password: "correct-horse-battery-staple", DisplayName: " Customer One "},
+		"127.0.0.1", "test-agent",
+	)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if token == "" || account.Email != "customer@example.com" || account.DisplayName != "Customer One" {
+		t.Fatalf("Register() = token %q, account %#v", token, account)
+	}
+	if account.PasswordHash == "" || account.Status != StatusActive || account.Version != 1 {
+		t.Fatalf("Register() account security fields = %#v", account)
+	}
+	authenticated, err := service.Authenticate(context.Background(), testScope(), token)
+	if err != nil || authenticated.ID != account.ID {
+		t.Fatalf("Authenticate() = %#v, %v", authenticated, err)
+	}
+	if len(store.audits) != 1 || store.audits[0].Action != "customer.register" || store.audits[0].UserID != "" {
+		t.Fatalf("Register() audits = %#v", store.audits)
+	}
+}
+
+func TestLoginUsesGenericCredentialFailure(t *testing.T) {
+	t.Parallel()
+	store := newMemoryStore()
+	service := NewService(store)
+
+	_, _, err := service.Login(context.Background(), testScope(), "missing@example.com", "incorrect-password", "", "")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Login() error = %v, want ErrInvalidCredentials", err)
+	}
+	if len(store.audits) != 1 || store.audits[0].Outcome != "denied" || store.audits[0].Target != "" {
+		t.Fatalf("Login() audits = %#v", store.audits)
+	}
+}
+
+func TestPasswordChangeRevokesSessions(t *testing.T) {
+	t.Parallel()
+	store := newMemoryStore()
+	service := NewService(store)
+	token, account, err := service.Register(
+		context.Background(), testScope(),
+		RegisterInput{Email: "customer@example.com", Password: "correct-horse-battery-staple", DisplayName: "Customer"},
+		"", "",
+	)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	updated, err := service.ChangePassword(context.Background(), account, PasswordInput{
+		CurrentPassword: "correct-horse-battery-staple",
+		NewPassword:     "another-correct-password",
+		Version:         account.Version,
+	}, "", "")
+	if err != nil {
+		t.Fatalf("ChangePassword() error = %v", err)
+	}
+	if updated.Version != 2 || identity.VerifyPassword(updated.PasswordHash, "correct-horse-battery-staple") ||
+		!identity.VerifyPassword(updated.PasswordHash, "another-correct-password") {
+		t.Fatalf("ChangePassword() account = %#v", updated)
+	}
+	if _, err := service.Authenticate(context.Background(), testScope(), token); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("Authenticate(old token) error = %v", err)
+	}
+}
+
+func TestAdministrationTransitionsAreScopedAndOptimistic(t *testing.T) {
+	t.Parallel()
+	store := newMemoryStore()
+	service := NewService(store)
+	_, account, err := service.Register(
+		context.Background(), testScope(),
+		RegisterInput{Email: "customer@example.com", Password: "correct-horse-battery-staple", DisplayName: "Customer"},
+		"", "",
+	)
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	actor := identity.Principal{UserID: "staff-1", Role: "admin", OrganizationID: testScope()}
+	suspended, err := service.Suspend(context.Background(), account.ID, TransitionInput{Version: account.Version}, actor)
+	if err != nil || suspended.Status != StatusSuspended || suspended.Version != 2 {
+		t.Fatalf("Suspend() = %#v, %v", suspended, err)
+	}
+	if _, err := service.Suspend(context.Background(), account.ID, TransitionInput{Version: account.Version}, actor); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Suspend(stale) error = %v, want ErrConflict", err)
+	}
+	reactivated, err := service.Reactivate(context.Background(), account.ID, TransitionInput{Version: suspended.Version}, actor)
+	if err != nil || reactivated.Status != StatusActive || reactivated.Version != 3 {
+		t.Fatalf("Reactivate() = %#v, %v", reactivated, err)
+	}
+}
+
+func testScope() string {
+{{- if .Tenancy}}
+	return "organization-1"
+{{- else}}
+	return ""
+{{- end}}
+}
+
+type memoryStore struct {
+	accounts map[string]Account
+	sessions map[string]Session
+	audits   []identity.AuditEvent
+}
+
+func newMemoryStore() *memoryStore {
+	return &memoryStore{accounts: map[string]Account{}, sessions: map[string]Session{}}
+}
+
+func accountKey(organizationID, value string) string {
+	return organizationID + "\x00" + value
+}
+
+func (store *memoryStore) Register(_ context.Context, account Account, session Session, audit identity.AuditEvent) error {
+	for _, existing := range store.accounts {
+		if existing.OrganizationID == account.OrganizationID && existing.Email == account.Email {
+			return ErrConflict
+		}
+	}
+	store.accounts[accountKey(account.OrganizationID, account.ID)] = account
+	store.sessions[string(session.TokenHash)] = session
+	store.audits = append(store.audits, audit)
+	return nil
+}
+
+func (store *memoryStore) AccountByEmail(_ context.Context, organizationID, email string) (Account, error) {
+	for _, account := range store.accounts {
+		if account.OrganizationID == organizationID && account.Email == email {
+			return account, nil
+		}
+	}
+	return Account{}, ErrNotFound
+}
+
+func (store *memoryStore) CreateSession(_ context.Context, session Session, audit identity.AuditEvent) error {
+	store.sessions[string(session.TokenHash)] = session
+	store.audits = append(store.audits, audit)
+	return nil
+}
+
+func (store *memoryStore) AccountBySession(_ context.Context, organizationID string, tokenHash []byte, now time.Time) (Account, error) {
+	session, ok := store.sessions[string(tokenHash)]
+	if !ok || !session.ExpiresAt.After(now) {
+		return Account{}, ErrNotFound
+	}
+	account, ok := store.accounts[accountKey(organizationID, session.CustomerID)]
+	if !ok || account.Status != StatusActive {
+		return Account{}, ErrNotFound
+	}
+	return account, nil
+}
+
+func (store *memoryStore) DeleteSession(_ context.Context, tokenHash []byte, audit identity.AuditEvent) error {
+	if _, ok := store.sessions[string(tokenHash)]; !ok {
+		return ErrNotFound
+	}
+	delete(store.sessions, string(tokenHash))
+	store.audits = append(store.audits, audit)
+	return nil
+}
+
+func (store *memoryStore) AppendAudit(_ context.Context, audit identity.AuditEvent) error {
+	store.audits = append(store.audits, audit)
+	return nil
+}
+
+func (store *memoryStore) UpdateProfile(_ context.Context, organizationID, id, displayName string, version int64, now time.Time, audit identity.AuditEvent) (Account, error) {
+	account, err := store.current(organizationID, id, version, StatusActive)
+	if err != nil {
+		return Account{}, err
+	}
+	account.DisplayName = displayName
+	account.Version++
+	account.UpdatedAt = now
+	store.accounts[accountKey(organizationID, id)] = account
+	store.audits = append(store.audits, audit)
+	return account, nil
+}
+
+func (store *memoryStore) ChangePassword(_ context.Context, organizationID, id, passwordHash string, version int64, now time.Time, audit identity.AuditEvent) (Account, error) {
+	account, err := store.current(organizationID, id, version, StatusActive)
+	if err != nil {
+		return Account{}, err
+	}
+	account.PasswordHash = passwordHash
+	account.Version++
+	account.UpdatedAt = now
+	store.accounts[accountKey(organizationID, id)] = account
+	store.revoke(id)
+	store.audits = append(store.audits, audit)
+	return account, nil
+}
+
+func (store *memoryStore) Get(_ context.Context, organizationID, id string) (Account, error) {
+	account, ok := store.accounts[accountKey(organizationID, id)]
+	if !ok {
+		return Account{}, ErrNotFound
+	}
+	return account, nil
+}
+
+func (store *memoryStore) List(_ context.Context, organizationID string, status Status, cursor string, limit int) ([]Account, string, error) {
+	items := make([]Account, 0, limit)
+	for _, account := range store.accounts {
+		if account.OrganizationID == organizationID && (status == "" || account.Status == status) && account.ID > cursor {
+			items = append(items, account)
+		}
+	}
+	return items, "", nil
+}
+
+func (store *memoryStore) Transition(_ context.Context, organizationID, id string, version int64, from, to Status, now time.Time, audit identity.AuditEvent) (Account, error) {
+	account, err := store.current(organizationID, id, version, from)
+	if err != nil {
+		return Account{}, err
+	}
+	account.Status = to
+	account.Version++
+	account.UpdatedAt = now
+	store.accounts[accountKey(organizationID, id)] = account
+	store.revoke(id)
+	store.audits = append(store.audits, audit)
+	return account, nil
+}
+
+func (store *memoryStore) current(organizationID, id string, version int64, status Status) (Account, error) {
+	account, ok := store.accounts[accountKey(organizationID, id)]
+	if !ok || account.Version != version || account.Status != status {
+		return Account{}, ErrConflict
+	}
+	return account, nil
+}
+
+func (store *memoryStore) revoke(customerID string) {
+	for digest, session := range store.sessions {
+		if session.CustomerID == customerID {
+			delete(store.sessions, digest)
+		}
+	}
+}
+
+var _ Store = (*memoryStore)(nil)
