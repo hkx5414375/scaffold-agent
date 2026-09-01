@@ -236,6 +236,75 @@ func TestOrganizationMemberUpgradePreservesTenancyMigration(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationLifecycleForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validBusinessProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyLifecycleVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion || len(generated.Outputs) != 81 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/tenancy/lifecycle_http.py",
+				"src/demo_service/tenancy/lifecycle_repository.py",
+				"src/demo_service/tenancy/lifecycle_service.py",
+				"src/demo_service/migration/versions/000070_tenancy_lifecycle.py",
+				"tests/test_tenancy_lifecycle.py",
+				"tests/test_tenancy_lifecycle_database.py",
+				"web/admin/src/views/OrganizationSettingsView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != tenancyOwner {
+					t.Errorf("Generate(%s) did not produce lifecycle-owned %s", database, path)
+				}
+			}
+		})
+	}
+}
+
+func TestOrganizationLifecycleUpgradePreservesPriorMigrations(t *testing.T) {
+	t.Parallel()
+
+	members := validProject()
+	members.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyOwner, Version: tenancyMembersVersion,
+	}}
+	lifecycle := members
+	lifecycle.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyOwner, Version: tenancyLifecycleVersion,
+	}}
+	membersResult, err := New().Generate(context.Background(), members)
+	if err != nil {
+		t.Fatalf("Generate(members) error = %v", err)
+	}
+	lifecycleResult, err := New().Generate(context.Background(), lifecycle)
+	if err != nil {
+		t.Fatalf("Generate(lifecycle) error = %v", err)
+	}
+	for _, path := range []string{
+		"src/demo_service/migration/versions/000050_tenancy.py",
+		"src/demo_service/migration/versions/000060_tenancy_members.py",
+	} {
+		if !reflect.DeepEqual(outputContent(membersResult, path), outputContent(lifecycleResult, path)) {
+			t.Fatalf("organization lifecycle upgrade rewrote %s", path)
+		}
+	}
+	if len(lifecycleResult.Outputs) != 50 {
+		t.Fatalf("Generate(lifecycle) output count = %d, want 50", len(lifecycleResult.Outputs))
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

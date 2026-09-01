@@ -18,7 +18,7 @@ def tenancy_service(request: Request) -> TenancyService:
     return service
 
 
-@router.post("", response_model=Organization, status_code=201)
+@router.post("", response_model=Organization, status_code=201{{if .TenancyLifecycle}}, response_model_exclude_none=True{{end}})
 def create(
     payload: OrganizationWrite,
     principal: Annotated[Principal, Depends(current_principal)],
@@ -28,7 +28,7 @@ def create(
     return service.create(payload.name, principal)
 
 
-@router.get("", response_model=OrganizationPage)
+@router.get("", response_model=OrganizationPage{{if .TenancyLifecycle}}, response_model_exclude_none=True{{end}})
 def list_organizations(
     principal: Annotated[Principal, Depends(current_principal)],
     service: Annotated[TenancyService, Depends(tenancy_service)],

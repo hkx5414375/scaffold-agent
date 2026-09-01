@@ -1,0 +1,265 @@
+"""Transactional organization ownership and lifecycle persistence."""
+
+from dataclasses import replace
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.tenancy.models import (
+    Organization,
+    organization_memberships,
+    organizations,
+)
+
+
+class LifecycleNotFound(Exception):
+    """Organization or target member is absent from the actor scope."""
+
+
+class LifecycleForbidden(Exception):
+    """Actor lacks the required administrator or owner authority."""
+
+
+class LifecycleConflict(Exception):
+    """Organization is already in the requested lifecycle state."""
+
+
+class TenancyLifecycleRepository(Protocol):
+    """Persistence seam for ownership and reversible state transitions."""
+
+    def rename_organization(
+        self,
+        organization_id: str,
+        name: str,
+        actor_id: str,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization: ...
+
+    def transfer_ownership(
+        self,
+        organization_id: str,
+        actor_id: str,
+        target_user_id: str,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization: ...
+
+    def set_organization_active(
+        self,
+        organization_id: str,
+        actor_id: str,
+        active: bool,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization: ...
+
+
+class SQLAlchemyTenancyLifecycleRepository:
+    """SQLAlchemy adapter serializing lifecycle work on the organization row."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def rename_organization(
+        self,
+        organization_id: str,
+        name: str,
+        actor_id: str,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization:
+        result: Organization | None = None
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            organization = _organization_for_update(connection, organization_id, actor_id)
+            if organization is None:
+                error = LifecycleNotFound(organization_id)
+            elif str(organization["status"]) != "active":
+                error = LifecycleConflict(organization_id)
+            elif str(organization["role_code"]) != "admin":
+                error = LifecycleForbidden(actor_id)
+            else:
+                connection.execute(
+                    update(organizations)
+                    .where(organizations.c.id == organization_id)
+                    .values(name=name, updated_at=updated_at)
+                )
+                append_audit(connection, audit)
+                result = _map_organization(
+                    organization,
+                    actor_id,
+                    name=name,
+                    updated_at=updated_at,
+                )
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        return _result_or_raise(result, error)
+
+    def transfer_ownership(
+        self,
+        organization_id: str,
+        actor_id: str,
+        target_user_id: str,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization:
+        result: Organization | None = None
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            organization = _organization_for_update(connection, organization_id, actor_id)
+            if organization is None:
+                error = LifecycleNotFound(organization_id)
+            elif str(organization["status"]) != "active":
+                error = LifecycleConflict(organization_id)
+            elif str(organization["owner_user_id"]) != actor_id:
+                error = LifecycleForbidden(actor_id)
+            else:
+                target_role = connection.execute(
+                    select(organization_memberships.c.role_code)
+                    .where(
+                        organization_memberships.c.organization_id == organization_id,
+                        organization_memberships.c.user_id == target_user_id,
+                    )
+                    .with_for_update()
+                ).scalar_one_or_none()
+                if target_role is None:
+                    error = LifecycleNotFound(target_user_id)
+                else:
+                    if str(target_role) != "admin":
+                        connection.execute(
+                            update(organization_memberships)
+                            .where(
+                                organization_memberships.c.organization_id == organization_id,
+                                organization_memberships.c.user_id == target_user_id,
+                            )
+                            .values(role_code="admin")
+                        )
+                    connection.execute(
+                        update(organizations)
+                        .where(organizations.c.id == organization_id)
+                        .values(owner_user_id=target_user_id, updated_at=updated_at)
+                    )
+                    append_audit(connection, audit)
+                    result = _map_organization(
+                        organization,
+                        actor_id,
+                        owner_user_id=target_user_id,
+                        updated_at=updated_at,
+                    )
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        return _result_or_raise(result, error)
+
+    def set_organization_active(
+        self,
+        organization_id: str,
+        actor_id: str,
+        active: bool,
+        updated_at: datetime,
+        audit: AuditEvent,
+    ) -> Organization:
+        result: Organization | None = None
+        error: Exception | None = None
+        wanted = "active" if active else "inactive"
+        with self._engine.begin() as connection:
+            organization = _organization_for_update(connection, organization_id, actor_id)
+            if organization is None:
+                error = LifecycleNotFound(organization_id)
+            elif str(organization["owner_user_id"]) != actor_id:
+                error = LifecycleForbidden(actor_id)
+            elif str(organization["status"]) == wanted:
+                error = LifecycleConflict(organization_id)
+            else:
+                deactivated_at = None if active else updated_at
+                connection.execute(
+                    update(organizations)
+                    .where(organizations.c.id == organization_id)
+                    .values(
+                        status=wanted,
+                        deactivated_at=deactivated_at,
+                        updated_at=updated_at,
+                    )
+                )
+                append_audit(connection, audit)
+                result = _map_organization(
+                    organization,
+                    actor_id,
+                    status=wanted,
+                    deactivated_at=deactivated_at,
+                    updated_at=updated_at,
+                )
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        return _result_or_raise(result, error)
+
+
+def _organization_for_update(
+    connection: Connection,
+    organization_id: str,
+    actor_id: str,
+) -> RowMapping | None:
+    statement = (
+        select(
+            organizations.c.id,
+            organizations.c.name,
+            organizations.c.owner_user_id,
+            organizations.c.status,
+            organizations.c.deactivated_at,
+            organizations.c.created_at,
+            organizations.c.updated_at,
+            organization_memberships.c.role_code,
+        )
+        .select_from(
+            organizations.join(
+                organization_memberships,
+                (organization_memberships.c.organization_id == organizations.c.id)
+                & (organization_memberships.c.user_id == actor_id),
+            )
+        )
+        .where(organizations.c.id == organization_id)
+        .with_for_update()
+    )
+    return connection.execute(statement).mappings().first()
+
+
+def _map_organization(
+    row: RowMapping,
+    actor_id: str,
+    *,
+    name: str | None = None,
+    owner_user_id: str | None = None,
+    status: str | None = None,
+    updated_at: datetime | None = None,
+    deactivated_at: datetime | None = None,
+) -> Organization:
+    owner = owner_user_id or str(row["owner_user_id"])
+    return Organization(
+        id=str(row["id"]),
+        name=name or str(row["name"]),
+        role=str(row["role_code"]),
+        created_at=cast(datetime, row["created_at"]),
+        owner_user_id=owner,
+        is_owner=owner == actor_id,
+        status=status or str(row["status"]),
+        updated_at=updated_at or cast(datetime, row["updated_at"]),
+        deactivated_at=(
+            deactivated_at if status is not None else cast(datetime | None, row["deactivated_at"])
+        ),
+    )
+
+
+def _result_or_raise(result: Organization | None, error: Exception | None) -> Organization:
+    if error is not None:
+        raise error
+    if result is None:
+        raise RuntimeError("lifecycle transaction did not produce an organization")
+    return result
+
+
+def _denied(audit: AuditEvent) -> AuditEvent:
+    return replace(audit, outcome="denied")

@@ -38,6 +38,13 @@ class TenancyService:
             name=normalized_name,
             role="admin",
             created_at=now,
+{{- if .TenancyLifecycle}}
+            owner_user_id=actor.user_id,
+            is_owner=True,
+            status="active",
+            updated_at=now,
+            deactivated_at=None,
+{{- end}}
         )
         self._repository.create_organization(
             organization,

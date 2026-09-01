@@ -14,6 +14,14 @@ from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
 from {{.PackageName}}.identity.service import IdentityService
 from {{.PackageName}}.migrations import upgrade_database
 from {{.PackageName}}.tenancy.http import router as tenancy_router
+{{- if .TenancyLifecycle}}
+from {{.PackageName}}.tenancy.lifecycle_http import (
+    install_error_handlers as install_lifecycle_error_handlers,
+)
+from {{.PackageName}}.tenancy.lifecycle_http import router as lifecycle_router
+from {{.PackageName}}.tenancy.lifecycle_repository import SQLAlchemyTenancyLifecycleRepository
+from {{.PackageName}}.tenancy.lifecycle_service import TenancyLifecycleService
+{{- end}}
 {{- if .TenancyMembers}}
 from {{.PackageName}}.tenancy.member_http import (
     install_error_handlers as install_member_error_handlers,
@@ -38,6 +46,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
         app.state.tenancy_service = TenancyService(SQLAlchemyTenancyRepository(engine))
+{{- if .TenancyLifecycle}}
+        app.state.tenancy_lifecycle_service = TenancyLifecycleService(
+            SQLAlchemyTenancyLifecycleRepository(engine)
+        )
+{{- end}}
 {{- if .TenancyMembers}}
         app.state.tenancy_member_service = TenancyMemberService(
             SQLAlchemyTenancyMemberRepository(engine)
@@ -54,12 +67,18 @@ def create_app() -> FastAPI:
     """Create one application without opening infrastructure during import."""
     application = FastAPI(title="{{.ProjectName}}", version="0.1.0", lifespan=lifespan)
     install_error_handlers(application)
+{{- if .TenancyLifecycle}}
+    install_lifecycle_error_handlers(application)
+{{- end}}
 {{- if .TenancyMembers}}
     install_member_error_handlers(application)
 {{- end}}
     application.include_router(health_router)
     application.include_router(identity_router)
     application.include_router(tenancy_router)
+{{- if .TenancyLifecycle}}
+    application.include_router(lifecycle_router)
+{{- end}}
 {{- if .TenancyMembers}}
     application.include_router(member_router)
 {{- end}}

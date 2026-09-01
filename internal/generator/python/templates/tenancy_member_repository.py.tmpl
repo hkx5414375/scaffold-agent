@@ -29,6 +29,16 @@ class LastAdministrator(Exception):
     """Mutation would remove the final organization administrator."""
 
 
+{{- if .TenancyLifecycle}}
+
+
+class OwnerProtected(Exception):
+    """Mutation would demote or remove the current organization owner."""
+
+
+{{- end}}
+
+
 class InvitationInvalid(Exception):
     """Invitation credential is invalid, expired, accepted, or email-mismatched."""
 
@@ -79,11 +89,17 @@ class SQLAlchemyTenancyMemberRepository:
                 users.c.email,
                 organization_memberships.c.role_code,
                 organization_memberships.c.created_at,
+{{- if .TenancyLifecycle}}
+                organizations.c.owner_user_id,
+{{- end}}
             )
             .select_from(
                 organization_memberships.join(
                     users, users.c.id == organization_memberships.c.user_id
-                )
+                ){{if .TenancyLifecycle}}.join(
+                    organizations,
+                    organizations.c.id == organization_memberships.c.organization_id,
+                ){{end}}
             )
             .where(organization_memberships.c.organization_id == organization_id)
             .order_by(users.c.email, users.c.id)
@@ -186,6 +202,9 @@ class SQLAlchemyTenancyMemberRepository:
                     email=email,
                     role=role,
                     joined_at=accepted_at,
+{{- if .TenancyLifecycle}}
+                    is_owner=False,
+{{- end}}
                 )
             if error is not None:
                 append_audit(connection, _denied(audit))
@@ -205,12 +224,21 @@ class SQLAlchemyTenancyMemberRepository:
         result: OrganizationMember | None = None
         error: Exception | None = None
         with self._engine.begin() as connection:
+{{- if .TenancyLifecycle}}
+            owner_user_id = _lock_organization(connection, organization_id)
+            if owner_user_id is None:
+{{- else}}
             if not _lock_organization(connection, organization_id):
+{{- end}}
                 error = MemberNotFound(organization_id)
             else:
                 member = _member_for_update(connection, organization_id, user_id)
                 if member is None:
                     error = MemberNotFound(user_id)
+{{- if .TenancyLifecycle}}
+                elif user_id == owner_user_id and role != "admin":
+                    error = OwnerProtected(user_id)
+{{- end}}
                 elif (
                     str(member["role_code"]) == "admin"
                     and role != "admin"
@@ -233,6 +261,9 @@ class SQLAlchemyTenancyMemberRepository:
                         email=str(member["email"]),
                         role=role,
                         joined_at=cast(datetime, member["created_at"]),
+{{- if .TenancyLifecycle}}
+                        is_owner=user_id == owner_user_id,
+{{- end}}
                     )
             if error is not None:
                 append_audit(connection, _denied(audit))
@@ -250,12 +281,21 @@ class SQLAlchemyTenancyMemberRepository:
     ) -> None:
         error: Exception | None = None
         with self._engine.begin() as connection:
+{{- if .TenancyLifecycle}}
+            owner_user_id = _lock_organization(connection, organization_id)
+            if owner_user_id is None:
+{{- else}}
             if not _lock_organization(connection, organization_id):
+{{- end}}
                 error = MemberNotFound(organization_id)
             else:
                 member = _member_for_update(connection, organization_id, user_id)
                 if member is None:
                     error = MemberNotFound(user_id)
+{{- if .TenancyLifecycle}}
+                elif user_id == owner_user_id:
+                    error = OwnerProtected(user_id)
+{{- end}}
                 elif str(member["role_code"]) == "admin" and (
                     _administrator_count(connection, organization_id) <= 1
                 ):
@@ -274,7 +314,15 @@ class SQLAlchemyTenancyMemberRepository:
             raise error
 
 
-def _lock_organization(connection: Connection, organization_id: str) -> bool:
+def _lock_organization(connection: Connection, organization_id: str) -> {{if .TenancyLifecycle}}str | None{{else}}bool{{end}}:
+{{- if .TenancyLifecycle}}
+    value = connection.execute(
+        select(organizations.c.owner_user_id)
+        .where(organizations.c.id == organization_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    return str(value) if value is not None else None
+{{- else}}
     return (
         connection.execute(
             select(organizations.c.id)
@@ -283,6 +331,7 @@ def _lock_organization(connection: Connection, organization_id: str) -> bool:
         ).first()
         is not None
     )
+{{- end}}
 
 
 def _has_member_email(connection: Connection, organization_id: str, email: str) -> bool:
@@ -366,6 +415,9 @@ def _map_member(row: RowMapping) -> OrganizationMember:
         email=str(row["email"]),
         role=str(row["role_code"]),
         joined_at=cast(datetime, row["created_at"]),
+{{- if .TenancyLifecycle}}
+        is_owner=str(row["owner_user_id"]) == str(row["user_id"]),
+{{- end}}
     )
 
 

@@ -1,0 +1,78 @@
+"""Add explicit organization ownership and reversible lifecycle state."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000070_tenancy_lifecycle"
+down_revision: str | None = "000060_tenancy_members"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Backfill creators as owners and add active lifecycle state."""
+    op.add_column(
+        "organizations",
+        sa.Column("owner_user_id", sa.String(length=191), nullable=True),
+    )
+    op.add_column(
+        "organizations",
+        sa.Column(
+            "status",
+            sa.String(length=16),
+            nullable=False,
+            server_default="active",
+        ),
+    )
+    op.add_column(
+        "organizations",
+        sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
+    )
+    connection = op.get_bind()
+    connection.execute(
+        sa.update(
+            sa.table("organizations", sa.column("owner_user_id"), sa.column("created_by"))
+        ).values(owner_user_id=sa.column("created_by"))
+    )
+    with op.batch_alter_table("organizations") as batch:
+        batch.alter_column(
+            "owner_user_id",
+            existing_type=sa.String(length=191),
+            nullable=False,
+        )
+        batch.create_foreign_key(
+            "fk_organizations_owner_user_id_identity_users",
+            "identity_users",
+            ["owner_user_id"],
+            ["id"],
+        )
+        batch.create_check_constraint(
+            "ck_organizations_organizations_lifecycle",
+            "(status = 'active' AND deactivated_at IS NULL) OR "
+            "(status = 'inactive' AND deactivated_at IS NOT NULL)",
+        )
+    op.create_index(
+        "ix_organizations_owner",
+        "organizations",
+        ["owner_user_id", "id"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    """Remove lifecycle state while preserving the organization itself."""
+    op.drop_index("ix_organizations_owner", table_name="organizations")
+    with op.batch_alter_table("organizations") as batch:
+        batch.drop_constraint(
+            "ck_organizations_organizations_lifecycle",
+            type_="check",
+        )
+        batch.drop_constraint(
+            "fk_organizations_owner_user_id_identity_users",
+            type_="foreignkey",
+        )
+        batch.drop_column("deactivated_at")
+        batch.drop_column("status")
+        batch.drop_column("owner_user_id")

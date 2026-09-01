@@ -54,6 +54,11 @@ class SQLAlchemyTenancyRepository:
                     id=organization.id,
                     name=organization.name,
                     created_by=user_id,
+{{- if .TenancyLifecycle}}
+                    owner_user_id=user_id,
+                    status="active",
+                    deactivated_at=None,
+{{- end}}
                     created_at=organization.created_at,
                     updated_at=organization.created_at,
                 )
@@ -75,6 +80,13 @@ class SQLAlchemyTenancyRepository:
                 organizations.c.name,
                 organization_memberships.c.role_code,
                 organizations.c.created_at,
+{{- if .TenancyLifecycle}}
+                organization_memberships.c.user_id,
+                organizations.c.owner_user_id,
+                organizations.c.status,
+                organizations.c.updated_at,
+                organizations.c.deactivated_at,
+{{- end}}
             )
             .select_from(
                 organization_memberships.join(
@@ -90,9 +102,23 @@ class SQLAlchemyTenancyRepository:
         return [_map_organization(row) for row in rows]
 
     def membership_role(self, organization_id: str, user_id: str) -> str | None:
-        statement = select(organization_memberships.c.role_code).where(
-            organization_memberships.c.organization_id == organization_id,
-            organization_memberships.c.user_id == user_id,
+        statement = (
+            select(organization_memberships.c.role_code)
+{{- if .TenancyLifecycle}}
+            .select_from(
+                organization_memberships.join(
+                    organizations,
+                    organizations.c.id == organization_memberships.c.organization_id,
+                )
+            )
+{{- end}}
+            .where(
+                organization_memberships.c.organization_id == organization_id,
+                organization_memberships.c.user_id == user_id,
+{{- if .TenancyLifecycle}}
+                organizations.c.status == "active",
+{{- end}}
+            )
         )
         with self._engine.connect() as connection:
             value = connection.execute(statement).scalar_one_or_none()
@@ -121,4 +147,11 @@ def _map_organization(row: RowMapping) -> Organization:
         name=str(row["name"]),
         role=str(row["role_code"]),
         created_at=cast(datetime, row["created_at"]),
+{{- if .TenancyLifecycle}}
+        owner_user_id=str(row["owner_user_id"]),
+        is_owner=str(row["owner_user_id"]) == str(row["user_id"]),
+        status=str(row["status"]),
+        updated_at=cast(datetime, row["updated_at"]),
+        deactivated_at=cast(datetime | None, row["deactivated_at"]),
+{{- end}}
     )

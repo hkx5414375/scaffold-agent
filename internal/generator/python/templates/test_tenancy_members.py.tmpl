@@ -21,6 +21,9 @@ from {{.PackageName}}.tenancy.member_repository import (
     LastAdministrator,
     MemberConflict,
     MemberNotFound,
+{{- if .TenancyLifecycle}}
+    OwnerProtected,
+{{- end}}
 )
 from {{.PackageName}}.tenancy.member_service import (
     MemberError,
@@ -50,6 +53,9 @@ class MemoryRepository:
             email="member@example.com",
             role="user",
             joined_at=NOW,
+{{- if .TenancyLifecycle}}
+            is_owner=False,
+{{- end}}
         )
 
     def list_members(self, organization_id: str) -> list[OrganizationMember]:
@@ -157,6 +163,9 @@ def test_member_mutation_errors_are_stable() -> None:
     for failure, expected in (
         (MemberNotFound(), MemberErrorKind.NOT_FOUND),
         (LastAdministrator(), MemberErrorKind.LAST_ADMINISTRATOR),
+{{- if .TenancyLifecycle}}
+        (OwnerProtected(), MemberErrorKind.OWNER_PROTECTED),
+{{- end}}
     ):
         repository.failure = failure
         with pytest.raises(MemberError) as changed:
@@ -211,6 +220,9 @@ class HttpMemberService:
         email="member@example.com",
         role="user",
         joined_at=NOW,
+{{- if .TenancyLifecycle}}
+        is_owner=False,
+{{- end}}
     )
 
     def list(self, actor: Principal) -> OrganizationMemberPage:

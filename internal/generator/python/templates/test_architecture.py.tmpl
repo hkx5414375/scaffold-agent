@@ -30,6 +30,12 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/organizations/{organization_id}/members/{user_id}", "patch"),
         ("/api/v1/organizations/{organization_id}/members/{user_id}", "delete"),
 {{- end}}
+{{- if .TenancyLifecycle}}
+        ("/api/v1/organizations/{organization_id}", "patch"),
+        ("/api/v1/organizations/{organization_id}/ownership-transfers", "post"),
+        ("/api/v1/organizations/{organization_id}/deactivation", "post"),
+        ("/api/v1/organizations/{organization_id}/reactivation", "post"),
+{{- end}}
 {{- if .Business}}
         ("{{.Business.RoutePath}}", "post"),
         ("{{.Business.RoutePath}}", "get"),

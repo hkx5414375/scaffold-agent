@@ -41,6 +41,9 @@ def install_error_handlers(app: FastAPI) -> None:
             MemberErrorKind.NOT_FOUND: (404, "tenancy.member.not_found"),
             MemberErrorKind.CONFLICT: (409, "tenancy.member.conflict"),
             MemberErrorKind.LAST_ADMINISTRATOR: (409, "tenancy.last_administrator"),
+{{- if .TenancyLifecycle}}
+            MemberErrorKind.OWNER_PROTECTED: (409, "tenancy.owner.protected"),
+{{- end}}
             MemberErrorKind.INVITATION_INVALID: (400, "tenancy.invitation.invalid"),
         }[error.kind]
         return JSONResponse(

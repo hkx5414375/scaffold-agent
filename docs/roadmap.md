@@ -68,7 +68,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Python shared Vue/Element Plus administration with the same identity and Blueprint CRUD transport contract as Go and Java.
 - [x] Python organization tenancy 0.1 with atomic organization creation, membership-scoped RBAC, tenant CRUD isolation, stable OpenAPI, and shared administration selection.
 - [x] Python organization tenancy 0.2 with digest-only email invitations, member administration, concurrent last-administrator protection, and shared administration UI.
-- [ ] Python organization lifecycle and remaining M5 platform capability parity.
+- [x] Python organization tenancy 0.3 with explicit ownership, ownership transfer, reversible deactivation, inactive authorization blocking, and owner-safe administration.
+- [ ] Remaining Python M5 platform capability parity.
 
 ## M7 — General business suite and storefront
 

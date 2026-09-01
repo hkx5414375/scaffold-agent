@@ -21,12 +21,12 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.2、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
 
-Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组织创建与查询、成员身份范围内的权限校验、管理端组织选择，以及所有业务读写的 `X-Organization-ID` 租户条件。三种后端的 `0.2.0` 都进一步加入成员列表、72 小时且绑定邮箱的邀请、邀请接受、角色变更、成员移除和并发最后管理员保护。邀请明文只在创建响应中返回一次，数据库只保存 SHA-256 摘要，AI 不应尝试从数据库恢复邀请明文。Go 与 Java 的 `0.3.0` 再加入独立所有者、组织改名、原子所有权转移、可逆停用和重新启用；所有权只能转给现有成员且会自动把新所有者提升为管理员。AI 不得绕过所有者保护或自行补一个级联删除组织的接口。停用组织仍可查询，但不能再授权租户业务请求。
+Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组织创建与查询、成员身份范围内的权限校验、管理端组织选择，以及所有业务读写的 `X-Organization-ID` 租户条件。三种后端的 `0.2.0` 都进一步加入成员列表、72 小时且绑定邮箱的邀请、邀请接受、角色变更、成员移除和并发最后管理员保护。邀请明文只在创建响应中返回一次，数据库只保存 SHA-256 摘要，AI 不应尝试从数据库恢复邀请明文。三种后端的 `0.3.0` 都再加入独立所有者、组织改名、原子所有权转移、可逆停用和重新启用；所有权只能转给现有成员且会自动把新所有者提升为管理员。AI 不得绕过所有者保护或自行补一个级联删除组织的接口。停用组织仍可查询，但不能再授权租户业务请求。
 
 项目能力选择必须锁定精确版本；传递依赖可以声明语义版本范围。Engine 会在全部约束下确定性选择最高兼容版本，并把精确结果写入能力锁。AI 应复用该锁，不要自行重新推导依赖版本。
 

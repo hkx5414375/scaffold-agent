@@ -22,14 +22,15 @@ import (
 )
 
 const (
-	backend               = "python"
-	baseOwner             = "python-service"
-	baseVersion           = "0.1.0"
-	crudOwner             = "python-crud"
-	crudVersion           = "0.1.0"
-	tenancyOwner          = "organization-tenancy"
-	tenancyVersion        = "0.1.0"
-	tenancyMembersVersion = "0.2.0"
+	backend                 = "python"
+	baseOwner               = "python-service"
+	baseVersion             = "0.1.0"
+	crudOwner               = "python-crud"
+	crudVersion             = "0.1.0"
+	tenancyOwner            = "organization-tenancy"
+	tenancyVersion          = "0.1.0"
+	tenancyMembersVersion   = "0.2.0"
+	tenancyLifecycleVersion = "0.3.0"
 )
 
 //go:embed all:templates
@@ -77,6 +78,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyMembersVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization tenancy with email-bound invitations and member administration.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization tenancy with ownership, reversible lifecycle, and member administration.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -221,6 +232,15 @@ var tenancyMemberTemplates = map[string]string{
 	"tests/test_tenancy_members_database.py":                   "templates/test_tenancy_members_database.py.tmpl",
 }
 
+var tenancyLifecycleTemplates = map[string]string{
+	"src/package/tenancy/lifecycle_http.py":                      "templates/tenancy_lifecycle_http.py.tmpl",
+	"src/package/tenancy/lifecycle_repository.py":                "templates/tenancy_lifecycle_repository.py.tmpl",
+	"src/package/tenancy/lifecycle_service.py":                   "templates/tenancy_lifecycle_service.py.tmpl",
+	"src/package/migration/versions/000070_tenancy_lifecycle.py": "templates/tenancy_lifecycle_migration.py.tmpl",
+	"tests/test_tenancy_lifecycle.py":                            "templates/test_tenancy_lifecycle.py.tmpl",
+	"tests/test_tenancy_lifecycle_database.py":                   "templates/test_tenancy_lifecycle_database.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -274,12 +294,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	tenancyEnabled := false
 	tenancyMembersEnabled := false
+	tenancyLifecycleEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
 			tenancyEnabled = true
 			selectedTenancyVersion = pack.Metadata.Version
-			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
+			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion ||
+				pack.Metadata.Version == tenancyLifecycleVersion
+			tenancyLifecycleEnabled = pack.Metadata.Version == tenancyLifecycleVersion
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -303,10 +326,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Admin:                 adminEnabled,
 		Tenancy:               tenancyEnabled,
 		TenancyMembers:        tenancyMembersEnabled,
+		TenancyLifecycle:      tenancyLifecycleEnabled,
 	}
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+2,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+2,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -353,6 +377,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if tenancyLifecycleEnabled {
+		for path, templatePath := range tenancyLifecycleTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    tenancyOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -367,6 +399,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if tenancyMembersEnabled {
 			targets["web/admin/src/views/MembersView.vue"] = renderTarget{
 				Template:    "templates/src/views/MembersView.vue",
+				Owner:       tenancyOwner,
+				SharedAdmin: true,
+			}
+		}
+		if tenancyLifecycleEnabled {
+			targets["web/admin/src/views/OrganizationSettingsView.vue"] = renderTarget{
+				Template:    "templates/src/views/OrganizationSettingsView.vue",
 				Owner:       tenancyOwner,
 				SharedAdmin: true,
 			}

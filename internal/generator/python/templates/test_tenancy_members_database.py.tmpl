@@ -1,7 +1,9 @@
 """Organization member repository contracts for SQLite and the selected database."""
 
 import os
+{{- if not .TenancyLifecycle}}
 from concurrent.futures import ThreadPoolExecutor
+{{- end}}
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -71,6 +73,9 @@ def _demote(
 
 
 def _repository_contract(engine: Engine, concurrent: bool) -> None:
+{{- if .TenancyLifecycle}}
+    del concurrent
+{{- end}}
     suffix = uuid4().hex
     first_id = "admin-" + suffix
     second_id = "member-" + suffix
@@ -116,6 +121,17 @@ def _repository_contract(engine: Engine, concurrent: bool) -> None:
     assert reused.value.kind == MemberErrorKind.INVITATION_INVALID
     assert len([item for item in service.list(scoped_first).items if item.role == "admin"]) == 2
 
+{{- if .TenancyLifecycle}}
+    members = service.list(scoped_first).items
+    assert next(item for item in members if item.user_id == first_id).is_owner
+    assert not next(item for item in members if item.user_id == second_id).is_owner
+    assert _demote(service, scoped_first, first_id) == MemberErrorKind.OWNER_PROTECTED
+    with pytest.raises(MemberError) as protected_owner:
+        service.remove(first_id, scoped_first)
+    assert protected_owner.value.kind == MemberErrorKind.OWNER_PROTECTED
+    assert _demote(service, scoped_second, second_id) is None
+    service.remove(second_id, scoped_first)
+{{- else}}
     if concurrent:
         with ThreadPoolExecutor(max_workers=2) as executor:
             first = executor.submit(_demote, service, scoped_first, first_id)
@@ -134,6 +150,7 @@ def _repository_contract(engine: Engine, concurrent: bool) -> None:
         service.remove(administrator.user_id, scoped_first)
     assert final_administrator.value.kind == MemberErrorKind.LAST_ADMINISTRATOR
     service.remove(ordinary.user_id, scoped_first)
+{{- end}}
     with pytest.raises(MemberError) as missing:
         service.change_role("missing", "user", scoped_first)
     assert missing.value.kind == MemberErrorKind.NOT_FOUND

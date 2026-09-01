@@ -60,6 +60,14 @@ func TestPythonMySQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReference(t, "mysql", true, false, "0.2.0")
 }
 
+func TestPythonPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "postgresql", true, true, "0.3.0")
+}
+
+func TestPythonMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "mysql", true, false, "0.3.0")
+}
+
 func runGeneratedPythonReference(
 	t *testing.T,
 	database string,
@@ -155,8 +163,14 @@ CAPABILITIES
 		if business {
 			wantChanges++
 		}
-		if organizationTenancyVersion == "0.2.0" {
+		if organizationTenancyVersion == "0.2.0" || organizationTenancyVersion == "0.3.0" {
 			wantChanges += 7
+			if admin {
+				wantChanges++
+			}
+		}
+		if organizationTenancyVersion == "0.3.0" {
+			wantChanges += 6
 			if admin {
 				wantChanges++
 			}

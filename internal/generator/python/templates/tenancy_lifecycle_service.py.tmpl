@@ -1,0 +1,170 @@
+"""Organization ownership and reversible lifecycle use cases."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from uuid import uuid4
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.tenancy.lifecycle_repository import (
+    LifecycleConflict,
+    LifecycleForbidden,
+    LifecycleNotFound,
+    TenancyLifecycleRepository,
+)
+from {{.PackageName}}.tenancy.models import Organization
+
+
+class LifecycleErrorKind(StrEnum):
+    """Stable organization lifecycle failure categories."""
+
+    INVALID_INPUT = "invalid_input"
+    NOT_FOUND = "not_found"
+    FORBIDDEN = "forbidden"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleError(Exception):
+    """Expected lifecycle failure safe for public transport mapping."""
+
+    kind: LifecycleErrorKind
+    message: str
+
+
+class TenancyLifecycleService:
+    """Ownership use cases independent from FastAPI and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: TenancyLifecycleRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def rename(self, organization_id: str, name: str, actor: Principal) -> Organization:
+        """Rename one active organization as an administrator."""
+        _require_actor(actor)
+        normalized_id = _normalize_identifier(organization_id)
+        normalized_name = name.strip()
+        if not normalized_name or len(normalized_name) > 120 or _has_control(normalized_name):
+            raise _invalid_input()
+        now = self._clock()
+        try:
+            return self._repository.rename_organization(
+                normalized_id,
+                normalized_name,
+                actor.user_id,
+                now,
+                _audit(actor.user_id, "tenancy.organization.rename", normalized_id, now),
+            )
+        except (LifecycleNotFound, LifecycleForbidden, LifecycleConflict) as error:
+            raise _public_error(error) from error
+
+    def transfer_ownership(
+        self,
+        organization_id: str,
+        target_user_id: str,
+        actor: Principal,
+    ) -> Organization:
+        """Transfer ownership to an existing member and promote that identity."""
+        _require_actor(actor)
+        normalized_id = _normalize_identifier(organization_id)
+        normalized_target = _normalize_identifier(target_user_id)
+        if normalized_target == actor.user_id:
+            raise _invalid_input()
+        now = self._clock()
+        try:
+            return self._repository.transfer_ownership(
+                normalized_id,
+                actor.user_id,
+                normalized_target,
+                now,
+                _audit(
+                    actor.user_id,
+                    "tenancy.organization.ownership.transfer",
+                    normalized_id + ":" + normalized_target,
+                    now,
+                ),
+            )
+        except (LifecycleNotFound, LifecycleForbidden, LifecycleConflict) as error:
+            raise _public_error(error) from error
+
+    def deactivate(self, organization_id: str, actor: Principal) -> Organization:
+        """Reversibly deactivate one owned organization."""
+        return self._set_active(organization_id, actor, active=False)
+
+    def reactivate(self, organization_id: str, actor: Principal) -> Organization:
+        """Reactivate one owned organization without tenant authorization."""
+        return self._set_active(organization_id, actor, active=True)
+
+    def _set_active(
+        self,
+        organization_id: str,
+        actor: Principal,
+        active: bool,
+    ) -> Organization:
+        _require_actor(actor)
+        normalized_id = _normalize_identifier(organization_id)
+        now = self._clock()
+        action = "tenancy.organization.reactivate" if active else "tenancy.organization.deactivate"
+        try:
+            return self._repository.set_organization_active(
+                normalized_id,
+                actor.user_id,
+                active,
+                now,
+                _audit(actor.user_id, action, normalized_id, now),
+            )
+        except (LifecycleNotFound, LifecycleForbidden, LifecycleConflict) as error:
+            raise _public_error(error) from error
+
+
+def _normalize_identifier(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 191 or _has_control(normalized):
+        raise _invalid_input()
+    return normalized
+
+
+def _require_actor(actor: Principal) -> None:
+    if not actor.user_id or _has_control(actor.user_id):
+        raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+
+
+def _audit(user_id: str, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _public_error(error: Exception) -> LifecycleError:
+    if isinstance(error, LifecycleNotFound):
+        return LifecycleError(LifecycleErrorKind.NOT_FOUND, "organization was not found")
+    if isinstance(error, LifecycleForbidden):
+        return LifecycleError(
+            LifecycleErrorKind.FORBIDDEN,
+            "organization lifecycle action is forbidden",
+        )
+    return LifecycleError(
+        LifecycleErrorKind.CONFLICT,
+        "organization is already in the requested state",
+    )
+
+
+def _invalid_input() -> LifecycleError:
+    return LifecycleError(LifecycleErrorKind.INVALID_INPUT, "organization input is invalid")
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)

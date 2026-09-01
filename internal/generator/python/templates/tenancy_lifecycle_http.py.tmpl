@@ -1,0 +1,118 @@
+"""FastAPI transport for organization ownership and lifecycle."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import current_principal
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.tenancy.lifecycle_service import (
+    LifecycleError,
+    LifecycleErrorKind,
+    TenancyLifecycleService,
+)
+from {{.PackageName}}.tenancy.models import Organization
+
+router = APIRouter(tags=["organization-lifecycle"])
+
+
+class StrictModel(BaseModel):
+    """Reject fields absent from the lifecycle contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OrganizationRenameWrite(StrictModel):
+    """Bounded organization name replacement."""
+
+    name: str = Field(min_length=1, max_length=120)
+
+
+class OwnershipTransferWrite(StrictModel):
+    """Existing member selected as the next owner."""
+
+    target_user_id: str = Field(min_length=1, max_length=191)
+
+
+def lifecycle_service(request: Request) -> TenancyLifecycleService:
+    """Resolve the process-scoped lifecycle service."""
+    service: TenancyLifecycleService = request.app.state.tenancy_lifecycle_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable organization lifecycle failure mappings."""
+
+    @app.exception_handler(LifecycleError)
+    async def lifecycle_error(_request: Request, error: LifecycleError) -> JSONResponse:
+        status, code = {
+            LifecycleErrorKind.INVALID_INPUT: (400, "tenancy.organization.invalid"),
+            LifecycleErrorKind.NOT_FOUND: (404, "tenancy.organization.not_found"),
+            LifecycleErrorKind.FORBIDDEN: (403, "tenancy.lifecycle.forbidden"),
+            LifecycleErrorKind.CONFLICT: (409, "tenancy.lifecycle.conflict"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.patch(
+    "/api/v1/organizations/{organization_id}",
+    response_model=Organization,
+    response_model_exclude_none=True,
+)
+def rename(
+    organization_id: str,
+    payload: OrganizationRenameWrite,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyLifecycleService, Depends(lifecycle_service)],
+) -> Organization:
+    """Rename one active organization as an administrator."""
+    return service.rename(organization_id, payload.name, principal)
+
+
+@router.post(
+    "/api/v1/organizations/{organization_id}/ownership-transfers",
+    response_model=Organization,
+    response_model_exclude_none=True,
+)
+def transfer_ownership(
+    organization_id: str,
+    payload: OwnershipTransferWrite,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyLifecycleService, Depends(lifecycle_service)],
+) -> Organization:
+    """Transfer ownership to an existing member."""
+    return service.transfer_ownership(organization_id, payload.target_user_id, principal)
+
+
+@router.post(
+    "/api/v1/organizations/{organization_id}/deactivation",
+    response_model=Organization,
+    response_model_exclude_none=True,
+)
+def deactivate(
+    organization_id: str,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyLifecycleService, Depends(lifecycle_service)],
+) -> Organization:
+    """Reversibly deactivate one owned organization."""
+    return service.deactivate(organization_id, principal)
+
+
+@router.post(
+    "/api/v1/organizations/{organization_id}/reactivation",
+    response_model=Organization,
+    response_model_exclude_none=True,
+)
+def reactivate(
+    organization_id: str,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyLifecycleService, Depends(lifecycle_service)],
+) -> Organization:
+    """Reactivate one owned organization without tenant authorization."""
+    return service.reactivate(organization_id, principal)

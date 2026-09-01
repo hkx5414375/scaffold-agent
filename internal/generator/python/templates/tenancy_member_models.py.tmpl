@@ -53,6 +53,9 @@ class OrganizationMember(StrictModel):
     email: str
     role: str
     joined_at: datetime
+{{- if .TenancyLifecycle}}
+    is_owner: bool
+{{- end}}
 
 
 class OrganizationMemberPage(StrictModel):

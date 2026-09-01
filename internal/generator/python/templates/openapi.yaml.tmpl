@@ -155,6 +155,140 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 {{end}}
+{{if .TenancyLifecycle}}
+  /api/v1/organizations/{organization_id}:
+    parameters:
+      - name: organization_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+    patch:
+      operationId: renameOrganization
+      summary: Rename one active organization as an administrator
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationRenameWrite"
+      responses:
+        "200":
+          description: Renamed organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/organizations/{organization_id}/ownership-transfers:
+    parameters:
+      - name: organization_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+    post:
+      operationId: transferOrganizationOwnership
+      summary: Transfer ownership to an existing member
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OwnershipTransferWrite"
+      responses:
+        "200":
+          description: Ownership transferred and target promoted to administrator.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/organizations/{organization_id}/deactivation:
+    parameters:
+      - name: organization_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+    post:
+      operationId: deactivateOrganization
+      summary: Reversibly deactivate an owned organization
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Organization deactivated without deleting tenant data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/organizations/{organization_id}/reactivation:
+    parameters:
+      - name: organization_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+    post:
+      operationId: reactivateOrganization
+      summary: Reactivate an owned organization without tenant authorization
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Organization returned to active service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+{{end}}
 {{if .TenancyMembers}}
   /api/v1/organizations/{organization_id}/members:
     parameters:
@@ -611,7 +745,7 @@ components:
     Organization:
       type: object
       additionalProperties: false
-      required: [id, name, role, created_at]
+      required: [id, name, role, created_at{{if .TenancyLifecycle}}, owner_user_id, is_owner, status, updated_at{{end}}]
       properties:
         id:
           type: string
@@ -625,6 +759,21 @@ components:
         created_at:
           type: string
           format: date-time
+{{- if .TenancyLifecycle}}
+        owner_user_id:
+          type: string
+        is_owner:
+          type: boolean
+        status:
+          type: string
+          enum: [active, inactive]
+        updated_at:
+          type: string
+          format: date-time
+        deactivated_at:
+          type: string
+          format: date-time
+{{- end}}
     OrganizationPage:
       type: object
       additionalProperties: false
@@ -639,7 +788,7 @@ components:
     OrganizationMember:
       type: object
       additionalProperties: false
-      required: [organization_id, user_id, email, role, joined_at]
+      required: [organization_id, user_id, email, role, joined_at{{if .TenancyLifecycle}}, is_owner{{end}}]
       properties:
         organization_id:
           type: string
@@ -654,6 +803,10 @@ components:
         joined_at:
           type: string
           format: date-time
+{{- if .TenancyLifecycle}}
+        is_owner:
+          type: boolean
+{{- end}}
     OrganizationMemberPage:
       type: object
       additionalProperties: false
@@ -715,6 +868,26 @@ components:
         role:
           type: string
           enum: [admin, user]
+{{- if .TenancyLifecycle}}
+    OrganizationRenameWrite:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    OwnershipTransferWrite:
+      type: object
+      additionalProperties: false
+      required: [target_user_id]
+      properties:
+        target_user_id:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- end}}
 {{end}}
 {{if .Business}}
     {{.Business.EntityClass}}Record:

@@ -22,6 +22,9 @@ from {{.PackageName}}.tenancy.member_repository import (
     LastAdministrator,
     MemberConflict,
     MemberNotFound,
+{{- if .TenancyLifecycle}}
+    OwnerProtected,
+{{- end}}
     TenancyMemberRepository,
 )
 
@@ -40,6 +43,9 @@ class MemberErrorKind(StrEnum):
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
     LAST_ADMINISTRATOR = "last_administrator"
+{{- if .TenancyLifecycle}}
+    OWNER_PROTECTED = "owner_protected"
+{{- end}}
     INVITATION_INVALID = "invitation_invalid"
 
 
@@ -163,6 +169,10 @@ class TenancyMemberService:
             raise _member_not_found() from error
         except LastAdministrator as error:
             raise _last_administrator() from error
+{{- if .TenancyLifecycle}}
+        except OwnerProtected as error:
+            raise _owner_protected() from error
+{{- end}}
 
     def remove(self, user_id: str, actor: Principal) -> None:
         """Remove one member while preserving an administrator."""
@@ -183,6 +193,10 @@ class TenancyMemberService:
             raise _member_not_found() from error
         except LastAdministrator as error:
             raise _last_administrator() from error
+{{- if .TenancyLifecycle}}
+        except OwnerProtected as error:
+            raise _owner_protected() from error
+{{- end}}
 
 
 def token_digest(raw_token: str) -> str:
@@ -249,6 +263,19 @@ def _last_administrator() -> MemberError:
         MemberErrorKind.LAST_ADMINISTRATOR,
         "organization must retain an administrator",
     )
+
+
+{{- if .TenancyLifecycle}}
+
+
+def _owner_protected() -> MemberError:
+    return MemberError(
+        MemberErrorKind.OWNER_PROTECTED,
+        "organization owner must transfer ownership before this member change",
+    )
+
+
+{{- end}}
 
 
 def _invitation_invalid() -> MemberError:

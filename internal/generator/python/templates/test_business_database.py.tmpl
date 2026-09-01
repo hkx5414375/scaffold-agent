@@ -84,6 +84,11 @@ def repository_contract(engine: Engine) -> None:
                     "id": organization_id,
                     "name": "Business",
                     "created_by": user_id,
+{{- if .TenancyLifecycle}}
+                    "owner_user_id": user_id,
+                    "status": "active",
+                    "deactivated_at": None,
+{{- end}}
                     "created_at": now,
                     "updated_at": now,
                 },
@@ -91,6 +96,11 @@ def repository_contract(engine: Engine) -> None:
                     "id": other_organization_id,
                     "name": "Other",
                     "created_by": user_id,
+{{- if .TenancyLifecycle}}
+                    "owner_user_id": user_id,
+                    "status": "active",
+                    "deactivated_at": None,
+{{- end}}
                     "created_at": now,
                     "updated_at": now,
                 },

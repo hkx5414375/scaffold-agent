@@ -18,9 +18,29 @@ organizations = sa.Table(
         sa.ForeignKey("identity_users.id"),
         nullable=False,
     ),
+{{- if .TenancyLifecycle}}
+    sa.Column(
+        "owner_user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id"),
+        nullable=False,
+    ),
+    sa.Column("status", sa.String(16), nullable=False, server_default="active"),
+    sa.Column("deactivated_at", sa.DateTime(timezone=True), nullable=True),
+{{- end}}
     sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+{{- if .TenancyLifecycle}}
+    sa.CheckConstraint(
+        "(status = 'active' AND deactivated_at IS NULL) OR "
+        "(status = 'inactive' AND deactivated_at IS NOT NULL)",
+        name="organizations_lifecycle",
+    ),
+{{- end}}
 )
+{{- if .TenancyLifecycle}}
+sa.Index("ix_organizations_owner", organizations.c.owner_user_id, organizations.c.id)
+{{- end}}
 
 organization_memberships = sa.Table(
     "organization_memberships",
@@ -59,6 +79,13 @@ class Organization(BaseModel):
     name: str
     role: str
     created_at: datetime
+{{- if .TenancyLifecycle}}
+    owner_user_id: str
+    is_owner: bool
+    status: str
+    updated_at: datetime
+    deactivated_at: datetime | None = None
+{{- end}}
     model_config = ConfigDict(extra="forbid")
 
 
