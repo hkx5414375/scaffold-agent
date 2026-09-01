@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}{{if .Observability}}项目启用了安全请求关联、访问日志、低基数指标和 2 秒数据库就绪探测。{{end}}{{if .CSVTransfer}}项目启用了 Blueprint 字段顺序驱动的原子 CSV 导入与审计导出。{{end}}{{if .Approvals}}项目启用了职责分离、不可变事件和乐观并发的单阶段审批。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}{{if .Observability}}项目启用了安全请求关联、访问日志、低基数指标和 2 秒数据库就绪探测。{{end}}{{if .CSVTransfer}}项目启用了 Blueprint 字段顺序驱动的原子 CSV 导入与审计导出。{{end}}{{if .Approvals}}项目启用了职责分离、不可变事件和乐观并发的单阶段审批。{{end}}{{if .Catalog}}项目启用了带审计、发布状态和公开读取边界的商品目录。{{end}}
 
 ## 环境要求
 
@@ -64,6 +64,9 @@ $env:SMTP_PASSWORD = "replace-me"
 {{end}}
 {{if .Approvals}}
 `approval-workflows` 只实现 Blueprint 明确声明的 `pending → approved/rejected/cancelled` 单阶段流程。`approvals:submit` 与 `approvals:mine` 供发起人提交、查看和撤回自己的请求；`approvals:read` 与 `approvals:decide` 供审核人查看和决定。发起人不能审核自己的请求，驳回必须填写理由，撤回只允许原发起人，每个终态请求都必须携带当前版本。数据库会重复校验组织、待处理状态、版本和参与者规则，并把状态、不可变事件与审计放在同一事务。审批只记录决定，不会隐式修改 `{{.Business.EntityType}}`。
+{{end}}
+{{if .Catalog}}
+`commerce-catalog` 独立于 Blueprint 通用 CRUD。后台通过 `/api/v1/catalog/products` 创建、修改、发布和归档商品；SKU 与币种统一为大写，金额使用最小货币单位，金额和版本在 JSON 中使用十进制字符串。商品只允许 `draft → active → archived`，归档后不可修改或重新发布，每次成功写入都与审计事件在同一事务提交。匿名 `/api/v1/storefront/products` 只返回已上架商品{{if .Tenancy}}和状态为 active 的组织；公开请求必须携带 `X-Organization-ID`，Nuxt 服务端从 `SCAFFOLD_ORGANIZATION_ID` 注入该值{{end}}。
 {{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
@@ -142,6 +145,9 @@ uv run pytest
 {{end}}
 {{if .Approvals}}
 - `src/{{.PackageName}}/approvals`：单阶段审批领域、事务仓储、不可变事件、用例和 HTTP 适配器。
+{{end}}
+{{if .Catalog}}
+- `src/{{.PackageName}}/catalog`：商品目录领域、事务仓储、发布状态机、管理与公开 HTTP 适配器。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

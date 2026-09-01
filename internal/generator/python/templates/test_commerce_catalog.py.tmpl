@@ -1,0 +1,317 @@
+"""Catalog normalization, publication, isolation, and failure contracts."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.catalog.models import (
+    CatalogError,
+    CatalogErrorKind,
+    CatalogProduct,
+    CatalogStatus,
+    CatalogTransition,
+    CatalogUpdate,
+    CatalogWrite,
+)
+from {{.PackageName}}.catalog.repository import (
+    CatalogConflict,
+    CatalogMutation,
+    CatalogPageResult,
+    CatalogStatusTransition,
+)
+from {{.PackageName}}.catalog.service import CatalogService
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.products: dict[str, CatalogProduct] = {}
+        self.audits: list[AuditEvent] = []
+        self.failure: Exception | None = None
+
+    def create(self, product: CatalogProduct, audit: AuditEvent) -> None:
+        self._fail()
+        if any(
+            item.sku == product.sku and _organization(item) == _organization(product)
+            for item in self.products.values()
+        ):
+            raise CatalogConflict()
+        self.products[product.id] = product
+        self.audits.append(audit)
+
+    def get(self, organization_id: str, product_id: str) -> CatalogProduct | None:
+        self._fail()
+        product = self.products.get(product_id)
+        if product is None or _organization(product) != organization_id:
+            return None
+        return product
+
+    def get_public(self, organization_id: str, product_id: str) -> CatalogProduct | None:
+        product = self.get(organization_id, product_id)
+        if product is None or product.status != CatalogStatus.ACTIVE:
+            return None
+        return product
+
+    def list_page(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+        public_read: bool,
+    ) -> CatalogPageResult:
+        self._fail()
+        values = sorted(
+            (
+                product
+                for product in self.products.values()
+                if _organization(product) == organization_id
+                and (not status or product.status.value == status)
+                and (not public_read or product.status == CatalogStatus.ACTIVE)
+                and (not cursor or product.id > cursor)
+            ),
+            key=lambda product: product.id,
+        )
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return CatalogPageResult(values[:limit], next_cursor)
+
+    def update(self, mutation: CatalogMutation, audit: AuditEvent) -> CatalogProduct:
+        self._fail()
+        current = self.get(mutation.organization_id, mutation.product_id)
+        if (
+            current is None
+            or int(current.version) != mutation.expected_version
+            or current.status == CatalogStatus.ARCHIVED
+            or any(
+                item.id != current.id
+                and item.sku == mutation.sku
+                and _organization(item) == mutation.organization_id
+                for item in self.products.values()
+            )
+        ):
+            raise CatalogConflict()
+        changed = current.model_copy(
+            update={
+                "sku": mutation.sku,
+                "name": mutation.name,
+                "description": mutation.description,
+                "price_minor": str(mutation.price_minor),
+                "currency": mutation.currency,
+                "version": str(mutation.expected_version + 1),
+                "updated_at": mutation.updated_at,
+            }
+        )
+        self.products[current.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def transition(
+        self,
+        transition: CatalogStatusTransition,
+        audit: AuditEvent,
+    ) -> CatalogProduct:
+        self._fail()
+        current = self.get(transition.organization_id, transition.product_id)
+        if (
+            current is None
+            or int(current.version) != transition.expected_version
+            or current.status != transition.from_status
+        ):
+            raise CatalogConflict()
+        changed = current.model_copy(
+            update={
+                "status": transition.to_status,
+                "version": str(transition.expected_version + 1),
+                "updated_at": transition.updated_at,
+            }
+        )
+        self.products[current.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+def _organization(product: CatalogProduct) -> str:
+    return {{if .Tenancy}}product.organization_id{{else}}""{{end}}
+
+
+def _actor(user_id: str = "admin-1") -> Principal:
+    return Principal(
+        user_id=user_id,
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id="organization-1",
+{{- end}}
+    )
+
+
+def _service(repository: MemoryRepository) -> CatalogService:
+    return CatalogService(repository, lambda: NOW)
+
+
+def _write(sku: str = " sku-1 ") -> CatalogWrite:
+    return CatalogWrite(
+        sku=sku,
+        name=" Product one ",
+        description=" Description ",
+        price_minor="1299",
+        currency="usd",
+    )
+
+
+def test_create_publish_update_archive_and_public_visibility() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    product = service.create(_write(), actor)
+
+    assert product.sku == "SKU-1"
+    assert product.name == "Product one"
+    assert product.description == "Description"
+    assert product.currency == "USD"
+    assert product.price_minor == "1299"
+    assert product.version == "1"
+    assert product.status == CatalogStatus.DRAFT
+    with pytest.raises(CatalogError) as hidden_draft:
+        service.get_public({{if .Tenancy}}"organization-1"{{else}}""{{end}}, product.id)
+    assert hidden_draft.value.kind == CatalogErrorKind.NOT_FOUND
+
+    active = service.publish(product.id, CatalogTransition(version="1"), actor)
+    visible = service.get_public({{if .Tenancy}}"organization-1"{{else}}""{{end}}, product.id)
+    assert visible == active
+    assert service.list_public({{if .Tenancy}}"organization-1"{{else}}""{{end}}, "", 20).items == [active]
+
+    changed = service.update(
+        product.id,
+        CatalogUpdate(
+            sku="sku-2",
+            name="Second name",
+            description="",
+            price_minor="2500",
+            currency="eur",
+            version="2",
+        ),
+        actor,
+    )
+    assert changed.status == CatalogStatus.ACTIVE
+    assert changed.version == "3"
+    assert changed.sku == "SKU-2"
+
+    archived = service.archive(product.id, CatalogTransition(version="3"), actor)
+    assert archived.status == CatalogStatus.ARCHIVED
+    assert archived.version == "4"
+    assert service.list_public({{if .Tenancy}}"organization-1"{{else}}""{{end}}, "", 20).items == []
+    assert [audit.action for audit in repository.audits] == [
+        "catalog:products:create",
+        "catalog:products:publish",
+        "catalog:products:update",
+        "catalog:products:archive",
+    ]
+
+
+def test_duplicate_sku_versions_and_terminal_state_conflict() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    first = service.create(_write("same"), actor)
+
+    with pytest.raises(CatalogError) as duplicate:
+        service.create(_write("SAME"), actor)
+    assert duplicate.value.kind == CatalogErrorKind.CONFLICT
+
+    with pytest.raises(CatalogError) as stale:
+        service.publish(first.id, CatalogTransition(version="2"), actor)
+    assert stale.value.kind == CatalogErrorKind.CONFLICT
+
+    archived = service.archive(first.id, CatalogTransition(version="1"), actor)
+    with pytest.raises(CatalogError) as update_archived:
+        service.update(
+            first.id,
+            CatalogUpdate(
+                sku="same",
+                name="Changed",
+                price_minor="1",
+                currency="USD",
+                version=archived.version,
+            ),
+            actor,
+        )
+    assert update_archived.value.kind == CatalogErrorKind.CONFLICT
+    with pytest.raises(CatalogError) as archive_again:
+        service.archive(first.id, CatalogTransition(version=archived.version), actor)
+    assert archive_again.value.kind == CatalogErrorKind.CONFLICT
+
+
+def test_filters_scopes_identifiers_text_numbers_and_clock_are_validated() -> None:
+    service = _service(MemoryRepository())
+    actor = _actor()
+    operations: list[Callable[[], object]] = [
+        lambda: service.create(_write("bad sku"), actor),
+        lambda: service.create(
+            CatalogWrite(
+                sku="GOOD",
+                name="bad\nname",
+                price_minor="1",
+                currency="USD",
+            ),
+            actor,
+        ),
+        lambda: service.create(
+            CatalogWrite(
+                sku="GOOD",
+                name="Good",
+                price_minor="9999999999999999999",
+                currency="USD",
+            ),
+            actor,
+        ),
+        lambda: service.list("unknown", "", 20, actor),
+        lambda: service.list("", "x" * 192, 20, actor),
+        lambda: service.list("", "", 101, actor),
+        lambda: service.get(" ", actor),
+    ]
+{{- if .Tenancy}}
+    operations.append(lambda: service.list_public("", "", 20))
+{{- else}}
+    operations.append(lambda: service.list_public("unexpected", "", 20))
+{{- end}}
+    for operation in operations:
+        with pytest.raises(CatalogError) as failure:
+            operation()
+        assert failure.value.kind == CatalogErrorKind.INVALID
+
+    with pytest.raises(CatalogError):
+        service.list("", "", 20, _actor(""))
+    invalid_clock = CatalogService(MemoryRepository(), lambda: NOW.replace(tzinfo=None))
+    with pytest.raises(CatalogError):
+        invalid_clock.create(_write(), actor)
+
+
+def test_not_found_pagination_and_storage_failures_are_stable() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    with pytest.raises(CatalogError) as missing:
+        service.get("missing", actor)
+    assert missing.value.kind == CatalogErrorKind.NOT_FOUND
+
+    first = service.create(_write("A"), actor)
+    second = service.create(_write("B"), actor)
+    ordered = sorted([first, second], key=lambda product: product.id)
+    page = service.list("draft", "", 1, actor)
+    assert page.items == ordered[:1]
+    assert page.next_cursor == ordered[0].id
+
+    repository.failure = RuntimeError("database password")
+    with pytest.raises(CatalogError) as storage:
+        service.list("", "", 20, actor)
+    assert storage.value.kind == CatalogErrorKind.STORAGE
+    assert "database password" not in storage.value.message

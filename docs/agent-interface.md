@@ -147,7 +147,7 @@ Agents should extend this owned foundation through later storefront capability
 outputs instead of replacing its runtime boundary or placing credentials in
 public runtime configuration, browser storage, or client components.
 
-Selecting `commerce-catalog` version `0.1.0` with the Go or Java adapter
+Selecting `commerce-catalog` version `0.1.0` with the Go, Java, or Python adapter
 generates a product domain, PostgreSQL or MySQL persistence, OpenAPI, and
 administration/public HTTP routes independently from Blueprint CRUD modules. If
 `organization-tenancy` is also selected, it must be version `0.3.0` so public

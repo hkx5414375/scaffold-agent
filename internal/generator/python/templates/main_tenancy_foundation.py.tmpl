@@ -7,6 +7,12 @@ from fastapi import FastAPI
 
 {{if .Cache}}from {{.PackageName}}.cache.repository import SQLAlchemyCacheRepository
 from {{.PackageName}}.cache.service import CacheService
+{{end}}{{if .Catalog}}from {{.PackageName}}.catalog.http import (
+    install_error_handlers as install_catalog_error_handlers,
+)
+from {{.PackageName}}.catalog.http import router as catalog_router
+from {{.PackageName}}.catalog.repository import SQLAlchemyCatalogRepository
+from {{.PackageName}}.catalog.service import CatalogService
 {{end}}from {{.PackageName}}.config import get_settings
 from {{.PackageName}}.database import DatabaseProbe, create_database_engine
 from {{.PackageName}}.errors import install_error_handlers
@@ -84,6 +90,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 {{- if .Cache}}
         app.state.cache_service = CacheService(SQLAlchemyCacheRepository(engine))
 {{- end}}
+{{- if .Catalog}}
+        app.state.catalog_service = CatalogService(SQLAlchemyCatalogRepository(engine))
+{{- end}}
 {{- if .Files}}
         app.state.file_asset_service = FileAssetService(
             SQLAlchemyFileAssetRepository(engine),
@@ -132,6 +141,9 @@ def create_app() -> FastAPI:
     application.add_middleware(HttpObservabilityMiddleware, observer=observer)
 {{- end}}
     install_error_handlers(application)
+{{- if .Catalog}}
+    install_catalog_error_handlers(application)
+{{- end}}
 {{- if .Files}}
     install_file_error_handlers(application)
 {{- end}}
@@ -149,6 +161,9 @@ def create_app() -> FastAPI:
     application.include_router(observability_router)
 {{- end}}
     application.include_router(identity_router)
+{{- if .Catalog}}
+    application.include_router(catalog_router)
+{{- end}}
 {{- if .Files}}
     application.include_router(file_router)
 {{- end}}

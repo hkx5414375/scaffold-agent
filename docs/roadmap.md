@@ -85,7 +85,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Portable `commerce-catalog` 0.1 domain and transport contract with canonical SKUs, minor-unit money, publication state, optimistic concurrency, audit, tenancy, and keyset pagination.
 - [x] Go `commerce-catalog` 0.1 reference implementation for PostgreSQL and MySQL with shared Vue administration and Nuxt public list/detail pages.
 - [x] Java `commerce-catalog` 0.1 parity for PostgreSQL and MySQL with the shared Vue administration and Nuxt public catalog.
-- [ ] Python `commerce-catalog` 0.1 parity for PostgreSQL and MySQL.
+- [x] Python `commerce-catalog` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, shared Vue administration, and Nuxt public catalog gates.
 - [ ] Customer accounts and membership lifecycle.
 - [ ] CRM contacts, organizations, activities, and pipeline.
 - [ ] ERP catalog, procurement, stock ledger, reservations, and inventory movements.

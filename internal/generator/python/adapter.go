@@ -50,6 +50,8 @@ const (
 	csvTransferVersion      = "0.1.0"
 	approvalsOwner          = "approval-workflows"
 	approvalsVersion        = "0.1.0"
+	catalogOwner            = "commerce-catalog"
+	catalogVersion          = "0.1.0"
 )
 
 //go:embed all:templates
@@ -189,6 +191,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: approvalsOwner, Version: approvalsVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Tenant-aware single-stage approvals with immutable events.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: catalogOwner, Version: catalogVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable audited product catalog with public storefront reads.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -442,6 +454,18 @@ var approvalsTemplates = map[string]string{
 	"tests/test_approval_workflows_http.py":                       "templates/test_approval_workflows_http.py.tmpl",
 }
 
+var catalogTemplates = map[string]string{
+	"src/package/catalog/__init__.py":                           "templates/catalog_init.py.tmpl",
+	"src/package/catalog/http.py":                               "templates/catalog_http.py.tmpl",
+	"src/package/catalog/models.py":                             "templates/catalog_models.py.tmpl",
+	"src/package/catalog/repository.py":                         "templates/catalog_repository.py.tmpl",
+	"src/package/catalog/service.py":                            "templates/catalog_service.py.tmpl",
+	"src/package/migration/versions/000260_commerce_catalog.py": "templates/catalog_migration.py.tmpl",
+	"tests/test_commerce_catalog.py":                            "templates/test_commerce_catalog.py.tmpl",
+	"tests/test_commerce_catalog_database.py":                   "templates/test_commerce_catalog_database.py.tmpl",
+	"tests/test_commerce_catalog_http.py":                       "templates/test_commerce_catalog_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -505,6 +529,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	observabilityEnabled := false
 	csvTransferEnabled := false
 	approvalsEnabled := false
+	catalogEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -538,6 +563,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == approvalsOwner {
 			approvalsEnabled = true
 		}
+		if pack.Metadata.Name == catalogOwner {
+			catalogEnabled = true
+		}
+	}
+	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0",
+		)
 	}
 	if len(project.Spec.Modules) > 1 {
 		return generator.Result{}, fmt.Errorf("the Python CRUD slice supports at most one business module")
@@ -579,11 +612,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Observability:         observabilityEnabled,
 		CSVTransfer:           csvTransferEnabled,
 		Approvals:             approvalsEnabled,
+		Catalog:               catalogEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(storefrontui.BaseTemplates)+4,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+5,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -704,6 +738,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if catalogEnabled {
+		for path, templatePath := range catalogTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    catalogOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -750,6 +792,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 				SharedAdmin: true,
 			}
 		}
+		if catalogEnabled {
+			targets["web/admin/src/views/CatalogView.vue"] = renderTarget{
+				Template:    "templates/src/views/CatalogView.vue.tmpl",
+				Owner:       catalogOwner,
+				SharedAdmin: true,
+			}
+		}
 	}
 	if storefrontEnabled {
 		for path, templatePath := range storefrontui.BaseTemplates {
@@ -757,6 +806,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 				Template:         templatePath,
 				Owner:            storefrontui.Owner,
 				SharedStorefront: true,
+			}
+		}
+		if catalogEnabled {
+			for path, templatePath := range storefrontui.CatalogTemplates {
+				targets[path] = renderTarget{
+					Template:         templatePath,
+					Owner:            catalogOwner,
+					SharedStorefront: true,
+				}
 			}
 		}
 	}
@@ -777,9 +835,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if target.SharedAdmin {
 			content, err = adminui.Render(target.Template, data)
 		} else if target.SharedStorefront {
+			storefrontData := storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName)
+			storefrontData.Catalog = catalogEnabled
+			storefrontData.Tenancy = tenancyEnabled
 			content, err = storefrontui.Render(
 				target.Template,
-				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+				storefrontData,
 			)
 		} else {
 			content, err = render(target.Template, data)
@@ -826,6 +887,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if approvalsEnabled {
 		capabilityLock[approvalsOwner] = approvalsVersion
 	}
+	if catalogEnabled {
+		capabilityLock[catalogOwner] = catalogVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -846,6 +910,10 @@ func migrationModels(data templateData) (string, string) {
 	if data.Approvals {
 		imports = append(imports, "from "+data.PackageName+".approvals import models as approval_models")
 		metadata = append(metadata, "_approval_metadata = approval_models.approval_requests.metadata")
+	}
+	if data.Catalog {
+		imports = append(imports, "from "+data.PackageName+".catalog import models as catalog_models")
+		metadata = append(metadata, "_catalog_metadata = catalog_models.catalog_products.metadata")
 	}
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")

@@ -1,0 +1,188 @@
+"""Protected catalog administration and anonymous storefront transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Header, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.catalog.models import (
+    CatalogError,
+    CatalogErrorKind,
+    CatalogPage,
+    CatalogProduct,
+    CatalogTransition,
+    CatalogUpdate,
+    CatalogWrite,
+)
+from {{.PackageName}}.catalog.service import CatalogService
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+
+router = APIRouter(tags=["catalog"])
+
+
+def catalog_service(request: Request) -> CatalogService:
+    """Resolve the process-scoped catalog service."""
+    service: CatalogService = request.app.state.catalog_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable catalog failure responses."""
+
+    @app.exception_handler(CatalogError)
+    async def catalog_error(_request: Request, error: CatalogError) -> JSONResponse:
+        status, code = {
+            CatalogErrorKind.INVALID: (400, "catalog.invalid"),
+            CatalogErrorKind.NOT_FOUND: (404, "catalog.not_found"),
+            CatalogErrorKind.CONFLICT: (409, "catalog.conflict"),
+            CatalogErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post(
+    "/api/v1/catalog/products",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_product(
+    value: CatalogWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+) -> CatalogProduct:
+    """Create one scoped draft product."""
+    return service.create(value, principal)
+
+
+@router.get(
+    "/api/v1/catalog/products",
+    response_model=CatalogPage,
+    response_model_exclude_none=True,
+)
+def list_products(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CatalogPage:
+    """List scoped administration products."""
+    return service.list(status, cursor, limit, principal)
+
+
+@router.get(
+    "/api/v1/catalog/products/{id}",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+)
+def get_product(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+) -> CatalogProduct:
+    """Read one scoped administration product."""
+    return service.get(id, principal)
+
+
+@router.put(
+    "/api/v1/catalog/products/{id}",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+)
+def update_product(
+    id: str,
+    value: CatalogUpdate,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+) -> CatalogProduct:
+    """Replace mutable product content with optimistic versioning."""
+    return service.update(id, value, principal)
+
+
+@router.post(
+    "/api/v1/catalog/products/{id}/publish",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+)
+def publish_product(
+    id: str,
+    value: CatalogTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+) -> CatalogProduct:
+    """Publish one draft product."""
+    return service.publish(id, value, principal)
+
+
+@router.post(
+    "/api/v1/catalog/products/{id}/archive",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+)
+def archive_product(
+    id: str,
+    value: CatalogTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("catalog:products:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CatalogService, Depends(catalog_service)],
+) -> CatalogProduct:
+    """Archive one draft or active product."""
+    return service.archive(id, value, principal)
+
+
+@router.get(
+    "/api/v1/storefront/products",
+    response_model=CatalogPage,
+    response_model_exclude_none=True,
+)
+def list_public_products(
+    service: Annotated[CatalogService, Depends(catalog_service)],
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CatalogPage:
+    """List active products anonymously in an explicit storefront scope."""
+    return service.list_public(organization_id or "", cursor, limit)
+
+
+@router.get(
+    "/api/v1/storefront/products/{id}",
+    response_model=CatalogProduct,
+    response_model_exclude_none=True,
+)
+def get_public_product(
+    id: str,
+    service: Annotated[CatalogService, Depends(catalog_service)],
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+) -> CatalogProduct:
+    """Read one active product anonymously."""
+    return service.get_public(organization_id or "", id)

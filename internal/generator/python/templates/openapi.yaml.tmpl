@@ -1029,6 +1029,227 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 {{end}}
+{{if .Catalog}}
+  /api/v1/catalog/products:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: createCatalogProduct
+      summary: Create one audited draft product
+      x-required-permission: catalog:products:write
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogProductWrite"
+      responses:
+        "201":
+          description: Draft product created with its audit event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      operationId: listCatalogProducts
+      summary: List a bounded administration product page
+      x-required-permission: catalog:products:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CatalogStatus"
+        - $ref: "#/components/parameters/CatalogPageCursor"
+        - $ref: "#/components/parameters/CatalogPageLimit"
+      responses:
+        "200":
+          description: Scoped product page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProductPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/catalog/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CatalogProductId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getCatalogProduct
+      summary: Read one scoped product
+      x-required-permission: catalog:products:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Scoped product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateCatalogProduct
+      summary: Replace mutable product content under optimistic concurrency
+      x-required-permission: catalog:products:write
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogProductUpdate"
+      responses:
+        "200":
+          description: Updated product retaining its publication state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/catalog/products/{id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/CatalogProductId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: publishCatalogProduct
+      summary: Publish one draft product
+      x-required-permission: catalog:products:write
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogTransition"
+      responses:
+        "200":
+          description: Published active product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/catalog/products/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/CatalogProductId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: archiveCatalogProduct
+      summary: Permanently archive one draft or active product
+      x-required-permission: catalog:products:write
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CatalogTransition"
+      responses:
+        "200":
+          description: Archived terminal product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /api/v1/storefront/products:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: listPublicCatalogProducts
+      summary: List active products anonymously
+      parameters:
+        - $ref: "#/components/parameters/CatalogPageCursor"
+        - $ref: "#/components/parameters/CatalogPageLimit"
+      responses:
+        "200":
+          description: Bounded page containing active products only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProductPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/v1/storefront/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CatalogProductId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getPublicCatalogProduct
+      summary: Read one active product anonymously
+      responses:
+        "200":
+          description: Active public product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CatalogProduct"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -1299,8 +1520,9 @@ paths:
           $ref: "#/components/responses/Conflict"
 {{end}}
 components:
-{{- if .Tenancy}}
+{{- if or .Tenancy .Catalog}}
   parameters:
+{{- if .Tenancy}}
     OrganizationHeader:
       name: X-Organization-ID
       in: header
@@ -1310,6 +1532,37 @@ components:
         type: string
         minLength: 1
         maxLength: 191
+{{- end}}
+{{- if .Catalog}}
+    CatalogStatus:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [draft, active, archived]
+    CatalogProductId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 191
+    CatalogPageCursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+        maxLength: 191
+    CatalogPageLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+{{- end}}
 {{- end}}
   securitySchemes:
     bearerAuth:
@@ -1846,6 +2099,130 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/JobAdministrationItem"
+        next_cursor:
+          type: string
+          maxLength: 191
+{{end}}
+{{if .Catalog}}
+    CatalogProduct:
+      type: object
+      additionalProperties: false
+      required: [id, sku, name, description, price_minor, currency, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- if .Tenancy}}
+        organization_id:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- end}}
+        sku:
+          type: string
+          pattern: "^[A-Z0-9][A-Z0-9._-]{0,63}$"
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          maxLength: 4000
+        price_minor:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+          maxLength: 19
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+        status:
+          type: string
+          enum: [draft, active, archived]
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 19
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CatalogProductWrite:
+      type: object
+      additionalProperties: false
+      required: [sku, name, price_minor, currency]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          maxLength: 4000
+          default: ""
+        price_minor:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+          maxLength: 19
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+    CatalogProductUpdate:
+      type: object
+      additionalProperties: false
+      required: [sku, name, price_minor, currency, version]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        description:
+          type: string
+          maxLength: 4000
+          default: ""
+        price_minor:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+          maxLength: 19
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 19
+    CatalogTransition:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 19
+    CatalogProductPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/CatalogProduct"
         next_cursor:
           type: string
           maxLength: 191

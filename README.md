@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can also generate the same locked Nuxt 4 SSR storefront foundation. The first M7 business slice, `commerce-catalog` `0.1.0`, is implemented for Go and Java with PostgreSQL/MySQL, shared Vue product administration, and Nuxt public list/detail pages. Python catalog parity and later commerce capabilities remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation and the first M7 business slice, `commerce-catalog` `0.1.0`, with PostgreSQL/MySQL, shared Vue product administration, and Nuxt public list/detail pages. Later commerce capabilities remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -72,6 +72,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-ser
 go run ./cmd/scaffold-agent validate --project-root ./examples/storefront-foundation --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-go --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-java --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-python --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

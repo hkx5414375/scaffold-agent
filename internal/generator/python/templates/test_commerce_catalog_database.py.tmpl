@@ -1,0 +1,220 @@
+"""Catalog transaction, isolation, visibility, and permission storage contracts."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select{{if .Tenancy}}, update{{end}}
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.catalog.models import (
+    CatalogError,
+    CatalogErrorKind,
+    CatalogStatus,
+    CatalogTransition,
+    CatalogUpdate,
+    CatalogWrite,
+    catalog_products,
+)
+from {{.PackageName}}.catalog.repository import SQLAlchemyCatalogRepository
+from {{.PackageName}}.catalog.service import CatalogService
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import Principal, audit_events, role_permissions, users
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    user_id = "catalog-admin-" + suffix
+    email = suffix + "@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    actor = Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization = tenancy.create("Catalog " + suffix, actor)
+    actor = actor.model_copy(update={"organization_id": organization.id})
+{{- end}}
+    catalog = CatalogService(SQLAlchemyCatalogRepository(engine), lambda: now)
+    created = catalog.create(
+        CatalogWrite(
+            sku="product-" + suffix[:12],
+            name="Portable product",
+            description="Generated catalog product",
+            price_minor="1299",
+            currency="usd",
+        ),
+        actor,
+    )
+    assert created.status == CatalogStatus.DRAFT
+    assert created.price_minor == "1299"
+
+    with pytest.raises(CatalogError) as duplicate:
+        catalog.create(
+            CatalogWrite(
+                sku=created.sku.lower(),
+                name="Duplicate",
+                price_minor="1",
+                currency="USD",
+            ),
+            actor,
+        )
+    assert duplicate.value.kind == CatalogErrorKind.CONFLICT
+
+{{- if .Tenancy}}
+    wrong_scope = actor.model_copy(update={"organization_id": "missing-" + suffix})
+    with pytest.raises(CatalogError) as hidden:
+        catalog.get(created.id, wrong_scope)
+    assert hidden.value.kind == CatalogErrorKind.NOT_FOUND
+{{- end}}
+    active = catalog.publish(created.id, CatalogTransition(version="1"), actor)
+    public_scope = {{if .Tenancy}}organization.id{{else}}""{{end}}
+    assert catalog.get_public(public_scope, created.id) == active
+
+    missing_actor = actor.model_copy(update={"user_id": "missing-" + suffix})
+    with pytest.raises(CatalogError) as failed_audit:
+        catalog.update(
+            created.id,
+            CatalogUpdate(
+                sku=created.sku,
+                name="Must roll back",
+                description="",
+                price_minor="1300",
+                currency="USD",
+                version="2",
+            ),
+            missing_actor,
+        )
+    assert failed_audit.value.kind == CatalogErrorKind.CONFLICT
+    assert catalog.get(created.id, actor).name == "Portable product"
+    assert catalog.get(created.id, actor).version == "2"
+
+    changed = catalog.update(
+        created.id,
+        CatalogUpdate(
+            sku=created.sku,
+            name="Updated product",
+            description="Updated",
+            price_minor="2500",
+            currency="EUR",
+            version="2",
+        ),
+        actor,
+    )
+    assert changed.status == CatalogStatus.ACTIVE
+    assert changed.version == "3"
+    with pytest.raises(CatalogError) as stale:
+        catalog.archive(created.id, CatalogTransition(version="2"), actor)
+    assert stale.value.kind == CatalogErrorKind.CONFLICT
+
+    permission_codes = ["catalog:products:read", "catalog:products:write"]
+    with engine.connect() as connection:
+        audit_count = connection.scalar(
+            select(func.count())
+            .select_from(audit_events)
+            .where(
+                audit_events.c.target == created.id,
+                audit_events.c.action.in_(
+                    [
+                        "catalog:products:create",
+                        "catalog:products:publish",
+                        "catalog:products:update",
+                    ]
+                ),
+            )
+        )
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(permission_codes)
+                )
+            ).all()
+        )
+    assert audit_count == 3
+    assert grants == {
+        ("admin", "catalog:products:read"),
+        ("admin", "catalog:products:write"),
+    }
+
+{{- if .Tenancy}}
+    with engine.begin() as connection:
+        connection.execute(
+            update(organizations)
+            .where(organizations.c.id == organization.id)
+            .values(status="inactive", deactivated_at=now, updated_at=now)
+        )
+    with pytest.raises(CatalogError) as inactive:
+        catalog.get_public(organization.id, created.id)
+    assert inactive.value.kind == CatalogErrorKind.NOT_FOUND
+{{- end}}
+    archived = catalog.archive(created.id, CatalogTransition(version="3"), actor)
+    assert archived.status == CatalogStatus.ARCHIVED
+    with pytest.raises(CatalogError) as no_longer_public:
+        catalog.get_public(public_scope, created.id)
+    assert no_longer_public.value.kind == CatalogErrorKind.NOT_FOUND
+
+    with engine.begin() as connection:
+        connection.execute(delete(catalog_products).where(catalog_products.c.id == created.id))
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

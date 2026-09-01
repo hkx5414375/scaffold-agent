@@ -1,0 +1,96 @@
+"""Catalog administration, anonymous storefront, and error response contracts."""
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from test_commerce_catalog import MemoryRepository, _actor, _service, _write
+
+from {{.PackageName}}.catalog.http import (
+    archive_product,
+    create_product,
+    get_product,
+    install_error_handlers,
+    list_products,
+    publish_product,
+    router,
+    update_product,
+)
+from {{.PackageName}}.catalog.models import (
+    CatalogError,
+    CatalogErrorKind,
+    CatalogStatus,
+    CatalogTransition,
+    CatalogUpdate,
+)
+
+
+def test_direct_administration_transport_covers_the_publication_lifecycle() -> None:
+    service = _service(MemoryRepository())
+    actor = _actor()
+    created = create_product(_write(), actor, service)
+    assert list_products(actor, service).items == [created]
+    assert get_product(created.id, actor, service) == created
+
+    active = publish_product(created.id, CatalogTransition(version="1"), actor, service)
+    changed = update_product(
+        created.id,
+        CatalogUpdate(
+            sku="SKU-2",
+            name="Changed",
+            price_minor="2000",
+            currency="EUR",
+            version="2",
+        ),
+        actor,
+        service,
+    )
+    assert active.status == CatalogStatus.ACTIVE
+    assert changed.status == CatalogStatus.ACTIVE
+    assert (
+        archive_product(
+            created.id,
+            CatalogTransition(version="3"),
+            actor,
+            service,
+        ).status
+        == CatalogStatus.ARCHIVED
+    )
+
+
+def test_storefront_routes_are_anonymous_and_serialize_decimal_strings() -> None:
+    service = _service(MemoryRepository())
+    created = service.create(_write(), _actor())
+    service.publish(created.id, CatalogTransition(version="1"), _actor())
+    application = FastAPI()
+    application.state.catalog_service = service
+    install_error_handlers(application)
+    application.include_router(router)
+    client = TestClient(application)
+    headers: dict[str, str] = {{if .Tenancy}}{"X-Organization-ID": "organization-1"}{{else}}{}{{end}}
+
+    page = client.get("/api/v1/storefront/products", headers=headers)
+    detail = client.get(f"/api/v1/storefront/products/{created.id}", headers=headers)
+
+    assert page.status_code == 200
+    assert detail.status_code == 200
+    assert page.json()["items"][0]["price_minor"] == "1299"
+    assert page.json()["items"][0]["version"] == "2"
+    assert detail.json()["status"] == "active"
+
+
+def test_catalog_errors_use_stable_public_mapping() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise CatalogError(
+            CatalogErrorKind.CONFLICT,
+            "catalog product changed or conflicts with an existing SKU",
+        )
+
+    response = TestClient(application).get("/failure")
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "catalog.conflict",
+        "message": "catalog product changed or conflicts with an existing SKU",
+    }

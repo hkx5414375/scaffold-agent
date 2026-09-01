@@ -180,12 +180,28 @@ func TestPythonMySQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd(t *testing.T)
 	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, true, "0.3.0", false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLTenantCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "0.3.0", false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonPostgreSQLCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, false, false, false, false, false, true)
+}
+
 func TestPythonPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true)
 }
 
 func TestPythonMySQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true)
 }
 
 func runGeneratedPythonReference(
@@ -228,6 +244,7 @@ func runGeneratedPythonReferenceOptions(
 	t.Helper()
 	csvTransfer := len(platformSelections) > 0 && platformSelections[0]
 	approvals := len(platformSelections) > 1 && platformSelections[1]
+	catalog := len(platformSelections) > 2 && platformSelections[2]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -245,7 +262,7 @@ spec:
   stack:
     backend: python
     admin_ui: ADMIN_UI
-    storefront: none
+    storefront: STOREFRONT
   database:
     engine: DATABASE_ENGINE
   auth:
@@ -259,8 +276,13 @@ CAPABILITIES
 		adminUI = "element-plus"
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
+	storefront := "none"
+	if catalog {
+		storefront = "nuxt"
+	}
+	blueprint = strings.ReplaceAll(blueprint, "STOREFRONT", storefront)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -310,6 +332,11 @@ CAPABILITIES
 	}
 	if approvals {
 		capabilities += `    - name: approval-workflows
+      version: 0.1.0
+`
+	}
+	if catalog {
+		capabilities += `    - name: commerce-catalog
       version: 0.1.0
 `
 	}
@@ -409,6 +436,12 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
+	if catalog {
+		wantChanges += 9 + 18 + 9
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -445,6 +478,10 @@ CAPABILITIES
 	}
 	if approvals && plannedData.CapabilityLock["approval-workflows"] != "0.1.0" {
 		t.Fatalf("Plan() approvals lock = %#v", plannedData.CapabilityLock)
+	}
+	if catalog && (plannedData.CapabilityLock["commerce-catalog"] != "0.1.0" ||
+		plannedData.CapabilityLock["nuxt-storefront"] != "0.1.0") {
+		t.Fatalf("Plan() commerce catalog lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

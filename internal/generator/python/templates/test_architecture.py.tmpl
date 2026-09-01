@@ -32,6 +32,16 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/approvals/{id}/reject", "post"),
         ("/api/v1/approvals/{id}/cancel", "post"),
 {{- end}}
+{{- if .Catalog}}
+        ("/api/v1/catalog/products", "post"),
+        ("/api/v1/catalog/products", "get"),
+        ("/api/v1/catalog/products/{id}", "get"),
+        ("/api/v1/catalog/products/{id}", "put"),
+        ("/api/v1/catalog/products/{id}/publish", "post"),
+        ("/api/v1/catalog/products/{id}/archive", "post"),
+        ("/api/v1/storefront/products", "get"),
+        ("/api/v1/storefront/products/{id}", "get"),
+{{- end}}
 {{- if .Tenancy}}
         ("/api/v1/organizations", "post"),
         ("/api/v1/organizations", "get"),
@@ -194,6 +204,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert approval_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
+{{- if .Catalog}}
+
+    catalog_tree = ast.parse((PACKAGE / "catalog" / "service.py").read_text(encoding="utf-8"))
+    catalog_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(catalog_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert catalog_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

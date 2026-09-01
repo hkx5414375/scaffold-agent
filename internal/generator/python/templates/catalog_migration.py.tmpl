@@ -1,0 +1,95 @@
+"""Create portable commerce catalog storage and permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000260_commerce_catalog"
+down_revision: str | None = {{if .Approvals}}"000250_approval_workflows"{{else if .CSVTransfer}}"000240_csv_import_export"{{else if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else if .Business}}"000002_business"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create products, scoped indexes, and separated administrator grants."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {"code": "catalog:products:read", "description": "Read catalog products"},
+        {
+            "code": "catalog:products:write",
+            "description": "Create, update, publish, and archive catalog products",
+        },
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in rows],
+    )
+
+    op.create_table(
+        "catalog_products",
+        sa.Column("id", sa.String(191), primary_key=True),
+        sa.Column(
+            "organization_id",
+            sa.String(191),
+{{- if .Tenancy}}
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+{{- else}}
+            nullable=True,
+{{- end}}
+        ),
+        sa.Column("sku", sa.String(64), nullable=False),
+        sa.Column("name", sa.String(160), nullable=False),
+        sa.Column("description", sa.Text(), nullable=False, server_default=""),
+        sa.Column("price_minor", sa.BigInteger(), nullable=False),
+        sa.Column("currency", sa.String(3), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("price_minor >= 0", name="catalog_products_price"),
+        sa.CheckConstraint(
+            "status in ('draft', 'active', 'archived')",
+            name="catalog_products_status",
+        ),
+        sa.CheckConstraint("version > 0", name="catalog_products_version"),
+        sa.UniqueConstraint(
+{{- if .Tenancy}}
+            "organization_id",
+{{- end}}
+            "sku",
+            name="catalog_products_scope_sku_unique",
+        ),
+    )
+    op.create_index(
+        "catalog_products_scope_status_idx",
+        "catalog_products",
+        [{{if .Tenancy}}"organization_id", {{end}}"status", "id"],
+    )
+
+
+def downgrade() -> None:
+    """Remove commerce catalog storage and permissions."""
+    op.drop_table("catalog_products")
+    codes = ["catalog:products:read", "catalog:products:write"]
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

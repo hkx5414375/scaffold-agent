@@ -90,6 +90,98 @@ func TestGenerateSharedNuxtStorefrontFoundation(t *testing.T) {
 	}
 }
 
+func TestGenerateCommerceCatalogAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Metadata.DisplayName = "Generated Python Catalog Store"
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: catalogOwner, Version: catalogVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[catalogOwner] != catalogVersion ||
+				generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion {
+				t.Fatalf("Generate(%s) capability lock = %#v", database, generated.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/demo_service/catalog/models.py",
+				"src/demo_service/catalog/service.py",
+				"src/demo_service/catalog/repository.py",
+				"src/demo_service/catalog/http.py",
+				"src/demo_service/migration/versions/000260_commerce_catalog.py",
+				"tests/test_commerce_catalog.py",
+				"tests/test_commerce_catalog_database.py",
+				"tests/test_commerce_catalog_http.py",
+				"web/admin/src/views/CatalogView.vue",
+				"web/storefront/app/pages/products/index.vue",
+				"web/storefront/app/pages/products/[id].vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != catalogOwner {
+					t.Errorf("Generate(%s) catalog output %s is missing or has the wrong owner", database, path)
+				}
+			}
+			assertions := map[string][]string{
+				"src/demo_service/main.py": {
+					"app.state.catalog_service = CatalogService",
+					"application.include_router(catalog_router)",
+				},
+				"src/demo_service/catalog/repository.py": {
+					"organizations.c.status == \"active\"",
+					"append_audit(connection, audit)",
+				},
+				"api/openapi.yaml": {
+					"/api/v1/catalog/products:",
+					"/api/v1/storefront/products:",
+					"price_minor:",
+				},
+				"web/admin/src/App.vue": {"CatalogView"},
+				"web/storefront/nuxt.config.ts": {
+					"SCAFFOLD_ORGANIZATION_ID",
+				},
+			}
+			for path, fragments := range assertions {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+			var contract map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+				t.Fatalf("generated catalog OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommerceCatalogRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: catalogOwner, Version: catalogVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), "requires organization-tenancy 0.3.0") {
+			t.Fatalf("Generate(tenancy %s) error = %v", version, err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 	t.Parallel()
 

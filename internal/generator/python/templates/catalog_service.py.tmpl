@@ -1,0 +1,397 @@
+"""Portable commerce catalog use cases and publication rules."""
+
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.catalog.models import (
+    CatalogError,
+    CatalogErrorKind,
+    CatalogPage,
+    CatalogProduct,
+    CatalogStatus,
+    CatalogTransition,
+    CatalogUpdate,
+    CatalogWrite,
+)
+from {{.PackageName}}.catalog.repository import (
+    CatalogConflict,
+    CatalogMutation,
+    CatalogRepository,
+    CatalogStatusTransition,
+)
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+MAXIMUM_INTEGER = 2**63 - 1
+MAXIMUM_IDENTIFIER_LENGTH = 191
+SKU_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,63}$")
+CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
+STATUSES = {status.value for status in CatalogStatus}
+
+
+class CatalogService:
+    """Enforce catalog normalization, isolation, and the publication state machine."""
+
+    def __init__(
+        self,
+        repository: CatalogRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def create(self, value: CatalogWrite, actor: Principal) -> CatalogProduct:
+        """Create one scoped draft product with atomic audit evidence."""
+{{- if .Tenancy}}
+        organization_id = _actor_scope(actor)
+{{- else}}
+        _actor_scope(actor)
+{{- end}}
+        normalized = _write(value)
+        now = _now(self._clock)
+        product = CatalogProduct(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            sku=normalized.sku,
+            name=normalized.name,
+            description=normalized.description,
+            price_minor=normalized.price_minor,
+            currency=normalized.currency,
+            status=CatalogStatus.DRAFT,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create(
+                product,
+                _audit(actor, "catalog:products:create", product.id, now),
+            )
+        except CatalogConflict as error:
+            raise _conflict() from error
+        except CatalogError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return product
+
+    def get(self, product_id: str, actor: Principal) -> CatalogProduct:
+        """Read one product only inside the authenticated scope."""
+        return self._get(_actor_scope(actor), _identifier(product_id), False)
+
+    def get_public(self, organization_id: str, product_id: str) -> CatalogProduct:
+        """Read one active product without requiring administrator identity."""
+        return self._get(_public_scope(organization_id), _identifier(product_id), True)
+
+    def list(
+        self,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> CatalogPage:
+        """List scoped administration products in stable identifier order."""
+        return self._list(_actor_scope(actor), status.strip(), cursor, limit, False)
+
+    def list_public(self, organization_id: str, cursor: str, limit: int) -> CatalogPage:
+        """List only active public products in one explicit scope."""
+        return self._list(
+            _public_scope(organization_id),
+            CatalogStatus.ACTIVE.value,
+            cursor,
+            limit,
+            True,
+        )
+
+    def update(
+        self,
+        product_id: str,
+        value: CatalogUpdate,
+        actor: Principal,
+    ) -> CatalogProduct:
+        """Replace mutable content while retaining publication status."""
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(product_id)
+        normalized = _write(value)
+        expected_version = _integer(value.version, positive=True)
+        now = _now(self._clock)
+        mutation = CatalogMutation(
+            organization_id=organization_id,
+            product_id=normalized_id,
+            sku=normalized.sku,
+            name=normalized.name,
+            description=normalized.description,
+            price_minor=_integer(normalized.price_minor),
+            currency=normalized.currency,
+            expected_version=expected_version,
+            updated_at=now,
+        )
+        try:
+            return self._repository.update(
+                mutation,
+                _audit(actor, "catalog:products:update", normalized_id, now),
+            )
+        except CatalogConflict as error:
+            raise _conflict() from error
+        except CatalogError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+    def publish(
+        self,
+        product_id: str,
+        value: CatalogTransition,
+        actor: Principal,
+    ) -> CatalogProduct:
+        """Publish only a draft product."""
+        return self._transition(
+            product_id,
+            value,
+            CatalogStatus.DRAFT,
+            CatalogStatus.ACTIVE,
+            "catalog:products:publish",
+            actor,
+        )
+
+    def archive(
+        self,
+        product_id: str,
+        value: CatalogTransition,
+        actor: Principal,
+    ) -> CatalogProduct:
+        """Archive a draft or active product as a terminal transition."""
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(product_id)
+        current = self._get(organization_id, normalized_id, False)
+        if current.status not in {CatalogStatus.DRAFT, CatalogStatus.ACTIVE}:
+            raise _conflict()
+        return self._transition_scoped(
+            organization_id,
+            normalized_id,
+            value,
+            current.status,
+            CatalogStatus.ARCHIVED,
+            "catalog:products:archive",
+            actor,
+        )
+
+    def _get(
+        self,
+        organization_id: str,
+        product_id: str,
+        public_read: bool,
+    ) -> CatalogProduct:
+        try:
+            product = (
+                self._repository.get_public(organization_id, product_id)
+                if public_read
+                else self._repository.get(organization_id, product_id)
+            )
+        except CatalogError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        if product is None:
+            raise _not_found()
+        return product
+
+    def _list(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+        public_read: bool,
+    ) -> CatalogPage:
+        normalized_cursor = cursor.strip()
+        if (
+            (status and status not in STATUSES)
+            or len(normalized_cursor) > MAXIMUM_IDENTIFIER_LENGTH
+            or not _safe(normalized_cursor)
+            or limit < 1
+            or limit > 100
+        ):
+            raise _invalid()
+        try:
+            page = self._repository.list_page(
+                organization_id,
+                status,
+                normalized_cursor,
+                limit,
+                public_read,
+            )
+        except CatalogError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return CatalogPage(items=page.items, next_cursor=page.next_cursor)
+
+    def _transition(
+        self,
+        product_id: str,
+        value: CatalogTransition,
+        from_status: CatalogStatus,
+        to_status: CatalogStatus,
+        action: str,
+        actor: Principal,
+    ) -> CatalogProduct:
+        return self._transition_scoped(
+            _actor_scope(actor),
+            _identifier(product_id),
+            value,
+            from_status,
+            to_status,
+            action,
+            actor,
+        )
+
+    def _transition_scoped(
+        self,
+        organization_id: str,
+        product_id: str,
+        value: CatalogTransition,
+        from_status: CatalogStatus,
+        to_status: CatalogStatus,
+        action: str,
+        actor: Principal,
+    ) -> CatalogProduct:
+        now = _now(self._clock)
+        transition = CatalogStatusTransition(
+            organization_id=organization_id,
+            product_id=product_id,
+            expected_version=_integer(value.version, positive=True),
+            from_status=from_status,
+            to_status=to_status,
+            updated_at=now,
+        )
+        try:
+            return self._repository.transition(
+                transition,
+                _audit(actor, action, product_id, now),
+            )
+        except CatalogConflict as error:
+            raise _conflict() from error
+        except CatalogError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+
+def _write(value: CatalogWrite) -> CatalogWrite:
+    sku = value.sku.strip().upper()
+    name = value.name.strip()
+    description = value.description.strip()
+    currency = value.currency.strip().upper()
+    _integer(value.price_minor)
+    if (
+        SKU_PATTERN.fullmatch(sku) is None
+        or not _required(name, 160)
+        or not _optional(description, 4000)
+        or CURRENCY_PATTERN.fullmatch(currency) is None
+    ):
+        raise _invalid()
+    return CatalogWrite(
+        sku=sku,
+        name=name,
+        description=description,
+        price_minor=value.price_minor,
+        currency=currency,
+    )
+
+
+def _actor_scope(actor: Principal) -> str:
+    if not _required(actor.user_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+{{- if .Tenancy}}
+    organization_id = (actor.organization_id or "").strip()
+    if not _required(organization_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+    return organization_id
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _public_scope(organization_id: str) -> str:
+    normalized = organization_id.strip()
+{{- if .Tenancy}}
+    if not _required(normalized, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+{{- else}}
+    if normalized:
+        raise _invalid()
+{{- end}}
+    return normalized
+
+
+def _identifier(value: str) -> str:
+    normalized = value.strip()
+    if not _required(normalized, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+    return normalized
+
+
+def _integer(value: str, *, positive: bool = False) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as error:
+        raise _invalid() from error
+    minimum = 1 if positive else 0
+    if number < minimum or number > MAXIMUM_INTEGER or str(number) != value:
+        raise _invalid()
+    return number
+
+
+def _required(value: str, maximum: int) -> bool:
+    return bool(value) and _optional(value, maximum)
+
+
+def _optional(value: str, maximum: int) -> bool:
+    return len(value) <= maximum and _safe(value)
+
+
+def _safe(value: str) -> bool:
+    return all(character.isprintable() for character in value)
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _invalid() -> CatalogError:
+    return CatalogError(CatalogErrorKind.INVALID, "catalog product data is invalid")
+
+
+def _not_found() -> CatalogError:
+    return CatalogError(CatalogErrorKind.NOT_FOUND, "catalog product was not found")
+
+
+def _conflict() -> CatalogError:
+    return CatalogError(
+        CatalogErrorKind.CONFLICT,
+        "catalog product changed or conflicts with an existing SKU",
+    )
+
+
+def _storage() -> CatalogError:
+    return CatalogError(CatalogErrorKind.STORAGE, "catalog operation could not be completed")

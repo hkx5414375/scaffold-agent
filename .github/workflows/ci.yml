@@ -59,7 +59,7 @@ jobs:
       - name: Generate, lint, test, and build administration UI
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCommerceCatalogPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantJobAdministrationPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLPlatformCapabilitiesCompose)$' -count=1
+        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCommerceCatalogPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantJobAdministrationPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd|TestPythonPostgreSQLPlatformCapabilitiesCompose)$' -count=1
 
   generated-storefront:
     name: Shared generated Nuxt storefront foundation
@@ -81,7 +81,7 @@ jobs:
       - name: Generate all backend variants and run storefront quality gates
         env:
           SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestSharedNuxtStorefrontPlanApplyVerifyAllBackends|TestGoCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestJavaCommerceCatalogStorefrontPlanApplyVerifyBothDatabases)$' -count=1
+        run: go test ./internal/engine -run '^(TestSharedNuxtStorefrontPlanApplyVerifyAllBackends|TestGoCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestJavaCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestPythonCommerceCatalogStorefrontPlanApplyVerifyBothDatabases)$' -count=1
 
   generated-java:
     name: Generated Java identity and CRUD
@@ -103,7 +103,7 @@ jobs:
         run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs|TenantNotifications|TenantFiles|TenantCache|TenantJobAdministration|TenantCSVImportExport|TenantApprovalWorkflows|TenantCommerceCatalog|Observability)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQL(Jobs|Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLPlatformCapabilitiesCompose$' -count=1
 
   generated-python:
-    name: Generated Python identity, CRUD, tenancy, jobs, notifications, files, cache, administration, and observability
+    name: Generated Python platform and commerce catalog
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -121,7 +121,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Python projects
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
-        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows|CommerceCatalog|TenantCommerceCatalog)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration
@@ -186,7 +186,7 @@ jobs:
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5433/scaffold_agent_python
-        run: go test ./internal/engine -run '^TestPythonPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|Observability|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|Observability|CSVImportExport|ApprovalWorkflows|CommerceCatalog)PlanApplyVerifyEndToEnd$' -count=1
 
   generated-mysql:
     name: Generated MySQL integration
@@ -237,4 +237,4 @@ jobs:
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: mysql+pymysql://root:mysql@127.0.0.1:3306/scaffold_agent_python?charset=utf8mb4
-        run: go test ./internal/engine -run '^TestPythonMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestPythonMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog)PlanApplyVerifyEndToEnd$|^TestPythonMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
