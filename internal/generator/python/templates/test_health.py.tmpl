@@ -54,10 +54,19 @@ def test_readiness_reports_only_generic_status() -> None:
 
 def test_settings_require_a_complete_bootstrap_pair(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ValueError, match="must be set together"):
-        Settings(database_url="sqlite://", bootstrap_admin_email="admin@example.com")
+        Settings(
+            database_url="sqlite://",
+            bootstrap_admin_email="admin@example.com",
+{{- if .Files}}
+            file_storage_root="objects-test",
+{{- end}}
+        )
 
     monkeypatch.setenv("DATABASE_URL", "sqlite://")
     monkeypatch.setenv("COOKIE_SECURE", "false")
+{{- if .Files}}
+    monkeypatch.setenv("FILE_STORAGE_ROOT", "objects-test")
+{{- end}}
     get_settings.cache_clear()
     settings = get_settings()
     get_settings.cache_clear()
@@ -92,6 +101,9 @@ def test_application_lifecycle_migrates_bootstraps_and_disposes(
         cookie_secure=False,
         bootstrap_admin_email="admin@example.com",
         bootstrap_admin_password="a sufficiently long password",
+{{- if .Files}}
+        file_storage_root=str(tmp_path / "objects"),
+{{- end}}
     )
     monkeypatch.setattr(application_main, "get_settings", lambda: settings)
     monkeypatch.setattr(application_main, "create_database_engine", lambda _url: engine)

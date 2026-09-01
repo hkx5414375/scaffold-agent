@@ -1,0 +1,242 @@
+"""Tenant-aware file use cases with cross-resource compensation."""
+
+import re
+from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import BinaryIO
+from uuid import uuid4
+
+from {{.PackageName}}.files.models import (
+    FileAsset,
+    FileAssetError,
+    FileAssetErrorKind,
+    FileAssetPage,
+    FileAssetRecord,
+)
+from {{.PackageName}}.files.repository import (
+    FileAssetConflict,
+    FileAssetNotFound,
+    FileAssetRepository,
+)
+from {{.PackageName}}.files.storage import BlobStore
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+MAXIMUM_BYTES = 10 << 20
+MEDIA_TYPE_PATTERN = re.compile(
+    r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Download:
+    """Public metadata paired with a closeable content stream."""
+
+    asset: FileAsset
+    content: BinaryIO
+
+
+class FileAssetService:
+    """File operations independent from FastAPI, SQLAlchemy, and local paths."""
+
+    def __init__(
+        self,
+        repository: FileAssetRepository,
+        blobs: BlobStore,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._blobs = blobs
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def upload(
+        self,
+        name: str,
+        media_type: str,
+        content: BinaryIO,
+        actor: Principal,
+    ) -> FileAsset:
+        """Publish bytes, persist metadata and compensate transaction failure."""
+        organization_id = _scope(actor)
+        normalized_name = _name(name)
+        normalized_media_type = _media_type(media_type)
+        if content is None:
+            raise _invalid()
+        asset_id = str(uuid4())
+        storage_key = f"objects/{asset_id[:2]}/{asset_id}"
+        written = self._blobs.write(storage_key, content, MAXIMUM_BYTES)
+        now = self._clock()
+        record = FileAssetRecord(
+            id=asset_id,
+            organization_id=organization_id or None,
+            name=normalized_name,
+            media_type=normalized_media_type,
+            size=written.size,
+            sha256=written.sha256,
+            storage_key=storage_key,
+            status="active",
+            created_at=now,
+            updated_at=now,
+            deleted_at=None,
+        )
+        try:
+            self._repository.create(record, _audit(actor, "files:create", asset_id, now))
+        except Exception as error:
+            with suppress(Exception):
+                self._blobs.delete(storage_key)
+            if isinstance(error, FileAssetConflict):
+                raise FileAssetError(
+                    FileAssetErrorKind.CONFLICT,
+                    "file asset already exists",
+                ) from error
+            if isinstance(error, FileAssetError):
+                raise
+            raise _storage() from error
+        return _public(record)
+
+    def get(self, asset_id: str, actor: Principal) -> FileAsset:
+        """Read active metadata within the actor scope."""
+        record = self._record(asset_id, actor)
+        return _public(record)
+
+    def open(self, asset_id: str, actor: Principal) -> Download:
+        """Open active content without exposing its storage key."""
+        record = self._record(asset_id, actor)
+        return Download(_public(record), self._blobs.open(record.storage_key))
+
+    def list(self, cursor: str, limit: int, actor: Principal) -> FileAssetPage:
+        """Return one bounded active-file page."""
+        organization_id = _scope(actor)
+        if _has_control(cursor):
+            raise _invalid()
+        normalized_cursor = cursor.strip()
+        if (
+            len(normalized_cursor) > 191
+            or _has_control(normalized_cursor)
+            or limit < 1
+            or limit > 100
+        ):
+            raise _invalid()
+        page = self._repository.list(organization_id, normalized_cursor, limit)
+        return FileAssetPage(
+            items=[_public(item) for item in page.items],
+            next_cursor=page.next_cursor,
+        )
+
+    def delete(self, asset_id: str, actor: Principal) -> None:
+        """Soft-delete metadata before bytes and restore metadata on failure."""
+        organization_id = _scope(actor)
+        normalized_id = _id(asset_id)
+        now = self._clock()
+        try:
+            record = self._repository.mark_deleted(
+                organization_id,
+                normalized_id,
+                now,
+                _audit(actor, "files:delete", normalized_id, now),
+            )
+        except FileAssetNotFound as error:
+            raise _not_found() from error
+        try:
+            self._blobs.delete(record.storage_key)
+        except Exception as error:
+            with suppress(Exception):
+                self._repository.restore(organization_id, normalized_id)
+            if isinstance(error, FileAssetError):
+                raise
+            raise _storage() from error
+
+    def _record(self, asset_id: str, actor: Principal) -> FileAssetRecord:
+        organization_id = _scope(actor)
+        normalized_id = _id(asset_id)
+        record = self._repository.get(organization_id, normalized_id)
+        if record is None:
+            raise _not_found()
+        return record
+
+
+def _scope(actor: Principal) -> str:
+    if not actor.user_id or _has_control(actor.user_id):
+        raise _invalid()
+{{- if .Tenancy}}
+    if not actor.organization_id or _has_control(actor.organization_id):
+        raise _invalid()
+    return actor.organization_id
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _name(value: str) -> str:
+    if _has_control(value):
+        raise _invalid()
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 255
+        or "/" in normalized
+        or "\\" in normalized
+        or _has_control(normalized)
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _media_type(value: str) -> str:
+    if _has_control(value):
+        raise _invalid()
+    normalized = (value or "application/octet-stream").strip().lower()
+    if MEDIA_TYPE_PATTERN.fullmatch(normalized) is None:
+        raise _invalid()
+    return normalized
+
+
+def _id(value: str) -> str:
+    if _has_control(value):
+        raise _invalid()
+    normalized = value.strip()
+    if not normalized or len(normalized) > 191 or _has_control(normalized):
+        raise _invalid()
+    return normalized
+
+
+def _public(record: FileAssetRecord) -> FileAsset:
+    return FileAsset(
+        id=record.id,
+        organization_id=record.organization_id,
+        name=record.name,
+        media_type=record.media_type,
+        size=record.size,
+        sha256=record.sha256,
+        created_at=record.created_at,
+    )
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)
+
+
+def _invalid() -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.INVALID, "file asset input is invalid")
+
+
+def _not_found() -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.NOT_FOUND, "file asset was not found")
+
+
+def _storage() -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.STORAGE, "file storage is unavailable")

@@ -1,0 +1,230 @@
+"""File service scope, bounds, and compensation contracts."""
+
+import hashlib
+import io
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import BinaryIO, cast
+
+import pytest
+
+from {{.PackageName}}.files.models import (
+    FileAssetError,
+    FileAssetErrorKind,
+    FileAssetRecord,
+)
+from {{.PackageName}}.files.repository import FileAssetConflict, FileAssetNotFound, PageResult
+from {{.PackageName}}.files.service import FileAssetService
+from {{.PackageName}}.files.storage import WriteResult
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.records: dict[str, FileAssetRecord] = {}
+        self.failure: Exception | None = None
+        self.restore_failure: Exception | None = None
+        self.restored = False
+
+    def create(self, asset: FileAssetRecord, audit: AuditEvent) -> None:
+        assert audit.action == "files:create"
+        if self.failure is not None:
+            raise self.failure
+        self.records[asset.id] = asset
+
+    def get(self, organization_id: str, asset_id: str) -> FileAssetRecord | None:
+        record = self.records.get(asset_id)
+        if record is None or record.status != "active":
+            return None
+        if (record.organization_id or "") != organization_id:
+            return None
+        return record
+
+    def list(self, organization_id: str, cursor: str, limit: int) -> PageResult:
+        records = [
+            record
+            for record in self.records.values()
+            if (record.organization_id or "") == organization_id
+            and record.status == "active"
+            and record.id > cursor
+        ]
+        records.sort(key=lambda record: record.id)
+        next_cursor = records[limit - 1].id if len(records) > limit else ""
+        return PageResult(records[:limit], next_cursor)
+
+    def mark_deleted(
+        self,
+        organization_id: str,
+        asset_id: str,
+        deleted_at: datetime,
+        audit: AuditEvent,
+    ) -> FileAssetRecord:
+        assert audit.action == "files:delete"
+        record = self.get(organization_id, asset_id)
+        if record is None:
+            raise FileAssetNotFound()
+        self.records[asset_id] = replace(
+            record,
+            status="deleted",
+            updated_at=deleted_at,
+            deleted_at=deleted_at,
+        )
+        return record
+
+    def restore(self, organization_id: str, asset_id: str) -> None:
+        if self.restore_failure is not None:
+            raise self.restore_failure
+        record = self.records.get(asset_id)
+        if record is None or (record.organization_id or "") != organization_id:
+            raise FileAssetNotFound()
+        self.records[asset_id] = replace(record, status="active", deleted_at=None)
+        self.restored = True
+
+
+class MemoryBlobStore:
+    def __init__(self) -> None:
+        self.values: dict[str, bytes] = {}
+        self.delete_failure: Exception | None = None
+
+    def write(self, key: str, source: BinaryIO, maximum_bytes: int) -> WriteResult:
+        content = source.read()
+        if len(content) > maximum_bytes:
+            raise FileAssetError(FileAssetErrorKind.TOO_LARGE, "file exceeds the maximum size")
+        self.values[key] = content
+        return WriteResult(len(content), hashlib.sha256(content).hexdigest())
+
+    def open(self, key: str) -> io.BytesIO:
+        return io.BytesIO(self.values[key])
+
+    def delete(self, key: str) -> None:
+        if self.delete_failure is not None:
+            raise self.delete_failure
+        self.values.pop(key, None)
+
+
+def _actor(organization_id: str = "organization-1") -> Principal:
+    return Principal(
+        user_id="user-1",
+        email="person@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=organization_id,
+{{- end}}
+    )
+
+
+def test_upload_get_open_list_and_delete() -> None:
+    repository = MemoryRepository()
+    blobs = MemoryBlobStore()
+    service = FileAssetService(repository, blobs, lambda: NOW)
+    uploaded = service.upload(" report.txt ", " Text/Plain ", io.BytesIO(b"hello"), _actor())
+
+    assert uploaded.name == "report.txt"
+    assert uploaded.media_type == "text/plain"
+    assert uploaded.size == 5
+    assert uploaded.sha256 == hashlib.sha256(b"hello").hexdigest()
+    assert service.get(uploaded.id, _actor()) == uploaded
+    assert service.list("", 20, _actor()).items == [uploaded]
+    opened = service.open(uploaded.id, _actor())
+    assert opened.content.read() == b"hello"
+    opened.content.close()
+    service.delete(uploaded.id, _actor())
+    with pytest.raises(FileAssetError) as missing:
+        service.get(uploaded.id, _actor())
+    assert missing.value.kind == FileAssetErrorKind.NOT_FOUND
+
+
+def test_upload_and_delete_compensate_cross_resource_failures() -> None:
+    repository = MemoryRepository()
+    blobs = MemoryBlobStore()
+    service = FileAssetService(repository, blobs, lambda: NOW)
+    repository.failure = FileAssetConflict()
+    with pytest.raises(FileAssetError) as conflict:
+        service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    assert conflict.value.kind == FileAssetErrorKind.CONFLICT
+    assert blobs.values == {}
+
+    repository.failure = None
+    uploaded = service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    blobs.delete_failure = OSError("disk detail")
+    with pytest.raises(FileAssetError) as storage:
+        service.delete(uploaded.id, _actor())
+    assert storage.value.kind == FileAssetErrorKind.STORAGE
+    assert repository.restored
+    assert service.get(uploaded.id, _actor()) == uploaded
+
+
+@pytest.mark.parametrize(
+    ("name", "media_type"),
+    [
+        ("", "text/plain"),
+        ("../secret", "text/plain"),
+        ("report.txt", "text/*"),
+        ("report.txt", "invalid"),
+    ],
+)
+def test_invalid_metadata_is_rejected(name: str, media_type: str) -> None:
+    service = FileAssetService(MemoryRepository(), MemoryBlobStore(), lambda: NOW)
+    with pytest.raises(FileAssetError) as failure:
+        service.upload(name, media_type, io.BytesIO(b"hello"), _actor())
+    assert failure.value.kind == FileAssetErrorKind.INVALID
+
+
+def test_scope_cursor_and_limit_are_enforced() -> None:
+    service = FileAssetService(MemoryRepository(), MemoryBlobStore(), lambda: NOW)
+{{- if .Tenancy}}
+    actor = _actor("")
+    with pytest.raises(FileAssetError):
+        service.list("", 20, actor)
+{{- end}}
+    with pytest.raises(FileAssetError):
+        service.list("control\n", 20, _actor())
+    with pytest.raises(FileAssetError):
+        service.list("", 101, _actor())
+
+
+def test_expected_and_unexpected_failures_use_safe_categories() -> None:
+    repository = MemoryRepository()
+    blobs = MemoryBlobStore()
+    service = FileAssetService(repository, blobs, lambda: NOW)
+
+    with pytest.raises(FileAssetError) as empty_content:
+        service.upload("report.txt", "text/plain", cast(BinaryIO, None), _actor())
+    assert empty_content.value.kind == FileAssetErrorKind.INVALID
+
+    repository.failure = FileAssetError(FileAssetErrorKind.INVALID, "known")
+    with pytest.raises(FileAssetError) as expected:
+        service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    assert expected.value.kind == FileAssetErrorKind.INVALID
+
+    repository.failure = RuntimeError("database secret")
+    with pytest.raises(FileAssetError) as unexpected:
+        service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    assert unexpected.value.kind == FileAssetErrorKind.STORAGE
+    assert "database secret" not in unexpected.value.message
+
+    repository.failure = FileAssetConflict()
+    blobs.delete_failure = OSError("cleanup detail")
+    with pytest.raises(FileAssetError) as cleanup:
+        service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    assert cleanup.value.kind == FileAssetErrorKind.CONFLICT
+
+    repository.failure = None
+    blobs.delete_failure = None
+    uploaded = service.upload("report.txt", "text/plain", io.BytesIO(b"hello"), _actor())
+    blobs.delete_failure = FileAssetError(FileAssetErrorKind.STORAGE, "known")
+    repository.restore_failure = RuntimeError("restore detail")
+    with pytest.raises(FileAssetError) as delete_failure:
+        service.delete(uploaded.id, _actor())
+    assert delete_failure.value.kind == FileAssetErrorKind.STORAGE
+
+    missing = FileAssetService(MemoryRepository(), MemoryBlobStore(), lambda: NOW)
+    with pytest.raises(FileAssetError) as not_found:
+        missing.delete("missing", _actor())
+    assert not_found.value.kind == FileAssetErrorKind.NOT_FOUND
+    with pytest.raises(FileAssetError) as invalid_actor:
+        missing.get("missing", _actor().model_copy(update={"user_id": ""}))
+    assert invalid_actor.value.kind == FileAssetErrorKind.INVALID

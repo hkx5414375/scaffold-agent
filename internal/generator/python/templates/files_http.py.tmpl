@@ -1,0 +1,140 @@
+"""Authenticated file upload, metadata, download, and deletion transport."""
+
+from collections.abc import Iterator
+from typing import Annotated
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.files.models import (
+    FileAsset,
+    FileAssetError,
+    FileAssetErrorKind,
+    FileAssetPage,
+)
+from {{.PackageName}}.files.service import Download, FileAssetService
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+
+router = APIRouter(prefix="/api/v1/files", tags=["files"])
+
+
+def file_asset_service(request: Request) -> FileAssetService:
+    """Resolve the process-scoped file service."""
+    service: FileAssetService = request.app.state.file_asset_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable file capability errors."""
+
+    @app.exception_handler(FileAssetError)
+    async def file_error(_request: Request, error: FileAssetError) -> JSONResponse:
+        status, code = {
+            FileAssetErrorKind.INVALID: (400, "files.invalid"),
+            FileAssetErrorKind.NOT_FOUND: (404, "files.not_found"),
+            FileAssetErrorKind.CONFLICT: (409, "files.conflict"),
+            FileAssetErrorKind.TOO_LARGE: (413, "files.too_large"),
+            FileAssetErrorKind.STORAGE: (503, "files.storage_unavailable"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post("", response_model=FileAsset, response_model_exclude_none=True, status_code=201)
+def upload(
+    file: UploadFile,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("files:create"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[FileAssetService, Depends(file_asset_service)],
+) -> FileAsset:
+    """Stream one bounded multipart file into durable storage."""
+    try:
+        return service.upload(
+            file.filename or "upload",
+            file.content_type or "application/octet-stream",
+            file.file,
+            principal,
+        )
+    finally:
+        file.file.close()
+
+
+@router.get("/{asset_id}", response_model=FileAsset, response_model_exclude_none=True)
+def get(
+    asset_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("files:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[FileAssetService, Depends(file_asset_service)],
+) -> FileAsset:
+    """Read public metadata without exposing the storage key."""
+    return service.get(asset_id, principal)
+
+
+@router.get("", response_model=FileAssetPage, response_model_exclude_none=True)
+def list_assets(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("files:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[FileAssetService, Depends(file_asset_service)],
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> FileAssetPage:
+    """List one bounded active-file page."""
+    return service.list(cursor, limit, principal)
+
+
+@router.get("/{asset_id}/content", response_class=StreamingResponse)
+def download(
+    asset_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("files:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[FileAssetService, Depends(file_asset_service)],
+) -> StreamingResponse:
+    """Stream content with safe attachment and anti-sniffing headers."""
+    value = service.open(asset_id, principal)
+    disposition = "attachment; filename=download; filename*=UTF-8''" + quote(
+        value.asset.name,
+        safe="",
+    )
+    return StreamingResponse(
+        _content(value),
+        media_type=value.asset.media_type,
+        headers={
+            "Content-Disposition": disposition,
+            "Content-Length": str(value.asset.size),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.delete("/{asset_id}", status_code=204)
+def delete(
+    asset_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("files:delete"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[FileAssetService, Depends(file_asset_service)],
+) -> None:
+    """Delete active metadata and bytes with compensation."""
+    service.delete(asset_id, principal)
+
+
+def _content(value: Download) -> Iterator[bytes]:
+    try:
+        while chunk := value.content.read(64 << 10):
+            yield chunk
+    finally:
+        value.content.close()

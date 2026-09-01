@@ -1,0 +1,195 @@
+"""Bounded create-only local object storage."""
+
+import hashlib
+import io
+import os
+import re
+import stat
+import tempfile
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO, Protocol
+
+from {{.PackageName}}.files.models import FileAssetError, FileAssetErrorKind
+
+BUFFER_BYTES = 64 << 10
+KEY_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    """Published byte count and SHA-256 digest."""
+
+    size: int
+    sha256: str
+
+
+class BlobStore(Protocol):
+    """Create-only binary storage seam."""
+
+    def write(self, key: str, source: BinaryIO, maximum_bytes: int) -> WriteResult: ...
+
+    def open(self, key: str) -> BinaryIO: ...
+
+    def delete(self, key: str) -> None: ...
+
+
+class LocalBlobStore:
+    """Atomic local adapter rooted below one runtime-only directory."""
+
+    def __init__(self, configured_root: str) -> None:
+        if not configured_root or not configured_root.strip():
+            raise _invalid("FILE_STORAGE_ROOT is required")
+        try:
+            root = Path(configured_root.strip()).expanduser().absolute()
+            root.mkdir(parents=True, exist_ok=True)
+            self._root = root.resolve(strict=True)
+        except OSError as error:
+            raise _storage("file storage root could not be initialized") from error
+
+    def write(self, key: str, source: BinaryIO, maximum_bytes: int) -> WriteResult:
+        if source is None or maximum_bytes < 1:
+            raise _invalid("file object input is invalid")
+        target = self._safe_path(key)
+        directory = target.parent
+        self._create_safe_directory(directory)
+        temporary: Path | None = None
+        published = False
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".upload-",
+                suffix=".tmp",
+                dir=directory,
+            )
+            temporary = Path(temporary_name)
+            digest = hashlib.sha256()
+            size = 0
+            with os.fdopen(descriptor, "wb") as output:
+                while True:
+                    chunk = source.read(BUFFER_BYTES)
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, bytes):
+                        raise _invalid("file object source must return bytes")
+                    size += len(chunk)
+                    if size > maximum_bytes:
+                        raise FileAssetError(
+                            FileAssetErrorKind.TOO_LARGE,
+                            "file exceeds the maximum size",
+                        )
+                    output.write(chunk)
+                    digest.update(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            os.link(temporary, target)
+            temporary.unlink()
+            published = True
+            return WriteResult(size, digest.hexdigest())
+        except FileAssetError:
+            raise
+        except FileExistsError as error:
+            raise FileAssetError(
+                FileAssetErrorKind.CONFLICT,
+                "file object already exists",
+            ) from error
+        except OSError as error:
+            raise _storage("file object could not be written") from error
+        finally:
+            if not published and temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+
+    def open(self, key: str) -> BinaryIO:
+        target = self._safe_path(key)
+        self._verify_directory_chain(target.parent)
+        try:
+            details = target.lstat()
+            if not stat.S_ISREG(details.st_mode) or target.is_symlink():
+                raise _not_found()
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(target, flags)
+            return io.FileIO(descriptor, mode="rb", closefd=True)
+        except FileNotFoundError as error:
+            raise _not_found() from error
+        except FileAssetError:
+            raise
+        except OSError as error:
+            raise _storage("file object could not be opened") from error
+
+    def delete(self, key: str) -> None:
+        target = self._safe_path(key)
+        try:
+            self._verify_directory_chain(target.parent)
+            details = target.lstat()
+            if not stat.S_ISREG(details.st_mode) or target.is_symlink():
+                raise _not_found()
+            target.unlink()
+        except FileNotFoundError:
+            return
+        except FileAssetError as error:
+            if error.kind == FileAssetErrorKind.NOT_FOUND:
+                return
+            raise
+        except OSError as error:
+            raise _storage("file object could not be deleted") from error
+
+    def _safe_path(self, key: str) -> Path:
+        if (
+            not key
+            or key.startswith("/")
+            or key.endswith("/")
+            or "\\" in key
+            or any(
+                not segment or segment in {".", ".."} or KEY_SEGMENT.fullmatch(segment) is None
+                for segment in key.split("/")
+            )
+        ):
+            raise _invalid("file storage key is invalid")
+        target = self._root.joinpath(*key.split("/"))
+        if target == self._root:
+            raise _invalid("file storage key is invalid")
+        return target
+
+    def _create_safe_directory(self, directory: Path) -> None:
+        try:
+            relative = directory.relative_to(self._root)
+            current = self._root
+            for component in relative.parts:
+                current = current / component
+                current.mkdir(exist_ok=True)
+                details = current.lstat()
+                if not stat.S_ISDIR(details.st_mode) or current.is_symlink():
+                    raise _invalid("file object directory must not contain symbolic links")
+        except FileAssetError:
+            raise
+        except (OSError, ValueError) as error:
+            raise _storage("file object directory could not be initialized") from error
+
+    def _verify_directory_chain(self, directory: Path) -> None:
+        try:
+            relative = directory.relative_to(self._root)
+            current = self._root
+            for component in relative.parts:
+                current = current / component
+                details = current.lstat()
+                if not stat.S_ISDIR(details.st_mode) or current.is_symlink():
+                    raise _invalid("file object directory must not contain symbolic links")
+        except FileNotFoundError as error:
+            raise _not_found() from error
+        except FileAssetError:
+            raise
+        except (OSError, ValueError) as error:
+            raise _storage("file object directory could not be inspected") from error
+
+
+def _invalid(message: str) -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.INVALID, message)
+
+
+def _not_found() -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.NOT_FOUND, "file asset was not found")
+
+
+def _storage(message: str) -> FileAssetError:
+    return FileAssetError(FileAssetErrorKind.STORAGE, message)

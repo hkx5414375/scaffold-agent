@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: str | None = None
+{{- if .Files}}
+    file_storage_root: str
+{{- end}}
 
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
 

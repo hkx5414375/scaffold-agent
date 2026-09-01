@@ -1,0 +1,93 @@
+"""Create durable tenant-aware file metadata and permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000210_file_assets"
+down_revision: str | None = {{if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create metadata, scope indexes, and administrator permissions."""
+    op.create_table(
+        "file_assets",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("organization_id", sa.String(length=191), nullable={{if .Tenancy}}False{{else}}True{{end}}),
+        sa.Column("name", sa.String(length=255), nullable=False),
+        sa.Column("media_type", sa.String(length=255), nullable=False),
+        sa.Column("size", sa.BigInteger(), nullable=False),
+        sa.Column("sha256", sa.String(length=64), nullable=False),
+        sa.Column("storage_key", sa.String(length=255), nullable=False),
+        sa.Column("status", sa.String(length=16), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+{{- if .Tenancy}}
+        sa.ForeignKeyConstraint(
+            ["organization_id"],
+            ["organizations.id"],
+            name="fk_file_assets_organization_id_organizations",
+            ondelete="CASCADE",
+        ),
+{{- end}}
+        sa.CheckConstraint("size >= 0", name="ck_file_assets_file_assets_size"),
+        sa.CheckConstraint(
+            "status IN ('active', 'deleted')",
+            name="ck_file_assets_file_assets_status",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("storage_key", name="uq_file_assets_storage_key"),
+    )
+    op.create_index(
+        "ix_file_assets_scope_status_id",
+        "file_assets",
+        ["organization_id", "status", "id"],
+        unique=False,
+    )
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {"code": "files:create", "description": "Upload file assets"},
+        {"code": "files:read", "description": "Read and download file assets"},
+        {"code": "files:delete", "description": "Delete file assets"},
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [
+            {"role_code": role, "permission_code": row["code"]}
+            for role in ("admin", "user")
+            for row in rows
+        ],
+    )
+
+
+def downgrade() -> None:
+    """Remove file permissions and metadata."""
+    connection = op.get_bind()
+    connection.execute(
+        sa.text(
+            "delete from identity_role_permissions where permission_code in "
+            "('files:create', 'files:read', 'files:delete')"
+        )
+    )
+    connection.execute(
+        sa.text(
+            "delete from identity_permissions where code in "
+            "('files:create', 'files:read', 'files:delete')"
+        )
+    )
+    op.drop_index("ix_file_assets_scope_status_id", table_name="file_assets")
+    op.drop_table("file_assets")

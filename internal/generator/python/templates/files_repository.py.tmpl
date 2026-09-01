@@ -1,0 +1,189 @@
+"""Transactional tenant-aware file metadata persistence."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import insert, select, update
+from sqlalchemy.engine import Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
+
+from {{.PackageName}}.files.models import FileAssetRecord, file_assets
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+
+
+class FileAssetConflict(Exception):
+    """Metadata or storage key already exists."""
+
+
+class FileAssetNotFound(Exception):
+    """No active file exists in the requested scope."""
+
+
+@dataclass(frozen=True, slots=True)
+class PageResult:
+    """Internal active-file keyset page."""
+
+    items: list[FileAssetRecord]
+    next_cursor: str
+
+
+class FileAssetRepository(Protocol):
+    """Persistence seam for file metadata and compensation."""
+
+    def create(self, asset: FileAssetRecord, audit: AuditEvent) -> None: ...
+
+    def get(self, organization_id: str, asset_id: str) -> FileAssetRecord | None: ...
+
+    def list(self, organization_id: str, cursor: str, limit: int) -> PageResult: ...
+
+    def mark_deleted(
+        self,
+        organization_id: str,
+        asset_id: str,
+        deleted_at: datetime,
+        audit: AuditEvent,
+    ) -> FileAssetRecord: ...
+
+    def restore(self, organization_id: str, asset_id: str) -> None: ...
+
+
+class SQLAlchemyFileAssetRepository:
+    """SQLAlchemy Core adapter with scoped transactional state changes."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create(self, asset: FileAssetRecord, audit: AuditEvent) -> None:
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(insert(file_assets).values(**_values(asset)))
+                append_audit(connection, audit)
+        except IntegrityError as error:
+            raise FileAssetConflict() from error
+
+    def get(self, organization_id: str, asset_id: str) -> FileAssetRecord | None:
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(file_assets).where(
+                        *_scope(organization_id),
+                        file_assets.c.id == asset_id,
+                        file_assets.c.status == "active",
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return _map_record(row) if row is not None else None
+
+    def list(self, organization_id: str, cursor: str, limit: int) -> PageResult:
+        statement = (
+            select(file_assets)
+            .where(*_scope(organization_id), file_assets.c.status == "active")
+            .order_by(file_assets.c.id)
+            .limit(limit + 1)
+        )
+        if cursor:
+            statement = statement.where(file_assets.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        values = [_map_record(row) for row in rows]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return PageResult(values[:limit], next_cursor)
+
+    def mark_deleted(
+        self,
+        organization_id: str,
+        asset_id: str,
+        deleted_at: datetime,
+        audit: AuditEvent,
+    ) -> FileAssetRecord:
+        with self._engine.begin() as connection:
+            row = (
+                connection.execute(
+                    select(file_assets)
+                    .where(
+                        *_scope(organization_id),
+                        file_assets.c.id == asset_id,
+                        file_assets.c.status == "active",
+                    )
+                    .with_for_update()
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise FileAssetNotFound()
+            asset = _map_record(row)
+            changed = connection.execute(
+                update(file_assets)
+                .where(
+                    *_scope(organization_id),
+                    file_assets.c.id == asset_id,
+                    file_assets.c.status == "active",
+                )
+                .values(status="deleted", deleted_at=deleted_at, updated_at=deleted_at)
+            ).rowcount
+            if changed != 1:
+                raise FileAssetNotFound()
+            append_audit(connection, audit)
+            return asset
+
+    def restore(self, organization_id: str, asset_id: str) -> None:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(file_assets)
+                .where(
+                    *_scope(organization_id),
+                    file_assets.c.id == asset_id,
+                    file_assets.c.status == "deleted",
+                )
+                .values(status="active", deleted_at=None)
+            ).rowcount
+        if changed != 1:
+            raise FileAssetNotFound()
+
+
+def _scope(organization_id: str) -> tuple[ColumnElement[bool], ...]:
+{{- if .Tenancy}}
+    return (file_assets.c.organization_id == organization_id,)
+{{- else}}
+    del organization_id
+    return (file_assets.c.organization_id.is_(None),)
+{{- end}}
+
+
+def _values(asset: FileAssetRecord) -> dict[str, object]:
+    return {
+        "id": asset.id,
+        "organization_id": asset.organization_id,
+        "name": asset.name,
+        "media_type": asset.media_type,
+        "size": asset.size,
+        "sha256": asset.sha256,
+        "storage_key": asset.storage_key,
+        "status": asset.status,
+        "created_at": asset.created_at,
+        "updated_at": asset.updated_at,
+        "deleted_at": asset.deleted_at,
+    }
+
+
+def _map_record(row: RowMapping) -> FileAssetRecord:
+    organization_id = row["organization_id"]
+    return FileAssetRecord(
+        id=str(row["id"]),
+        organization_id=str(organization_id) if organization_id is not None else None,
+        name=str(row["name"]),
+        media_type=str(row["media_type"]),
+        size=int(row["size"]),
+        sha256=str(row["sha256"]),
+        storage_key=str(row["storage_key"]),
+        status=str(row["status"]),
+        created_at=cast(datetime, row["created_at"]),
+        updated_at=cast(datetime, row["updated_at"]),
+        deleted_at=cast(datetime | None, row["deleted_at"]),
+    )

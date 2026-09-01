@@ -1,0 +1,101 @@
+"""Public file records, internal storage coordinates, and table metadata."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict
+
+from {{.PackageName}}.identity.models import metadata
+
+file_assets = sa.Table(
+    "file_assets",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("name", sa.String(255), nullable=False),
+    sa.Column("media_type", sa.String(255), nullable=False),
+    sa.Column("size", sa.BigInteger, nullable=False),
+    sa.Column("sha256", sa.String(64), nullable=False),
+    sa.Column("storage_key", sa.String(255), nullable=False, unique=True),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
+    sa.CheckConstraint("size >= 0", name="file_assets_size"),
+    sa.CheckConstraint("status IN ('active', 'deleted')", name="file_assets_status"),
+)
+sa.Index(
+    "ix_file_assets_scope_status_id",
+    file_assets.c.organization_id,
+    file_assets.c.status,
+    file_assets.c.id,
+)
+
+
+class FileAssetErrorKind(StrEnum):
+    """Stable file capability failure categories."""
+
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    TOO_LARGE = "too_large"
+    STORAGE = "storage"
+
+
+@dataclass(frozen=True, slots=True)
+class FileAssetError(Exception):
+    """Expected file failure without internal-key or path disclosure."""
+
+    kind: FileAssetErrorKind
+    message: str
+
+
+class FileAsset(BaseModel):
+    """Public file metadata without its internal storage key."""
+
+    id: str
+    organization_id: str | None = None
+    name: str
+    media_type: str
+    size: int
+    sha256: str
+    created_at: datetime
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class FileAssetPage(BaseModel):
+    """Bounded keyset page of active assets."""
+
+    items: list[FileAsset]
+    next_cursor: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True, slots=True)
+class FileAssetRecord:
+    """Internal durable metadata including compensation coordinates."""
+
+    id: str
+    organization_id: str | None
+    name: str
+    media_type: str
+    size: int
+    sha256: str
+    storage_key: str
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None

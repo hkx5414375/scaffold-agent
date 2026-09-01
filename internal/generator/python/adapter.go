@@ -35,6 +35,8 @@ const (
 	jobsVersion             = "0.1.0"
 	notificationsOwner      = "notifications"
 	notificationsVersion    = "0.1.0"
+	filesOwner              = "file-assets"
+	filesVersion            = "0.1.0"
 )
 
 //go:embed all:templates
@@ -117,6 +119,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: filesOwner, Version: filesVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware file metadata with bounded atomic local object storage.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var pythonKeywords = map[string]struct{}{
@@ -141,6 +153,8 @@ type templateData struct {
 	Jobs                  bool
 	Notifications         bool
 	Files                 bool
+	MigrationImports      string
+	MigrationMetadata     string
 	JobAdmin              bool
 	Approvals             bool
 	CSVTransfer           bool
@@ -292,6 +306,20 @@ var notificationTemplates = map[string]string{
 	"tests/test_notifications_worker_configuration.py": "templates/test_notifications_worker_configuration.py.tmpl",
 }
 
+var fileTemplates = map[string]string{
+	"src/package/files/__init__.py":                        "templates/files_init.py.tmpl",
+	"src/package/files/http.py":                            "templates/files_http.py.tmpl",
+	"src/package/files/models.py":                          "templates/files_models.py.tmpl",
+	"src/package/files/repository.py":                      "templates/files_repository.py.tmpl",
+	"src/package/files/service.py":                         "templates/files_service.py.tmpl",
+	"src/package/files/storage.py":                         "templates/files_storage.py.tmpl",
+	"src/package/migration/versions/000210_file_assets.py": "templates/files_migration.py.tmpl",
+	"tests/test_file_assets.py":                            "templates/test_file_assets.py.tmpl",
+	"tests/test_file_assets_database.py":                   "templates/test_file_assets_database.py.tmpl",
+	"tests/test_file_assets_http.py":                       "templates/test_file_assets_http.py.tmpl",
+	"tests/test_file_assets_storage.py":                    "templates/test_file_assets_storage.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -348,6 +376,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
 	notificationsEnabled := false
+	filesEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -362,6 +391,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == notificationsOwner {
 			notificationsEnabled = true
+		}
+		if pack.Metadata.Name == filesOwner {
+			filesEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -388,10 +420,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyLifecycle:      tenancyLifecycleEnabled,
 		Jobs:                  jobsEnabled,
 		Notifications:         notificationsEnabled,
+		Files:                 filesEnabled,
 	}
+	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+2,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+3,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -462,6 +496,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if filesEnabled {
+		for path, templatePath := range fileTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    filesOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -484,6 +526,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets["web/admin/src/views/OrganizationSettingsView.vue"] = renderTarget{
 				Template:    "templates/src/views/OrganizationSettingsView.vue",
 				Owner:       tenancyOwner,
+				SharedAdmin: true,
+			}
+		}
+		if filesEnabled {
+			targets["web/admin/src/views/FilesView.vue"] = renderTarget{
+				Template:    "templates/src/views/FilesView.vue",
+				Owner:       filesOwner,
 				SharedAdmin: true,
 			}
 		}
@@ -528,10 +577,45 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if notificationsEnabled {
 		capabilityLock[notificationsOwner] = notificationsVersion
 	}
+	if filesEnabled {
+		capabilityLock[filesOwner] = filesVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
 	}, nil
+}
+
+func migrationModels(data templateData) (string, string) {
+	imports := []string{
+		"from " + data.PackageName + ".identity.models import metadata",
+	}
+	metadata := make([]string, 0, 5)
+	if data.Business != nil {
+		imports = append(imports,
+			"from "+data.PackageName+"."+data.Business.PackageName+" import models as business_models",
+		)
+		metadata = append(metadata, "_business_metadata = business_models.table.metadata")
+	}
+	if data.Files {
+		imports = append(imports, "from "+data.PackageName+".files import models as file_models")
+		metadata = append(metadata, "_files_metadata = file_models.file_assets.metadata")
+	}
+	if data.Jobs {
+		imports = append(imports, "from "+data.PackageName+".jobs import models as job_models")
+		metadata = append(metadata, "_jobs_metadata = job_models.background_jobs.metadata")
+	}
+	if data.TenancyMembers {
+		imports = append(imports, "from "+data.PackageName+".tenancy import member_models")
+		metadata = append(metadata, "_member_metadata = member_models.organization_invitations.metadata")
+	}
+	if data.Tenancy {
+		imports = append(imports, "from "+data.PackageName+".tenancy import models as tenancy_models")
+		metadata = append(metadata, "_tenancy_metadata = tenancy_models.organizations.metadata")
+	}
+	sort.Strings(imports)
+	sort.Strings(metadata)
+	return strings.Join(imports, "\n"), strings.Join(metadata, "\n")
 }
 
 func buildBusiness(module spec.Module, databaseEngine string) (*businessData, error) {

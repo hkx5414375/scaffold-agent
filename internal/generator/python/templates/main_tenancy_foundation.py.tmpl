@@ -8,6 +8,15 @@ from fastapi import FastAPI
 from {{.PackageName}}.config import get_settings
 from {{.PackageName}}.database import DatabaseProbe, create_database_engine
 from {{.PackageName}}.errors import install_error_handlers
+{{- if .Files}}
+from {{.PackageName}}.files.http import (
+    install_error_handlers as install_file_error_handlers,
+)
+from {{.PackageName}}.files.http import router as file_router
+from {{.PackageName}}.files.repository import SQLAlchemyFileAssetRepository
+from {{.PackageName}}.files.service import FileAssetService
+from {{.PackageName}}.files.storage import LocalBlobStore
+{{- end}}
 from {{.PackageName}}.health import router as health_router
 from {{.PackageName}}.identity.http import router as identity_router
 from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
@@ -52,6 +61,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
+{{- if .Files}}
+        app.state.file_asset_service = FileAssetService(
+            SQLAlchemyFileAssetRepository(engine),
+            LocalBlobStore(settings.file_storage_root),
+        )
+{{- end}}
 {{- if .Jobs}}
         job_service = JobService(SQLAlchemyJobRepository(engine))
         app.state.job_service = job_service
@@ -81,6 +96,9 @@ def create_app() -> FastAPI:
     """Create one application without opening infrastructure during import."""
     application = FastAPI(title="{{.ProjectName}}", version="0.1.0", lifespan=lifespan)
     install_error_handlers(application)
+{{- if .Files}}
+    install_file_error_handlers(application)
+{{- end}}
 {{- if .TenancyLifecycle}}
     install_lifecycle_error_handlers(application)
 {{- end}}
@@ -89,6 +107,9 @@ def create_app() -> FastAPI:
 {{- end}}
     application.include_router(health_router)
     application.include_router(identity_router)
+{{- if .Files}}
+    application.include_router(file_router)
+{{- end}}
     application.include_router(tenancy_router)
 {{- if .TenancyLifecycle}}
     application.include_router(lifecycle_router)

@@ -1,0 +1,71 @@
+"""Atomic local blob storage security and size contracts."""
+
+import io
+import os
+from pathlib import Path
+from typing import BinaryIO, cast
+
+import pytest
+
+from {{.PackageName}}.files.models import FileAssetError, FileAssetErrorKind
+from {{.PackageName}}.files.storage import LocalBlobStore
+
+
+def test_local_store_publishes_create_only_content(tmp_path: Path) -> None:
+    store = LocalBlobStore(str(tmp_path))
+    result = store.write("objects/ab/file-1", io.BytesIO(b"hello"), 10)
+    assert result.size == 5
+    assert len(result.sha256) == 64
+    content = store.open("objects/ab/file-1")
+    assert content.read() == b"hello"
+    content.close()
+    with pytest.raises(FileAssetError) as conflict:
+        store.write("objects/ab/file-1", io.BytesIO(b"changed"), 10)
+    assert conflict.value.kind == FileAssetErrorKind.CONFLICT
+    store.delete("objects/ab/file-1")
+    store.delete("objects/ab/file-1")
+    with pytest.raises(FileAssetError) as missing:
+        store.open("objects/ab/file-1")
+    assert missing.value.kind == FileAssetErrorKind.NOT_FOUND
+
+
+def test_local_store_enforces_bounds_and_keys(tmp_path: Path) -> None:
+    store = LocalBlobStore(str(tmp_path))
+    with pytest.raises(FileAssetError):
+        LocalBlobStore("")
+    with pytest.raises(FileAssetError):
+        store.write("objects/ab/empty", cast(BinaryIO, None), 10)
+    with pytest.raises(FileAssetError):
+        store.write("objects/ab/empty", io.BytesIO(b"value"), 0)
+    with pytest.raises(FileAssetError):
+        store.write("objects/ab/text", cast(BinaryIO, io.StringIO("text")), 10)
+    with pytest.raises(FileAssetError) as large:
+        store.write("objects/ab/file-1", io.BytesIO(b"large"), 4)
+    assert large.value.kind == FileAssetErrorKind.TOO_LARGE
+    assert not (tmp_path / "objects" / "ab" / "file-1").exists()
+    for key in ("../secret", "/absolute", "objects\\file", "objects/./file", "bad key"):
+        with pytest.raises(FileAssetError):
+            store.write(key, io.BytesIO(b"value"), 10)
+
+    directory_target = tmp_path / "objects" / "ab" / "directory"
+    directory_target.mkdir(parents=True)
+    with pytest.raises(FileAssetError) as directory_open:
+        store.open("objects/ab/directory")
+    assert directory_open.value.kind == FileAssetErrorKind.NOT_FOUND
+    store.delete("objects/ab/directory")
+    assert directory_target.is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="symbolic links are unavailable")
+def test_local_store_rejects_symbolic_link_directories(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    objects = tmp_path / "objects"
+    try:
+        os.symlink(outside, objects, target_is_directory=True)
+    except OSError:
+        pytest.skip("symbolic link creation is not permitted")
+    store = LocalBlobStore(str(tmp_path))
+    with pytest.raises(FileAssetError):
+        store.write("objects/ab/file-1", io.BytesIO(b"hello"), 10)
+    assert list(outside.iterdir()) == []

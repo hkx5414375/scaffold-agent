@@ -5,28 +5,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import Connection, engine_from_config, pool
 
-from {{.PackageName}}.identity.models import metadata
-{{- if .Jobs}}
-from {{.PackageName}}.jobs import models as job_models
-{{- end}}
-from {{.PackageName}}.{{.Business.PackageName}} import models as business_models
-{{- if .Tenancy}}
-{{- if .TenancyMembers}}
-from {{.PackageName}}.tenancy import member_models
-{{- end}}
-from {{.PackageName}}.tenancy import models as tenancy_models
-{{- end}}
+{{.MigrationImports}}
 
-_business_metadata = business_models.table.metadata
-{{- if .Jobs}}
-_jobs_metadata = job_models.background_jobs.metadata
-{{- end}}
-{{- if .Tenancy}}
-_tenancy_metadata = tenancy_models.organizations.metadata
-{{- if .TenancyMembers}}
-_member_metadata = member_models.organization_invitations.metadata
-{{- end}}
-{{- end}}
+{{.MigrationMetadata}}
 
 configuration = context.config
 if configuration.config_file_name is not None:

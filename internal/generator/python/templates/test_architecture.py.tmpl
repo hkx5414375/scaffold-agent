@@ -43,6 +43,13 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("{{.Business.RoutePath}}/{record_id}", "put"),
         ("{{.Business.RoutePath}}/{record_id}", "delete"),
 {{- end}}
+{{- if .Files}}
+        ("/api/v1/files", "post"),
+        ("/api/v1/files", "get"),
+        ("/api/v1/files/{asset_id}", "get"),
+        ("/api/v1/files/{asset_id}", "delete"),
+        ("/api/v1/files/{asset_id}/content", "get"),
+{{- end}}
     }
     runtime_operations = {
         (path, method)
@@ -111,6 +118,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert notifications_imports.isdisjoint({"fastapi", "sqlalchemy", "smtplib"})
+{{- end}}
+{{- if .Files}}
+
+    files_tree = ast.parse((PACKAGE / "files" / "service.py").read_text(encoding="utf-8"))
+    files_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(files_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert files_imports.isdisjoint({"fastapi", "sqlalchemy", "pathlib"})
 {{- end}}
 
 

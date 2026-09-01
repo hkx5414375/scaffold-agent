@@ -1,0 +1,62 @@
+"""File HTTP mapping, upload close, and safe download header contracts."""
+
+import asyncio
+import io
+from collections.abc import AsyncIterable
+
+from fastapi import FastAPI, UploadFile
+from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
+from test_file_assets import MemoryBlobStore, MemoryRepository, _actor
+
+from {{.PackageName}}.files.http import (
+    delete,
+    download,
+    get,
+    install_error_handlers,
+    list_assets,
+    upload,
+)
+from {{.PackageName}}.files.models import FileAssetError, FileAssetErrorKind
+from {{.PackageName}}.files.service import FileAssetService
+
+
+def test_direct_transport_maps_upload_metadata_download_and_delete() -> None:
+    service = FileAssetService(MemoryRepository(), MemoryBlobStore())
+    incoming = UploadFile(
+        io.BytesIO(b"hello"),
+        filename="报告.txt",
+        headers=Headers({"content-type": "text/plain"}),
+    )
+    created = upload(incoming, _actor(), service)
+    assert incoming.file.closed
+    assert get(created.id, _actor(), service) == created
+    assert list_assets(_actor(), service, "", 20).items == [created]
+    response = download(created.id, _actor(), service)
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert asyncio.run(_consume(response.body_iterator)) == b"hello"
+    delete(created.id, _actor(), service)
+
+
+def test_file_errors_use_stable_public_mapping() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise FileAssetError(FileAssetErrorKind.TOO_LARGE, "file exceeds the maximum size")
+
+    response = TestClient(application).get("/failure")
+    assert response.status_code == 413
+    assert response.json() == {
+        "code": "files.too_large",
+        "message": "file exceeds the maximum size",
+    }
+
+
+async def _consume(iterator: AsyncIterable[str | bytes | memoryview]) -> bytes:
+    chunks: list[bytes] = []
+    async for chunk in iterator:
+        chunks.append(chunk.encode() if isinstance(chunk, str) else bytes(chunk))
+    return b"".join(chunks)

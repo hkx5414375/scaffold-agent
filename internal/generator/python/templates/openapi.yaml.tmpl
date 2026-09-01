@@ -446,6 +446,187 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
 {{end}}
+{{if .Files}}
+  /api/v1/files:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: uploadFileAsset
+      summary: Upload one bounded durable file
+      x-required-permission: files:create
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: File bytes and metadata created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAsset"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: File exceeds the 10 MiB limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    get:
+      operationId: listFileAssets
+      summary: List one bounded page of active file metadata
+      x-required-permission: files:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 191
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Active file metadata page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAssetPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/files/{asset_id}:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+{{- else}}
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+{{- end}}
+    get:
+      operationId: getFileAsset
+      summary: Read public file metadata
+      x-required-permission: files:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Public metadata without the storage key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileAsset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteFileAsset
+      summary: Delete file metadata and bytes with compensation
+      x-required-permission: files:delete
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "204":
+          description: File deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/files/{asset_id}/content:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+{{- else}}
+    parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+{{- end}}
+    get:
+      operationId: downloadFileAsset
+      summary: Stream file content as an attachment
+      x-required-permission: files:read
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: File bytes with attachment and nosniff headers.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            X-Content-Type-Options:
+              schema:
+                type: string
+                const: nosniff
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -888,6 +1069,49 @@ components:
           minLength: 1
           maxLength: 191
 {{- end}}
+{{end}}
+{{if .Files}}
+    FileAsset:
+      type: object
+      additionalProperties: false
+      required: [id, name, media_type, size, sha256, created_at]
+      properties:
+        id:
+          type: string
+          maxLength: 191
+        organization_id:
+          type: string
+          maxLength: 191
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        media_type:
+          type: string
+          maxLength: 255
+        size:
+          type: integer
+          minimum: 0
+          maximum: 10485760
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        created_at:
+          type: string
+          format: date-time
+    FileAssetPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/FileAsset"
+        next_cursor:
+          type: string
+          maxLength: 191
 {{end}}
 {{if .Business}}
     {{.Business.EntityClass}}Record:

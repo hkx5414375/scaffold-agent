@@ -447,6 +447,99 @@ func TestGenerateNotificationsComposeWithTenantLifecycle(t *testing.T) {
 	}
 }
 
+func TestGenerateFileAssetsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: filesOwner, Version: filesVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[filesOwner] != filesVersion || len(generated.Outputs) != 40 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/files/http.py",
+				"src/demo_service/files/models.py",
+				"src/demo_service/files/repository.py",
+				"src/demo_service/files/service.py",
+				"src/demo_service/files/storage.py",
+				"src/demo_service/migration/versions/000210_file_assets.py",
+				"tests/test_file_assets.py",
+				"tests/test_file_assets_database.py",
+				"tests/test_file_assets_http.py",
+				"tests/test_file_assets_storage.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != filesOwner {
+					t.Errorf("Generate(%s) did not produce file-owned %s", database, path)
+				}
+			}
+			contract := string(outputContent(generated, "api/openapi.yaml"))
+			for _, fragment := range []string{
+				"/api/v1/files:",
+				"operationId: uploadFileAsset",
+				"operationId: downloadFileAsset",
+				`"413":`,
+			} {
+				if !strings.Contains(contract, fragment) {
+					t.Errorf("Generate(%s) OpenAPI does not contain %q", database, fragment)
+				}
+			}
+			if strings.Contains(contract, "storage_key") {
+				t.Errorf("Generate(%s) OpenAPI exposes an internal storage key", database)
+			}
+			configuration := string(outputContent(generated, "pyproject.toml"))
+			if !strings.Contains(configuration, `"python-multipart==0.0.32"`) {
+				t.Errorf("Generate(%s) does not pin multipart parsing", database)
+			}
+			readme := string(outputContent(generated, "README.md"))
+			if !strings.Contains(readme, "FILE_STORAGE_ROOT") ||
+				!strings.Contains(readme, "10 MiB") {
+				t.Errorf("Generate(%s) README does not document file storage", database)
+			}
+		})
+	}
+}
+
+func TestGenerateFileAssetsComposeWithTenantLifecycleAndAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: filesOwner, Version: filesVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 93 ||
+		generated.CapabilityLock[filesOwner] != filesVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	viewPath := "web/admin/src/views/FilesView.vue"
+	if outputContent(generated, viewPath) == nil || outputOwner(generated, viewPath) != filesOwner {
+		t.Fatalf("Generate() did not produce the file administration view")
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000210_file_assets.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000070_tenancy_lifecycle"`) ||
+		!strings.Contains(migration, "organizations.id") {
+		t.Fatalf("generated file migration is not tenant lifecycle aware:\n%s", migration)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 
