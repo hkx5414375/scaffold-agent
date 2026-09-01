@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}{{if .Tenancy}}项目启用了组织多租户，业务数据和权限按组织隔离。{{end}}{{if .Jobs}}项目启用了可靠后台任务和独立 Worker。{{end}}{{if .Files}}项目启用了有界文件上传、下载和安全本地对象存储。{{end}}{{if .Cache}}项目启用了跨实例一致的数据库 JSON 缓存。{{end}}{{if .JobAdmin}}项目启用了不暴露载荷的任务元数据查询和死信重试。{{end}}{{if .Observability}}项目启用了安全请求关联、访问日志、低基数指标和 2 秒数据库就绪探测。{{end}}
 
 ## 环境要求
 
@@ -19,7 +19,7 @@ $env:COOKIE_SECURE = "false"
 $env:FILE_STORAGE_ROOT = "C:\\replace-with-runtime-storage"
 {{- end}}
 uv sync --frozen --all-groups
-uv run uvicorn {{.PackageName}}.main:app --reload --port 8080
+uv run uvicorn {{.PackageName}}.main:app --reload --port 8080{{if .Observability}} --no-access-log{{end}}
 ```
 {{if .Jobs}}
 另开一个终端启动独立任务 Worker：
@@ -55,6 +55,9 @@ $env:SMTP_PASSWORD = "replace-me"
 {{end}}
 {{if .JobAdmin}}
 管理员使用 `jobs:read` 查看最多 100 条任务元数据，使用 `jobs:manage` 把当前组织内的死信任务重新放回队列。API、OpenAPI 和管理端都不暴露任务载荷、作用域键或幂等键；重试会在一个数据库事务中清理租约和错误状态并写入 `jobs:retry` 审计事件。不得通过管理接口查看或修改载荷、接管运行中任务或绕过组织范围。
+{{end}}
+{{if .Observability}}
+每个 HTTP 响应都包含经过校验或新生成的 `X-Request-ID`。JSON 访问日志只包含请求 ID、方法、不带查询串的路径、状态和耗时；不会读取请求体，也不会记录 Header 或异常值。`GET /metrics` 只返回无标签的进程内聚合指标；`GET /readyz` 把连接获取和校验整体限制为 2 秒，只返回 `ready` 或 `unavailable`。公开部署必须在入口或私网边界保护这两个无需应用认证的运维接口。
 {{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
@@ -124,6 +127,9 @@ uv run pytest
 {{end}}
 {{if .JobAdmin}}
 - `src/{{.PackageName}}/jobadmin`：不暴露载荷与幂等键的任务元数据查询，以及仅死信可用的审计重试。
+{{end}}
+{{if .Observability}}
+- `src/{{.PackageName}}/observability`：请求关联、安全访问日志、无标签 Prometheus 指标和通用 500 恢复。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

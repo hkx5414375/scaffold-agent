@@ -34,6 +34,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusResponse"
+{{if .Observability}}
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Read aggregate process-local HTTP metrics without labels
+      responses:
+        "200":
+          description: Prometheus text metrics without user-derived labels.
+          content:
+            text/plain:
+              schema:
+                type: string
+{{end}}
   /api/v1/auth/login:
     post:
       operationId: login
@@ -930,6 +943,7 @@ components:
       properties:
         status:
           type: string
+          enum: [ok, {{if .Observability}}ready, {{end}}unavailable]
     LoginRequest:
       type: object
       additionalProperties: false

@@ -41,6 +41,8 @@ const (
 	cacheVersion            = "0.1.0"
 	jobAdminOwner           = "job-administration"
 	jobAdminVersion         = "0.1.0"
+	observabilityOwner      = "observability"
+	observabilityVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -154,6 +156,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: observabilityOwner, Version: observabilityVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Request correlation, safe access logs, metrics, and bounded readiness.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var pythonKeywords = map[string]struct{}{
@@ -182,6 +194,7 @@ type templateData struct {
 	MigrationImports      string
 	MigrationMetadata     string
 	JobAdmin              bool
+	Observability         bool
 	Approvals             bool
 	CSVTransfer           bool
 }
@@ -368,6 +381,14 @@ var jobAdminTemplates = map[string]string{
 	"tests/test_job_administration_http.py":                       "templates/test_job_administration_http.py.tmpl",
 }
 
+var observabilityTemplates = map[string]string{
+	"src/package/observability/__init__.py":   "templates/observability_init.py.tmpl",
+	"src/package/observability/http.py":       "templates/observability_http.py.tmpl",
+	"src/package/observability/middleware.py": "templates/observability_middleware.py.tmpl",
+	"tests/test_observability.py":             "templates/test_observability.py.tmpl",
+	"tests/test_observability_database.py":    "templates/test_observability_database.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -427,6 +448,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	filesEnabled := false
 	cacheEnabled := false
 	jobAdminEnabled := false
+	observabilityEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -450,6 +472,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == jobAdminOwner {
 			jobAdminEnabled = true
+		}
+		if pack.Metadata.Name == observabilityOwner {
+			observabilityEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -479,11 +504,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Files:                 filesEnabled,
 		Cache:                 cacheEnabled,
 		JobAdmin:              jobAdminEnabled,
+		Observability:         observabilityEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+4,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+4,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -578,6 +604,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if observabilityEnabled {
+		for path, templatePath := range observabilityTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    observabilityOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -666,6 +700,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if jobAdminEnabled {
 		capabilityLock[jobAdminOwner] = jobAdminVersion
+	}
+	if observabilityEnabled {
+		capabilityLock[observabilityOwner] = observabilityVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

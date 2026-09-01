@@ -1,0 +1,25 @@
+"""Unauthenticated operational metrics transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import PlainTextResponse
+
+from {{.PackageName}}.observability.middleware import HttpObserver
+
+router = APIRouter()
+
+
+def http_observer(request: Request) -> HttpObserver:
+    """Resolve the process-scoped HTTP observer."""
+    observer: HttpObserver = request.app.state.http_observer
+    return observer
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+def metrics(observer: Annotated[HttpObserver, Depends(http_observer)]) -> PlainTextResponse:
+    """Expose aggregate Prometheus text without user-derived labels."""
+    return PlainTextResponse(
+        observer.metrics(),
+        media_type="text/plain; version=0.0.4",
+    )

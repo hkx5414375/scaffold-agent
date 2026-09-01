@@ -1,0 +1,176 @@
+"""Request correlation, safe access logs, recovery, and aggregate metrics."""
+
+import json
+import logging
+import time
+from threading import Lock
+from typing import cast
+from uuid import uuid4
+
+from starlette.requests import Request
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+LOGGER = logging.getLogger("{{.PackageName}}.http")
+LOGGER.setLevel(logging.INFO)
+LOGGER.propagate = False
+if not LOGGER.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOGGER.addHandler(handler)
+logging.getLogger("uvicorn.access").disabled = True
+REQUEST_ID_HEADER = b"x-request-id"
+REQUEST_ID_STATE_KEY = "scaffold_request_id"
+INTERNAL_ERROR = b'{"code":"internal.error","message":"the request could not be completed"}'
+
+
+class HttpObserver:
+    """Own bounded process-local counters without user-derived labels."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._requests = 0
+        self._in_flight = 0
+        self._failures = 0
+        self._duration_nanoseconds = 0
+
+    def begin(self) -> None:
+        """Mark one request in flight."""
+        with self._lock:
+            self._in_flight += 1
+
+    def finish(self, status: int, duration_nanoseconds: int) -> None:
+        """Record one completed request using aggregate values only."""
+        with self._lock:
+            self._requests += 1
+            self._in_flight -= 1
+            self._duration_nanoseconds += max(0, duration_nanoseconds)
+            if status >= 500:
+                self._failures += 1
+
+    def metrics(self) -> str:
+        """Return one Prometheus text snapshot without labels."""
+        with self._lock:
+            requests = self._requests
+            in_flight = self._in_flight
+            failures = self._failures
+            duration_seconds = self._duration_nanoseconds / 1_000_000_000
+        return (
+            "# TYPE scaffold_http_requests_total counter\n"
+            f"scaffold_http_requests_total {requests}\n"
+            "# TYPE scaffold_http_requests_in_flight gauge\n"
+            f"scaffold_http_requests_in_flight {in_flight}\n"
+            "# TYPE scaffold_http_failures_total counter\n"
+            f"scaffold_http_failures_total {failures}\n"
+            "# TYPE scaffold_http_request_duration_seconds summary\n"
+            f"scaffold_http_request_duration_seconds_sum {duration_seconds:.6f}\n"
+            f"scaffold_http_request_duration_seconds_count {requests}\n"
+        )
+
+
+class HttpObservabilityMiddleware:
+    """Pure ASGI middleware that never reads query strings, headers, or bodies for logs."""
+
+    def __init__(self, app: ASGIApp, observer: HttpObserver) -> None:
+        self._app = app
+        self._observer = observer
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        request_id_value = _request_id(scope)
+        state = cast(dict[str, object], scope.setdefault("state", {}))
+        state[REQUEST_ID_STATE_KEY] = request_id_value
+        started = time.perf_counter_ns()
+        response_started = False
+        status = 500
+        self._observer.begin()
+
+        async def correlated_send(message: Message) -> None:
+            nonlocal response_started, status
+            if message["type"] == "http.response.start":
+                response_started = True
+                status = int(message["status"])
+                headers = [
+                    (name, value)
+                    for name, value in message.get("headers", [])
+                    if name.lower() != REQUEST_ID_HEADER
+                ]
+                headers.append((REQUEST_ID_HEADER, request_id_value.encode("ascii")))
+                message["headers"] = headers
+            await send(message)
+
+        try:
+            await self._app(scope, receive, correlated_send)
+        except Exception:
+            status = 500
+            if response_started:
+                raise
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (REQUEST_ID_HEADER, request_id_value.encode("ascii")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": INTERNAL_ERROR})
+        finally:
+            duration = max(0, time.perf_counter_ns() - started)
+            self._observer.finish(status, duration)
+            LOGGER.info(
+                json.dumps(
+                    {
+                        "duration_ms": duration // 1_000_000,
+                        "event": "http_request",
+                        "method": _safe_method(scope.get("method")),
+                        "path": _safe_path(scope.get("path")),
+                        "request_id": request_id_value,
+                        "status": status,
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+
+
+def request_id(request: Request) -> str:
+    """Return the verified request correlation identifier."""
+    value = getattr(request.state, REQUEST_ID_STATE_KEY, "")
+    return value if isinstance(value, str) else ""
+
+
+def _request_id(scope: Scope) -> str:
+    values = [
+        value for name, value in scope.get("headers", []) if name.lower() == REQUEST_ID_HEADER
+    ]
+    if len(values) == 1:
+        try:
+            candidate = str(values[0].decode("ascii")).strip()
+        except UnicodeDecodeError:
+            candidate = ""
+        if _valid_request_id(candidate):
+            return candidate
+    return str(uuid4())
+
+
+def _valid_request_id(value: str) -> bool:
+    return 8 <= len(value) <= 64 and all(
+        character.isascii() and (character.isalnum() or character in "-_") for character in value
+    )
+
+
+def _safe_method(value: object) -> str:
+    method = value if isinstance(value, str) else ""
+    if 1 <= len(method) <= 16 and method.isascii() and method.isalpha():
+        return method.upper()
+    return "UNKNOWN"
+
+
+def _safe_path(value: object) -> str:
+    path = value if isinstance(value, str) and value else "/"
+    safe = "".join(character for character in path if character.isprintable())[:2048]
+    return safe or "/"

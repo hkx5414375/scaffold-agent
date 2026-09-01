@@ -721,6 +721,59 @@ func TestGenerateJobAdministrationFollowsCacheMigration(t *testing.T) {
 	}
 }
 
+func TestGenerateObservabilityForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: observabilityOwner, Version: observabilityVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[observabilityOwner] != observabilityVersion ||
+				len(generated.Outputs) != 34 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/observability/http.py",
+				"src/demo_service/observability/middleware.py",
+				"tests/test_observability.py",
+				"tests/test_observability_database.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != observabilityOwner {
+					t.Errorf("Generate(%s) did not produce observability-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			if !strings.Contains(mainSource, "HttpObservabilityMiddleware") ||
+				!strings.Contains(mainSource, "application.include_router(observability_router)") {
+				t.Errorf("Generate(%s) does not compose observability", database)
+			}
+			databaseSource := string(outputContent(generated, "src/demo_service/database.py"))
+			if !strings.Contains(databaseSource, "timeout_seconds: float = 2.0") ||
+				!strings.Contains(databaseSource, "future.result(timeout=self._timeout_seconds)") {
+				t.Errorf("Generate(%s) does not bound the whole readiness probe", database)
+			}
+			contract := outputContent(generated, "api/openapi.yaml")
+			var openAPI map[string]any
+			if err := yaml.Unmarshal(contract, &openAPI); err != nil {
+				t.Fatalf("generated observability OpenAPI is invalid YAML: %v", err)
+			}
+			if !strings.Contains(string(contract), "/metrics:") ||
+				!strings.Contains(string(contract), "enum: [ok, ready, unavailable]") {
+				t.Errorf("Generate(%s) observability OpenAPI is incomplete", database)
+			}
+		})
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

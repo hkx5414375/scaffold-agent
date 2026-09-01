@@ -1,0 +1,17 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: observability-task-service-python
+  display_name: Python Observable Task Service
+spec:
+  stack:
+    backend: python
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: observability
+      version: 0.1.0

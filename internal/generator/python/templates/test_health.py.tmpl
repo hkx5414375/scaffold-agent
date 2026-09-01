@@ -49,7 +49,7 @@ def test_readiness_reports_only_generic_status() -> None:
     assert unavailable.status_code == 503
     assert unavailable.json() == {"status": "unavailable"}
     assert ready.status_code == 200
-    assert ready.json() == {"status": "ok"}
+    assert ready.json() == {"status": {{if .Observability}}"ready"{{else}}"ok"{{end}}}
 
 
 def test_settings_require_a_complete_bootstrap_pair(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,7 +88,11 @@ def test_database_engine_selection_and_probe_failure() -> None:
     finally:
         engine.dispose()
 
-    assert not DatabaseProbe(cast(Engine, FailingEngine())).is_ready()
+    probe = DatabaseProbe(cast(Engine, FailingEngine()))
+    assert not probe.is_ready()
+{{- if .Observability}}
+    probe.close()
+{{- end}}
 
 
 def test_application_lifecycle_migrates_bootstraps_and_disposes(

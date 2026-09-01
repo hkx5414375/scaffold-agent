@@ -36,5 +36,5 @@ def readiness(
 ) -> StatusResponse | JSONResponse:
     """Report generic database readiness."""
     if probe.is_ready():
-        return StatusResponse(status="ok")
+        return StatusResponse(status={{if .Observability}}"ready"{{else}}"ok"{{end}})
     return JSONResponse(status_code=503, content={"status": "unavailable"})

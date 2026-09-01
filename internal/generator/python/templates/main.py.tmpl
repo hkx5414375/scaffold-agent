@@ -39,6 +39,13 @@ from {{.PackageName}}.migrations import upgrade_database
 {{- if .Notifications}}
 from {{.PackageName}}.notifications.service import NotificationService
 {{- end}}
+{{- if .Observability}}
+from {{.PackageName}}.observability.http import router as observability_router
+from {{.PackageName}}.observability.middleware import (
+    HttpObservabilityMiddleware,
+    HttpObserver,
+)
+{{- end}}
 {{if .Business -}}
 from {{.PackageName}}.{{.Business.PackageName}}.http import (
     install_error_handlers as install_business_error_handlers,
@@ -53,6 +60,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Migrate, compose dependencies, bootstrap identity, and release the pool."""
     settings = get_settings()
     engine = create_database_engine(settings.database_url)
+{{- if .Observability}}
+    probe = DatabaseProbe(engine)
+{{- end}}
     try:
         upgrade_database(engine)
         service = IdentityService(SQLAlchemyIdentityRepository(engine))
@@ -84,16 +94,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         business_repository = SQLAlchemy{{.Business.EntityClass}}Repository(engine)
         app.state.business_service = {{.Business.EntityClass}}Service(business_repository)
 {{end}}
-        app.state.database_probe = DatabaseProbe(engine)
+        app.state.database_probe = {{if .Observability}}probe{{else}}DatabaseProbe(engine){{end}}
         app.state.cookie_secure = settings.cookie_secure
         yield
     finally:
+{{- if .Observability}}
+        probe.close()
+{{- end}}
         engine.dispose()
 
 
 def create_app() -> FastAPI:
     """Create one application without opening infrastructure during import."""
     application = FastAPI(title="{{.ProjectName}}", version="0.1.0", lifespan=lifespan)
+{{- if .Observability}}
+    observer = HttpObserver()
+    application.state.http_observer = observer
+    application.add_middleware(HttpObservabilityMiddleware, observer=observer)
+{{- end}}
     install_error_handlers(application)
 {{- if .Files}}
     install_file_error_handlers(application)
@@ -105,6 +123,9 @@ def create_app() -> FastAPI:
     install_business_error_handlers(application)
 {{end}}
     application.include_router(health_router)
+{{- if .Observability}}
+    application.include_router(observability_router)
+{{- end}}
     application.include_router(identity_router)
 {{- if .Files}}
     application.include_router(file_router)

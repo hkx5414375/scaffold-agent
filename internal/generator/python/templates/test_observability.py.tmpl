@@ -1,0 +1,108 @@
+"""Safe request correlation, recovery, logging, and metric contracts."""
+
+import json
+import logging
+import time
+from typing import cast
+from unittest.mock import patch
+
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from {{.PackageName}}.database import DatabaseProbe
+from {{.PackageName}}.observability.http import router
+from {{.PackageName}}.observability.middleware import (
+    HttpObservabilityMiddleware,
+    HttpObserver,
+    _safe_path,
+    request_id,
+)
+
+
+def _application() -> tuple[FastAPI, HttpObserver]:
+    application = FastAPI()
+    observer = HttpObserver()
+    application.state.http_observer = observer
+    application.add_middleware(HttpObservabilityMiddleware, observer=observer)
+    application.include_router(router)
+
+    @application.get("/resource", status_code=204)
+    def resource(request: Request) -> None:
+        assert request_id(request) == "request_123"
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise RuntimeError("private exception value")
+
+    return application, observer
+
+
+def test_correlates_counts_and_logs_without_query_or_body() -> None:
+    application, observer = _application()
+    with patch("{{.PackageName}}.observability.middleware.LOGGER.info") as log_info:
+        response = TestClient(application).request(
+            "GET",
+            "/resource?token=hidden",
+            headers={"X-Request-ID": "request_123"},
+            content=b"private-body",
+        )
+
+    assert response.status_code == 204
+    assert response.headers["X-Request-ID"] == "request_123"
+    metrics = observer.metrics()
+    assert "scaffold_http_requests_total 1" in metrics
+    assert "scaffold_http_requests_in_flight 0" in metrics
+    assert "scaffold_http_request_duration_seconds_count 1" in metrics
+    assert "{" not in metrics
+    log_info.assert_called_once()
+    record = json.loads(str(log_info.call_args.args[0]))
+    assert record["path"] == "/resource"
+    assert record["request_id"] == "request_123"
+    assert "token=hidden" not in str(record)
+    assert "private-body" not in str(record)
+
+
+def test_replaces_unsafe_id_recovers_generically_and_counts_failure() -> None:
+    application, observer = _application()
+    response = TestClient(application).get(
+        "/failure?secret=query",
+        headers={"X-Request-ID": "unsafe value"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "internal.error",
+        "message": "the request could not be completed",
+    }
+    assert 8 <= len(response.headers["X-Request-ID"]) <= 64
+    assert response.headers["X-Request-ID"] != "unsafe value"
+    assert "scaffold_http_failures_total 1" in observer.metrics()
+
+
+def test_metrics_route_and_path_bound_are_stable() -> None:
+    application, _observer = _application()
+    response = TestClient(application).get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain; version=0.0.4")
+    assert response.text.startswith("# TYPE scaffold_http_requests_total counter\n")
+    assert _safe_path("/safe\npath" + "x" * 3000) == "/safepath" + "x" * 2039
+    assert logging.getLogger("uvicorn.access").disabled
+
+
+class BlockingEngine:
+    def connect(self) -> None:
+        time.sleep(0.2)
+        raise SQLAlchemyError("private database detail")
+
+
+def test_readiness_probe_enforces_the_whole_deadline() -> None:
+    probe = DatabaseProbe(cast(Engine, BlockingEngine()), timeout_seconds=0.02)
+    started = time.monotonic()
+    try:
+        assert not probe.is_ready()
+        assert time.monotonic() - started < 0.15
+    finally:
+        probe.close()
