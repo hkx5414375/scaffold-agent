@@ -23,6 +23,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatusResponse"
+{{- if .Observability}}
+  /metrics:
+    get:
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Low-cardinality Prometheus process metrics without user-derived labels
+          content:
+            text/plain:
+              schema:
+                type: string
+{{- end}}
         "503":
           description: Database is unavailable
           content:
@@ -945,7 +957,7 @@ components:
       properties:
         status:
           type: string
-          enum: [ok, unavailable]
+          enum: [{{if .Observability}}ok, ready{{else}}ok{{end}}, unavailable]
     LoginRequest:
       type: object
       additionalProperties: false

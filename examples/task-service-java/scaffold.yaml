@@ -25,6 +25,8 @@ spec:
       version: 0.1.0
     - name: job-administration
       version: 0.1.0
+    - name: observability
+      version: 0.1.0
   modules:
     - name: tasks
       entities:

@@ -122,6 +122,20 @@ returns it to `queued`, and writes its audit event in the same transaction.
 Do not add payload inspection or editing, running-job takeover, unbounded listing,
 cross-tenant lookup, or direct queue-table updates to operational tooling.
 {{end}}
+{{if .Observability}}
+
+## HTTP observability
+
+Every HTTP request receives a validated or generated `X-Request-ID`. Access logs
+contain only that identifier, method, bounded URL path, response status, and
+duration; query strings, headers, bodies, and exception values are excluded.
+`GET /metrics` exposes only aggregate process counters without user-derived labels.
+
+`GET /readyz` runs the whole database probe behind a two-second deadline and returns
+only `ready` or `unavailable`; `GET /healthz` remains independent of the database.
+Protect operational endpoints at the ingress or private-network boundary. Metrics
+reset when the process restarts and are not aggregated across replicas.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

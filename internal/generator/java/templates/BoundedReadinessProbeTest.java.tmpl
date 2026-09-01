@@ -1,0 +1,55 @@
+package {{.PackageName}}.http;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.time.Duration;
+import java.util.concurrent.Executors;
+import javax.sql.DataSource;
+import org.junit.jupiter.api.Test;
+
+class BoundedReadinessProbeTest {
+
+    @Test
+    void reportsValidConnectionAndHidesDatabaseFailure() throws SQLException {
+        DataSource available = mock(DataSource.class);
+        Connection connection = mock(Connection.class);
+        when(available.getConnection()).thenReturn(connection);
+        when(connection.isValid(1)).thenReturn(true);
+        BoundedReadinessProbe ready = probe(available, Duration.ofSeconds(1));
+        assertThat(ready.isReady()).isTrue();
+        ready.close();
+
+        DataSource failed = mock(DataSource.class);
+        when(failed.getConnection()).thenThrow(new SQLException("private database detail"));
+        BoundedReadinessProbe unavailable = probe(failed, Duration.ofSeconds(1));
+        assertThat(unavailable.isReady()).isFalse();
+        unavailable.close();
+    }
+
+    @Test
+    void enforcesWholeProbeDeadline() throws SQLException {
+        DataSource blocked = mock(DataSource.class);
+        when(blocked.getConnection())
+                .thenAnswer(
+                        invocation -> {
+                            Thread.sleep(Duration.ofSeconds(10));
+                            return mock(Connection.class);
+                        });
+        BoundedReadinessProbe probe = probe(blocked, Duration.ofMillis(50));
+        long started = System.nanoTime();
+
+        assertThat(probe.isReady()).isFalse();
+        assertThat(Duration.ofNanos(System.nanoTime() - started))
+                .isLessThan(Duration.ofSeconds(1));
+        probe.close();
+    }
+
+    private static BoundedReadinessProbe probe(DataSource dataSource, Duration timeout) {
+        return new BoundedReadinessProbe(
+                dataSource, Executors.newVirtualThreadPerTaskExecutor(), timeout);
+    }
+}

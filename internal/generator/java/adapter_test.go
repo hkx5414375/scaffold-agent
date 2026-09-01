@@ -69,7 +69,7 @@ func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }, want: "storefront"},
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "requires both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
-			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "observability", Version: "0.1.0"}}
+			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "unknown-capability", Version: "0.1.0"}}
 		}, want: "not present in the catalog"},
 		{name: "module", mutate: func(project *spec.Project) { project.Spec.Modules = []spec.Module{{Name: "tasks"}} }, want: "exactly one entity"},
 	}
@@ -698,6 +698,56 @@ func TestGenerateJobAdministrationForBothDatabases(t *testing.T) {
 			if !strings.Contains(openAPI, "/api/v1/jobs/{id}/retry:") ||
 				strings.Contains(openAPI, "payload_json") || strings.Contains(openAPI, "dedupe_key") {
 				t.Fatalf("generated job administration contract is unsafe:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestGenerateObservabilityForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: observabilityOwner, Version: observabilityVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 37 ||
+				result.CapabilityLock[observabilityOwner] != observabilityVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/observability/HttpObservabilityFilter.java",
+				"src/main/java/com/scaffold/generated/demoservice/observability/MetricsController.java",
+				"src/main/java/com/scaffold/generated/demoservice/http/BoundedReadinessProbe.java",
+				"src/test/java/com/scaffold/generated/demoservice/observability/HttpObservabilityFilterTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/http/BoundedReadinessProbeTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/http/ObservabilityDatabaseIntegrationTest.java",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != observabilityOwner {
+					t.Errorf("Generate() observability output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated observability OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/metrics:") ||
+				!strings.Contains(string(openAPI), "ready") {
+				t.Fatalf("generated observability OpenAPI is incomplete:\n%s", openAPI)
+			}
+			filter := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/observability/HttpObservabilityFilter.java"))
+			if strings.Contains(filter, "getQueryString") || strings.Contains(filter, "getParameter") {
+				t.Fatalf("generated access logging reads unsafe request data:\n%s", filter)
 			}
 		})
 	}

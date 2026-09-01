@@ -1,0 +1,28 @@
+package {{.PackageName}}.observability;
+
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class MetricsController {
+
+    private static final MediaType PROMETHEUS =
+            MediaType.parseMediaType("text/plain; version=0.0.4; charset=utf-8");
+
+    private final HttpObservabilityFilter observability;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "The process observer is a singleton Spring dependency")
+    public MetricsController(HttpObservabilityFilter observability) {
+        this.observability = observability;
+    }
+
+    @GetMapping(value = "/metrics", produces = "text/plain")
+    public ResponseEntity<String> metrics() {
+        return ResponseEntity.ok().contentType(PROMETHEUS).body(observability.metrics());
+    }
+}

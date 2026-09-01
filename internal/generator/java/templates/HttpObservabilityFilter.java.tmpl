@@ -1,0 +1,113 @@
+package {{.PackageName}}.observability;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+@Component
+public final class HttpObservabilityFilter extends OncePerRequestFilter {
+
+    public static final String REQUEST_ID_ATTRIBUTE =
+            HttpObservabilityFilter.class.getName() + ".requestId";
+
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(HttpObservabilityFilter.class);
+    private static final String REQUEST_ID_HEADER = "X-Request-ID";
+
+    private final AtomicLong requests = new AtomicLong();
+    private final AtomicLong inFlight = new AtomicLong();
+    private final AtomicLong failures = new AtomicLong();
+    private final AtomicLong durationNanoseconds = new AtomicLong();
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain chain)
+            throws ServletException, IOException {
+        String requestId = normalizedRequestId(request.getHeader(REQUEST_ID_HEADER));
+        request.setAttribute(REQUEST_ID_ATTRIBUTE, requestId);
+        response.setHeader(REQUEST_ID_HEADER, requestId);
+        long started = System.nanoTime();
+        boolean failed = false;
+        inFlight.incrementAndGet();
+        try {
+            chain.doFilter(request, response);
+        } catch (IOException | ServletException | RuntimeException exception) {
+            failed = true;
+            throw exception;
+        } finally {
+            long duration = Math.max(0L, System.nanoTime() - started);
+            int status = failed && response.getStatus() < 500 ? 500 : response.getStatus();
+            requests.incrementAndGet();
+            inFlight.decrementAndGet();
+            durationNanoseconds.addAndGet(duration);
+            if (status >= HttpServletResponse.SC_INTERNAL_SERVER_ERROR) {
+                failures.incrementAndGet();
+            }
+            LOGGER.info(
+                    "http_request request_id={} method={} path={} status={} duration_ms={}",
+                    requestId,
+                    request.getMethod(),
+                    safePath(request.getRequestURI()),
+                    status,
+                    duration / 1_000_000L);
+        }
+    }
+
+    public String metrics() {
+        double durationSeconds = durationNanoseconds.get() / 1_000_000_000.0d;
+        return "# TYPE scaffold_http_requests_total counter\n"
+                + "scaffold_http_requests_total " + requests.get() + "\n"
+                + "# TYPE scaffold_http_requests_in_flight gauge\n"
+                + "scaffold_http_requests_in_flight " + inFlight.get() + "\n"
+                + "# TYPE scaffold_http_failures_total counter\n"
+                + "scaffold_http_failures_total " + failures.get() + "\n"
+                + "# TYPE scaffold_http_request_duration_seconds summary\n"
+                + "scaffold_http_request_duration_seconds_sum "
+                + String.format(java.util.Locale.ROOT, "%.6f", durationSeconds) + "\n"
+                + "scaffold_http_request_duration_seconds_count " + requests.get() + "\n";
+    }
+
+    public static String requestId(HttpServletRequest request) {
+        Object value = request.getAttribute(REQUEST_ID_ATTRIBUTE);
+        return value instanceof String identifier ? identifier : "";
+    }
+
+    private static String normalizedRequestId(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.length() < 8 || normalized.length() > 64) {
+            return UUID.randomUUID().toString();
+        }
+        for (int index = 0; index < normalized.length(); index++) {
+            char character = normalized.charAt(index);
+            if (!(character >= 'a' && character <= 'z')
+                    && !(character >= 'A' && character <= 'Z')
+                    && !(character >= '0' && character <= '9')
+                    && character != '-'
+                    && character != '_') {
+                return UUID.randomUUID().toString();
+            }
+        }
+        return normalized;
+    }
+
+    private static String safePath(String value) {
+        if (value == null || value.isEmpty()) {
+            return "/";
+        }
+        return value.codePoints()
+                .filter(character -> !Character.isISOControl(character))
+                .limit(2048)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+    }
+}

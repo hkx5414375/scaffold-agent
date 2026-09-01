@@ -1,0 +1,61 @@
+package {{.PackageName}}.http;
+
+import jakarta.annotation.PreDestroy;
+import java.sql.Connection;
+import java.time.Duration;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import javax.sql.DataSource;
+import org.springframework.stereotype.Component;
+
+@Component
+public final class BoundedReadinessProbe {
+
+    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(2);
+
+    private final DataSource dataSource;
+    private final ExecutorService executor;
+    private final Duration timeout;
+
+    public BoundedReadinessProbe(DataSource dataSource) {
+        this(dataSource, Executors.newVirtualThreadPerTaskExecutor(), DEFAULT_TIMEOUT);
+    }
+
+    BoundedReadinessProbe(
+            DataSource dataSource, ExecutorService executor, Duration timeout) {
+        this.dataSource = dataSource;
+        this.executor = executor;
+        this.timeout = timeout;
+    }
+
+    public boolean isReady() {
+        Future<Boolean> check = executor.submit(this::checkConnection);
+        try {
+            return check.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException exception) {
+            return false;
+        } finally {
+            if (!check.isDone()) {
+                check.cancel(true);
+            }
+        }
+    }
+
+    @PreDestroy
+    void close() {
+        executor.shutdownNow();
+    }
+
+    private boolean checkConnection() throws Exception {
+        try (Connection connection = dataSource.getConnection()) {
+            return connection.isValid(1);
+        }
+    }
+}

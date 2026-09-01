@@ -2,12 +2,15 @@ package {{.PackageName}}.http;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+{{- if not .Observability}}
+import static org.mockito.Mockito.verify;
 
 import java.sql.Connection;
 import java.sql.SQLException;
 import javax.sql.DataSource;
+{{- end}}
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -16,32 +19,51 @@ class HealthControllerTest {
 
     @Test
     void reportsLivenessWithoutAccessingTheDatabase() {
+{{- if .Observability}}
+        BoundedReadinessProbe readiness = mock(BoundedReadinessProbe.class);
+        HealthController controller = new HealthController(readiness);
+{{- else}}
         DataSource dataSource = mock(DataSource.class);
         HealthController controller = new HealthController(dataSource);
+{{- end}}
 
         assertThat(controller.health().status()).isEqualTo("ok");
     }
 
     @Test
-    void reportsReadinessAndClosesTheConnection() throws SQLException {
+    void reportsReadinessAndClosesTheConnection(){{if not .Observability}} throws SQLException{{end}} {
+{{- if .Observability}}
+        BoundedReadinessProbe readiness = mock(BoundedReadinessProbe.class);
+        when(readiness.isReady()).thenReturn(true);
+        HealthController controller = new HealthController(readiness);
+{{- else}}
         DataSource dataSource = mock(DataSource.class);
         Connection connection = mock(Connection.class);
         when(dataSource.getConnection()).thenReturn(connection);
         when(connection.isValid(2)).thenReturn(true);
         HealthController controller = new HealthController(dataSource);
+{{- end}}
 
         ResponseEntity<HealthController.StatusResponse> response = controller.readiness();
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).isEqualTo(new HealthController.StatusResponse("ok"));
+        assertThat(response.getBody()).isEqualTo(new HealthController.StatusResponse("{{if .Observability}}ready{{else}}ok{{end}}"));
+{{- if not .Observability}}
         verify(connection).close();
+{{- end}}
     }
 
     @Test
-    void hidesDatabaseFailures() throws SQLException {
+    void hidesDatabaseFailures(){{if not .Observability}} throws SQLException{{end}} {
+{{- if .Observability}}
+        BoundedReadinessProbe readiness = mock(BoundedReadinessProbe.class);
+        when(readiness.isReady()).thenReturn(false);
+        HealthController controller = new HealthController(readiness);
+{{- else}}
         DataSource dataSource = mock(DataSource.class);
         when(dataSource.getConnection()).thenThrow(new SQLException("private database detail"));
         HealthController controller = new HealthController(dataSource);
+{{- end}}
 
         ResponseEntity<HealthController.StatusResponse> response = controller.readiness();
 

@@ -1,0 +1,103 @@
+package {{.PackageName}}.observability;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletResponse;
+import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+
+class HttpObservabilityFilterTest {
+
+    @Test
+    void correlatesCountsAndLogsWithoutQueryOrBody() throws Exception {
+        Logger logger = (Logger) LoggerFactory.getLogger(HttpObservabilityFilter.class);
+        ListAppender<ILoggingEvent> events = new ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        try {
+            HttpObservabilityFilter filter = new HttpObservabilityFilter();
+            MockHttpServletRequest request = new MockHttpServletRequest("POST", "/resource");
+            request.setQueryString("token=hidden");
+            request.addHeader("X-Request-ID", "request_123");
+            request.setContent("private-body".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(
+                    request,
+                    response,
+                    (currentRequest, currentResponse) -> {
+                        assertThat(HttpObservabilityFilter.requestId(request))
+                                .isEqualTo("request_123");
+                        ((HttpServletResponse) currentResponse).setStatus(204);
+                    });
+
+            assertThat(response.getHeader("X-Request-ID")).isEqualTo("request_123");
+            assertThat(filter.metrics())
+                    .contains("scaffold_http_requests_total 1")
+                    .contains("scaffold_http_requests_in_flight 0")
+                    .contains("scaffold_http_request_duration_seconds_count 1")
+                    .doesNotContain("{");
+            assertThat(events.list.getLast().getFormattedMessage())
+                    .contains("path=/resource")
+                    .doesNotContain("token=hidden", "private-body");
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+
+    @Test
+    void replacesUnsafeIdentifiersAndCountsFailures() throws Exception {
+        HttpObservabilityFilter filter = new HttpObservabilityFilter();
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/failure");
+        request.addHeader("X-Request-ID", "unsafe value");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(
+                request,
+                response,
+                (currentRequest, currentResponse) ->
+                        ((HttpServletResponse) currentResponse).setStatus(500));
+
+        assertThat(response.getHeader("X-Request-ID"))
+                .hasSizeBetween(8, 64)
+                .isNotEqualTo("unsafe value");
+        assertThat(filter.metrics()).contains("scaffold_http_failures_total 1");
+    }
+
+    @Test
+    void countsUnhandledFailuresWithoutLoggingExceptionValues() {
+        Logger logger = (Logger) LoggerFactory.getLogger(HttpObservabilityFilter.class);
+        ListAppender<ILoggingEvent> events = new ListAppender<>();
+        events.start();
+        logger.addAppender(events);
+        try {
+            HttpObservabilityFilter filter = new HttpObservabilityFilter();
+            MockHttpServletRequest request = new MockHttpServletRequest("GET", "/failure");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            assertThatThrownBy(
+                            () ->
+                                    filter.doFilter(
+                                            request,
+                                            response,
+                                            (currentRequest, currentResponse) -> {
+                                                throw new ServletException("private exception value");
+                                            }))
+                    .isInstanceOf(ServletException.class);
+
+            assertThat(filter.metrics()).contains("scaffold_http_failures_total 1");
+            assertThat(events.list.getLast().getFormattedMessage())
+                    .contains("status=500")
+                    .doesNotContain("private exception value");
+        } finally {
+            logger.detachAppender(events);
+        }
+    }
+}

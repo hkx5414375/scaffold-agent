@@ -40,6 +40,8 @@ const (
 	cacheVersion            = "0.1.0"
 	jobAdminOwner           = "job-administration"
 	jobAdminVersion         = "0.1.0"
+	observabilityOwner      = "observability"
+	observabilityVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -117,6 +119,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: observabilityOwner, Version: observabilityVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Request correlation, safe access logs, metrics, and bounded readiness.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -211,6 +223,7 @@ type templateData struct {
 	Files            bool
 	Cache            bool
 	JobAdmin         bool
+	Observability    bool
 	CSVTransfer      bool
 	Approvals        bool
 	MigrationCount   int
@@ -311,6 +324,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	filesEnabled := false
 	cacheEnabled := false
 	jobAdminEnabled := false
+	observabilityEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -334,6 +348,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == jobAdminOwner {
 			jobAdminEnabled = true
+		}
+		if pack.Metadata.Name == observabilityOwner {
+			observabilityEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -383,6 +400,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Files:            filesEnabled,
 		Cache:            cacheEnabled,
 		JobAdmin:         jobAdminEnabled,
+		Observability:    observabilityEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -397,6 +415,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	filesPaths := make(map[string]struct{}, 15)
 	cachePaths := make(map[string]struct{}, 9)
 	jobAdminPaths := make(map[string]struct{}, 11)
+	observabilityPaths := make(map[string]struct{}, 7)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -443,6 +462,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		jobAdminPaths[path] = struct{}{}
 		adminPaths[path] = struct{}{}
+	}
+	addObservabilityTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		observabilityPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -638,6 +661,33 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[jobAdminOwner] = jobAdminVersion
 	}
+	if observabilityEnabled {
+		addObservabilityTarget(
+			mainRoot+"/observability/HttpObservabilityFilter.java",
+			"templates/HttpObservabilityFilter.java.tmpl",
+		)
+		addObservabilityTarget(
+			mainRoot+"/observability/MetricsController.java",
+			"templates/MetricsController.java.tmpl",
+		)
+		addObservabilityTarget(
+			mainRoot+"/http/BoundedReadinessProbe.java",
+			"templates/BoundedReadinessProbe.java.tmpl",
+		)
+		addObservabilityTarget(
+			testRoot+"/observability/HttpObservabilityFilterTest.java",
+			"templates/HttpObservabilityFilterTest.java.tmpl",
+		)
+		addObservabilityTarget(
+			testRoot+"/http/BoundedReadinessProbeTest.java",
+			"templates/BoundedReadinessProbeTest.java.tmpl",
+		)
+		addObservabilityTarget(
+			testRoot+"/http/ObservabilityDatabaseIntegrationTest.java",
+			"templates/ObservabilityDatabaseIntegrationTest.java.tmpl",
+		)
+		capabilityLock[observabilityOwner] = observabilityVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -706,6 +756,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isJobAdminPath := jobAdminPaths[path]; isJobAdminPath {
 			owner = jobAdminOwner
+		}
+		if _, isObservabilityPath := observabilityPaths[path]; isObservabilityPath {
+			owner = observabilityOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

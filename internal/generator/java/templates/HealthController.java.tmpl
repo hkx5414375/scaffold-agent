@@ -1,9 +1,11 @@
 package {{.PackageName}}.http;
 
+{{- if not .Observability}}
 import java.sql.Connection;
 import java.sql.SQLException;
 import javax.sql.DataSource;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+{{- end}}
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -12,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public final class HealthController {
 
+{{- if not .Observability}}
     private static final int READINESS_TIMEOUT_SECONDS = 2;
 
     private final DataSource dataSource;
@@ -22,6 +25,13 @@ public final class HealthController {
     public HealthController(DataSource dataSource) {
         this.dataSource = dataSource;
     }
+{{- else}}
+    private final BoundedReadinessProbe readinessProbe;
+
+    public HealthController(BoundedReadinessProbe readinessProbe) {
+        this.readinessProbe = readinessProbe;
+    }
+{{- end}}
 
     @GetMapping("/healthz")
     public StatusResponse health() {
@@ -30,6 +40,11 @@ public final class HealthController {
 
     @GetMapping("/readyz")
     public ResponseEntity<StatusResponse> readiness() {
+{{- if .Observability}}
+        if (readinessProbe.isReady()) {
+            return ResponseEntity.ok(new StatusResponse("ready"));
+        }
+{{- else}}
         try (Connection connection = dataSource.getConnection()) {
             if (connection.isValid(READINESS_TIMEOUT_SECONDS)) {
                 return ResponseEntity.ok(new StatusResponse("ok"));
@@ -37,6 +52,7 @@ public final class HealthController {
         } catch (SQLException ignored) {
             // The public readiness response intentionally omits database details.
         }
+{{- end}}
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .body(new StatusResponse("unavailable"));
     }
