@@ -100,11 +100,11 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java `erp-inventory` 0.1 parity for PostgreSQL and MySQL with Spring Boot, transactional JDBC persistence, active-tenant isolation, and shared Vue administration.
 - [x] Python `erp-inventory` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, atomic idempotent stock operations, active-tenant isolation, and shared Vue administration.
 - [x] Cross-backend ERP inventory OpenAPI, permission, schema, migration, behavior, and shared administration conformance gate.
-- [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
-- [ ] Marketing campaigns, coupons, and promotion evaluation.
-- [ ] Payment abstraction with idempotent intents, callbacks, refunds, and reconciliation.
-- [ ] Deterministic sandbox adapters for email, object storage, payments, and commerce demonstrations.
-- [ ] Nuxt catalog, cart, checkout, account, and order capability pages.
+- [x] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
+- [x] Marketing campaigns, coupons, and promotion evaluation.
+- [x] Payment abstraction with idempotent intents, callbacks, refunds, and reconciliation.
+- [x] Deterministic sandbox adapters for email, object storage, payments, and commerce demonstrations.
+- [x] Nuxt catalog, cart, checkout, account, and order capability pages.
 
 ## M8 — Cross-agent conformance
 

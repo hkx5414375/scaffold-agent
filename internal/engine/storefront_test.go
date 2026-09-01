@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -101,6 +102,101 @@ spec:
 			}
 
 			if backend.name == "go" && os.Getenv("SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD") == "1" {
+				runGeneratedStorefrontQualityGate(t, filepath.Join(root, "web", "storefront"))
+			}
+			verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+			if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+				t.Fatalf("Verify() = %#v, want no findings", verified)
+			}
+		})
+	}
+}
+
+func TestCommerceOperationsStorefrontPlanApplyVerifyAllBackends(t *testing.T) {
+	var reference map[string]string
+	for _, backend := range []string{"go", "java", "python"} {
+		backend := backend
+		t.Run(backend, func(t *testing.T) {
+			root := t.TempDir()
+			blueprint := `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-commerce-storefront
+  display_name: Generated Commerce Storefront
+spec:
+  stack:
+    backend: BACKEND
+    admin_ui: none
+    storefront: nuxt
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: commerce-operations
+      version: 0.1.0
+`
+			writeBlueprint(t, root, strings.ReplaceAll(blueprint, "BACKEND", backend))
+			application := New("test")
+			ctx := context.Background()
+			planned := application.Plan(ctx, PlanInput{
+				ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate,
+			})
+			if planned.Status != result.StatusOK {
+				t.Fatalf("Plan() = %#v, want ok", planned)
+			}
+			plannedData := planned.Data.(planData)
+			for name, version := range map[string]string{
+				"commerce-catalog":    "0.1.0",
+				"customer-accounts":   "0.1.0",
+				"commerce-operations": "0.1.0",
+				"nuxt-storefront":     "0.1.0",
+			} {
+				if plannedData.CapabilityLock[name] != version {
+					t.Errorf("Plan() capability %s = %q, want %q", name, plannedData.CapabilityLock[name], version)
+				}
+			}
+			previewed := application.Preview(ctx, PreviewInput{
+				ProjectRoot: root, PlanID: plannedData.PlanID,
+			})
+			if previewed.Status != result.StatusOK {
+				t.Fatalf("Preview() = %#v, want ok", previewed)
+			}
+			applied := application.Apply(ctx, ApplyInput{
+				ProjectRoot: root, PlanID: plannedData.PlanID,
+				ApplyToken: previewed.Data.(previewData).ApplyToken,
+			})
+			if applied.Status != result.StatusOK {
+				t.Fatalf("Apply() = %#v, want ok", applied)
+			}
+
+			storefrontFiles := make(map[string]string)
+			for _, path := range []string{
+				"app/pages/cart.vue",
+				"app/pages/checkout.vue",
+				"app/pages/account/orders/index.vue",
+				"app/pages/account/orders/[id].vue",
+				"server/api/storefront/checkout.post.ts",
+				"server/api/storefront/orders/[id]/return.post.ts",
+				"server/utils/commerce.ts",
+				"shared/types/commerce.ts",
+				"test/commerce.test.ts",
+			} {
+				content, err := os.ReadFile(filepath.Join(root, "web", "storefront", filepath.FromSlash(path)))
+				if err != nil {
+					t.Fatalf("read commerce storefront %s: %v", path, err)
+				}
+				storefrontFiles[path] = string(content)
+			}
+			if reference == nil {
+				reference = storefrontFiles
+			} else if !reflect.DeepEqual(storefrontFiles, reference) {
+				t.Errorf("%s commerce storefront differs from the shared contract", backend)
+			}
+			if backend == "go" && os.Getenv("SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD") == "1" {
 				runGeneratedStorefrontQualityGate(t, filepath.Join(root, "web", "storefront"))
 			}
 			verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})

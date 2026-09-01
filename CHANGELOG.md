@@ -14,7 +14,11 @@ and semantic versioning.
 - Go, Java 21/Spring Boot, and Python 3.12+/FastAPI generators for PostgreSQL and
   MySQL, plus shared Vue administration and Nuxt storefront foundations.
 - Reusable tenancy, jobs, notifications, file, cache, observability, CSV,
-  approval, commerce catalog, customer account, CRM, and ERP inventory packs.
+  approval, commerce catalog, customer account, commerce operations, CRM, and
+  ERP inventory packs. Commerce operations include deterministic pricing,
+  versioned carts, idempotent checkout and payment events, orders, fulfillment,
+  returns, refunds, reconciliation, campaigns, coupons, and a no-network
+  sandbox payment gateway.
 - Cross-language API, migration, behavior, frontend, Agent-host, and token-budget
   conformance gates.
 - Deterministic six-platform release archives, CycloneDX SBOM, checksums,

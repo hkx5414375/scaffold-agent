@@ -104,7 +104,7 @@ jobs:
       - name: Generate all backend variants and run storefront quality gates
         env:
           SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestSharedNuxtStorefrontPlanApplyVerifyAllBackends|TestGoCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestGoCustomerAccountsStorefrontPlanApplyVerifyBothDatabases|TestJavaCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestJavaCustomerAccountsStorefrontPlanApplyVerifyBothDatabases|TestPythonCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestPythonCustomerAccountsStorefrontPlanApplyVerifyBothDatabases)$' -count=1
+        run: go test ./internal/engine -run '^(TestSharedNuxtStorefrontPlanApplyVerifyAllBackends|TestCommerceOperationsStorefrontPlanApplyVerifyAllBackends|TestGoCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestGoCustomerAccountsStorefrontPlanApplyVerifyBothDatabases|TestJavaCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestJavaCustomerAccountsStorefrontPlanApplyVerifyBothDatabases|TestPythonCommerceCatalogStorefrontPlanApplyVerifyBothDatabases|TestPythonCustomerAccountsStorefrontPlanApplyVerifyBothDatabases)$' -count=1
 
   generated-java:
     name: Generated Java identity and CRUD

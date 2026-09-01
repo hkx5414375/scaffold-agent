@@ -1,6 +1,6 @@
 # ADR 0054: Portable commerce operations contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-02
 
 ## Context

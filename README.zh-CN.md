@@ -10,7 +10,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 六类 Agent 协议兼容门禁与 Token 预算门禁已经实现；模型兼容由同一套 MCP 工具契约保证，不为任何模型复制 Engine 逻辑。
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 与 Python 3.12+/FastAPI 适配器均已完成平台能力对齐，覆盖 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。三种后端现在都能生成完全相同、依赖锁定的 Nuxt 4 SSR 商城底座，以及 `commerce-catalog` `0.1.0`、`customer-accounts` `0.1.0`、`crm-core` `0.1.0` 和 `erp-inventory` `0.1.0`。ERP 库存包含整数库存、不可变流水、幂等预留与收货、采购单、事务审计、停用租户隔离和完全相同的 Vue 管理端，并由跨语言 OpenAPI、迁移、行为和管理端契约门禁持续保证 Go、Java、Python 一致。Schema 在 1.0 前保持实验状态。
+项目已经进入 `v1.0.0` 发布候选阶段。协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go、Java 21/Spring Boot、Python 3.12+/FastAPI 三套适配器均已实现。三种后端会生成同一套依赖锁定的 Vue 管理端与 Nuxt 4 SSR 商城契约，并共同支持 `commerce-catalog` `0.1.0`、`customer-accounts` `0.1.0`、`commerce-operations` `0.1.0`、`crm-core` `0.1.0` 和 `erp-inventory` `0.1.0`。交易能力覆盖确定性计价、乐观锁购物车、幂等结算与支付事件、订单、履约、退货退款、对账、营销活动、优惠券和显式启用的无网络沙箱支付网关。跨语言 OpenAPI、权限、Schema、迁移、行为、管理端和商城门禁持续保证 Go、Java、Python 一致。M9 只剩发布并独立验证带签名的 GitHub Release。
 
 ## 设计目标
 
