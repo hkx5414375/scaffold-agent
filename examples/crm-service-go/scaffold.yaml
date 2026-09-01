@@ -1,0 +1,19 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: crm-service-go
+  display_name: CRM Service
+spec:
+  stack:
+    backend: go
+    admin_ui: element-plus
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: crm-core
+      version: 0.1.0

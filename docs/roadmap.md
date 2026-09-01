@@ -90,7 +90,10 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Go `customer-accounts` 0.1 reference implementation for PostgreSQL and MySQL with separate customer sessions, shared Vue administration, and Nuxt account pages.
 - [x] Java `customer-accounts` 0.1 parity for PostgreSQL and MySQL with Spring Boot, shared Vue administration, and Nuxt account pages.
 - [x] Python `customer-accounts` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, shared Vue administration, and Nuxt account gates.
-- [ ] CRM contacts, organizations, activities, and pipeline.
+- [x] Portable `crm-core` 0.1 contract for business accounts, contacts, immutable activities, opportunities, tenant isolation, audit, pagination, and forward-only pipeline stages.
+- [x] Go `crm-core` 0.1 reference implementation for PostgreSQL and MySQL with shared Vue administration.
+- [ ] Java `crm-core` 0.1 parity.
+- [ ] Python `crm-core` 0.1 parity.
 - [ ] ERP catalog, procurement, stock ledger, reservations, and inventory movements.
 - [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
 - [ ] Marketing campaigns, coupons, and promotion evaluation.

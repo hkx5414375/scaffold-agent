@@ -1,0 +1,246 @@
+// Package httpapi exposes permission-protected CRM routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/crm"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const defaultPageLimit = 20
+
+// Handler maps CRM use cases to HTTP.
+type Handler struct{ service *crm.Service }
+
+// New returns a CRM HTTP adapter.
+func New(service *crm.Service) *Handler { return &Handler{service: service} }
+
+// Register adds all CRM routes with their least-privilege permissions.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/crm/accounts", security.Authorized("crm:write", handler.createAccount))
+	mux.HandleFunc("GET /api/v1/crm/accounts", security.Authorized("crm:read", handler.listAccounts))
+	mux.HandleFunc("GET /api/v1/crm/accounts/{id}", security.Authorized("crm:read", handler.getAccount))
+	mux.HandleFunc("PUT /api/v1/crm/accounts/{id}", security.Authorized("crm:write", handler.updateAccount))
+	mux.HandleFunc("POST /api/v1/crm/accounts/{id}/archive", security.Authorized("crm:write", handler.archiveAccount))
+	mux.HandleFunc("POST /api/v1/crm/accounts/{id}/reactivate", security.Authorized("crm:write", handler.reactivateAccount))
+	mux.HandleFunc("POST /api/v1/crm/contacts", security.Authorized("crm:write", handler.createContact))
+	mux.HandleFunc("GET /api/v1/crm/contacts", security.Authorized("crm:read", handler.listContacts))
+	mux.HandleFunc("GET /api/v1/crm/contacts/{id}", security.Authorized("crm:read", handler.getContact))
+	mux.HandleFunc("PUT /api/v1/crm/contacts/{id}", security.Authorized("crm:write", handler.updateContact))
+	mux.HandleFunc("POST /api/v1/crm/contacts/{id}/archive", security.Authorized("crm:write", handler.archiveContact))
+	mux.HandleFunc("POST /api/v1/crm/contacts/{id}/reactivate", security.Authorized("crm:write", handler.reactivateContact))
+	mux.HandleFunc("POST /api/v1/crm/activities", security.Authorized("crm:write", handler.createActivity))
+	mux.HandleFunc("GET /api/v1/crm/activities", security.Authorized("crm:read", handler.listActivities))
+	mux.HandleFunc("POST /api/v1/crm/opportunities", security.Authorized("crm:write", handler.createOpportunity))
+	mux.HandleFunc("GET /api/v1/crm/opportunities", security.Authorized("crm:read", handler.listOpportunities))
+	mux.HandleFunc("GET /api/v1/crm/opportunities/{id}", security.Authorized("crm:read", handler.getOpportunity))
+	mux.HandleFunc("PUT /api/v1/crm/opportunities/{id}", security.Authorized("crm:write", handler.updateOpportunity))
+	mux.HandleFunc("POST /api/v1/crm/opportunities/{id}/advance", security.Authorized("crm:pipeline:manage", handler.advanceOpportunity))
+}
+
+func (handler *Handler) createAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.AccountWrite
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.CreateAccount(request.Context(), input, actor)
+	writeResult(response, http.StatusCreated, value, "create CRM account", err)
+}
+
+func (handler *Handler) getAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.GetAccount(request.Context(), request.PathValue("id"), actor)
+	writeResult(response, http.StatusOK, value, "get CRM account", err)
+}
+
+func (handler *Handler) listAccounts(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	value, err := handler.service.ListAccounts(request.Context(), crm.RecordStatus(request.URL.Query().Get("status")), request.URL.Query().Get("cursor"), limit, actor)
+	writeResult(response, http.StatusOK, value, "list CRM accounts", err)
+}
+
+func (handler *Handler) updateAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.AccountUpdate
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.UpdateAccount(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, "update CRM account", err)
+}
+
+func (handler *Handler) archiveAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transitionAccount(response, request, actor, handler.service.ArchiveAccount, "archive CRM account")
+}
+
+func (handler *Handler) reactivateAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transitionAccount(response, request, actor, handler.service.ReactivateAccount, "reactivate CRM account")
+}
+
+func (handler *Handler) transitionAccount(response http.ResponseWriter, request *http.Request, actor identity.Principal, operation func(context.Context, string, crm.TransitionInput, identity.Principal) (crm.Account, error), name string) {
+	var input crm.TransitionInput
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := operation(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, name, err)
+}
+
+func (handler *Handler) createContact(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.ContactWrite
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.CreateContact(request.Context(), input, actor)
+	writeResult(response, http.StatusCreated, value, "create CRM contact", err)
+}
+
+func (handler *Handler) getContact(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.GetContact(request.Context(), request.PathValue("id"), actor)
+	writeResult(response, http.StatusOK, value, "get CRM contact", err)
+}
+
+func (handler *Handler) listContacts(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	value, err := handler.service.ListContacts(request.Context(), crm.RecordStatus(request.URL.Query().Get("status")), request.URL.Query().Get("cursor"), limit, actor)
+	writeResult(response, http.StatusOK, value, "list CRM contacts", err)
+}
+
+func (handler *Handler) updateContact(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.ContactUpdate
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.UpdateContact(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, "update CRM contact", err)
+}
+
+func (handler *Handler) archiveContact(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transitionContact(response, request, actor, handler.service.ArchiveContact, "archive CRM contact")
+}
+
+func (handler *Handler) reactivateContact(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transitionContact(response, request, actor, handler.service.ReactivateContact, "reactivate CRM contact")
+}
+
+func (handler *Handler) transitionContact(response http.ResponseWriter, request *http.Request, actor identity.Principal, operation func(context.Context, string, crm.TransitionInput, identity.Principal) (crm.Contact, error), name string) {
+	var input crm.TransitionInput
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := operation(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, name, err)
+}
+
+func (handler *Handler) createActivity(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.ActivityWrite
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.CreateActivity(request.Context(), input, actor)
+	writeResult(response, http.StatusCreated, value, "create CRM activity", err)
+}
+
+func (handler *Handler) listActivities(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	value, err := handler.service.ListActivities(request.Context(), crm.SubjectType(request.URL.Query().Get("subject_type")), request.URL.Query().Get("subject_id"), request.URL.Query().Get("cursor"), limit, actor)
+	writeResult(response, http.StatusOK, value, "list CRM activities", err)
+}
+
+func (handler *Handler) createOpportunity(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.OpportunityWrite
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.CreateOpportunity(request.Context(), input, actor)
+	writeResult(response, http.StatusCreated, value, "create CRM opportunity", err)
+}
+
+func (handler *Handler) getOpportunity(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.GetOpportunity(request.Context(), request.PathValue("id"), actor)
+	writeResult(response, http.StatusOK, value, "get CRM opportunity", err)
+}
+
+func (handler *Handler) listOpportunities(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	value, err := handler.service.ListOpportunities(request.Context(), crm.OpportunityStage(request.URL.Query().Get("stage")), request.URL.Query().Get("cursor"), limit, actor)
+	writeResult(response, http.StatusOK, value, "list CRM opportunities", err)
+}
+
+func (handler *Handler) updateOpportunity(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.OpportunityUpdate
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.UpdateOpportunity(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, "update CRM opportunity", err)
+}
+
+func (handler *Handler) advanceOpportunity(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input crm.StageInput
+	if !decode(response, request, &input) {
+		return
+	}
+	value, err := handler.service.AdvanceOpportunity(request.Context(), request.PathValue("id"), input, actor)
+	writeResult(response, http.StatusOK, value, "advance CRM opportunity", err)
+}
+
+func decode(response http.ResponseWriter, request *http.Request, target any) bool {
+	if err := httpjson.Decode(response, request, target); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return false
+	}
+	return true
+}
+
+func pageLimit(response http.ResponseWriter, request *http.Request) (int, bool) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer")
+			return 0, false
+		}
+		limit = value
+	}
+	return limit, true
+}
+
+func writeResult(response http.ResponseWriter, status int, value any, operation string, err error) {
+	if err != nil {
+		handleError(response, operation, err)
+		return
+	}
+	httpjson.Write(response, status, value)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, crm.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "crm.invalid", "CRM data is invalid")
+	case errors.Is(err, crm.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "crm.not_found", "CRM record was not found")
+	case errors.Is(err, crm.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "crm.conflict", "CRM record changed or conflicts with current state")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

@@ -24,6 +24,9 @@ import CatalogView from "./views/CatalogView.vue";
 {{- if .CustomerAccounts}}
 import CustomerAccountsView from "./views/CustomerAccountsView.vue";
 {{- end}}
+{{- if .CRM}}
+import CRMView from "./views/CRMView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -227,9 +230,22 @@ async function acceptInvitation(): Promise<void> {
           <CustomerAccountsView :key="session.currentOrganizationId" />
         </el-tab-pane>
 {{- end}}
+{{- if .CRM}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="CRM"
+          name="crm"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
+        <el-tab-pane label="CRM" name="crm">
+{{- end}}
+          <CRMView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
-{{- if or .Files .JobAdmin .Approvals .Catalog .CustomerAccounts}}
+{{- if or .Files .JobAdmin .Approvals .Catalog .CustomerAccounts .CRM}}
 {{- if .Tenancy}}
       <el-tabs v-else class="workspace-tabs">
 {{- else}}
@@ -267,6 +283,11 @@ async function acceptInvitation(): Promise<void> {
 {{- if .CustomerAccounts}}
         <el-tab-pane label="Customers" name="customers">
           <CustomerAccountsView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
+        </el-tab-pane>
+{{- end}}
+{{- if .CRM}}
+        <el-tab-pane label="CRM" name="crm">
+          <CRMView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
         </el-tab-pane>
 {{- end}}
       </el-tabs>

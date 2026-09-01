@@ -295,6 +295,22 @@ func TestGoCustomerAccountsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", customerSelection, "", 55, false)
 }
 
+func TestGoTenantCRMCorePostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCRMSelection, "0.3.0", 74, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantCRMCoreMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCRMSelection, "0.3.0", 75, false)
+}
+
+func TestGoCRMCoreWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", crmSelection, "", 54, false)
+}
+
+func TestGoCRMCoreWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", crmSelection, "", 55, false)
+}
+
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
@@ -714,6 +730,18 @@ const customerSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyCRMSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: crm-core
+      version: 0.1.0
+`
+
+const crmSelection = `  capabilities:
+    - name: crm-core
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -809,6 +837,9 @@ WORKFLOWS
 	}
 	if strings.Contains(capabilities, "customer-accounts") && plannedData.CapabilityLock["customer-accounts"] != "0.1.0" {
 		t.Fatalf("Plan() customer accounts lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "crm-core") && plannedData.CapabilityLock["crm-core"] != "0.1.0" {
+		t.Fatalf("Plan() CRM core lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

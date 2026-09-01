@@ -1,0 +1,591 @@
+// Package crm owns portable customer relationship management use cases.
+package crm
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"net/mail"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumIdentifierLength = 191
+	maximumNameLength       = 160
+	maximumSummaryLength    = 4000
+	maximumPhoneLength      = 64
+)
+
+var (
+	// ErrNotFound hides missing and cross-organization CRM records.
+	ErrNotFound = errors.New("CRM record not found")
+	// ErrConflict represents an optimistic version or lifecycle conflict.
+	ErrConflict = errors.New("CRM record conflicts with current state")
+	// ErrInvalidInput represents malformed portable CRM input.
+	ErrInvalidInput = errors.New("CRM input is invalid")
+)
+
+// RecordStatus is the reversible active/archive lifecycle.
+type RecordStatus string
+
+const (
+	StatusActive   RecordStatus = "active"
+	StatusArchived RecordStatus = "archived"
+)
+
+// OpportunityStage is the forward-only sales pipeline state.
+type OpportunityStage string
+
+const (
+	StageLead      OpportunityStage = "lead"
+	StageQualified OpportunityStage = "qualified"
+	StageProposal  OpportunityStage = "proposal"
+	StageWon       OpportunityStage = "won"
+	StageLost      OpportunityStage = "lost"
+)
+
+// ActivityType is an immutable CRM interaction category.
+type ActivityType string
+
+const (
+	ActivityNote    ActivityType = "note"
+	ActivityCall    ActivityType = "call"
+	ActivityEmail   ActivityType = "email"
+	ActivityMeeting ActivityType = "meeting"
+)
+
+// SubjectType identifies the record referenced by an activity.
+type SubjectType string
+
+const (
+	SubjectAccount     SubjectType = "account"
+	SubjectContact     SubjectType = "contact"
+	SubjectOpportunity SubjectType = "opportunity"
+)
+
+// Account is a business customer company, not a tenancy organization.
+type Account struct {
+	ID             string       `json:"id"`
+	OrganizationID string       `json:"organization_id,omitempty"`
+	Name           string       `json:"name"`
+	Status         RecordStatus `json:"status"`
+	Version        int64        `json:"version,string"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+// Contact is a natural person optionally associated with one CRM account.
+type Contact struct {
+	ID             string       `json:"id"`
+	OrganizationID string       `json:"organization_id,omitempty"`
+	AccountID      string       `json:"account_id,omitempty"`
+	Name           string       `json:"name"`
+	Email          string       `json:"email,omitempty"`
+	Phone          string       `json:"phone,omitempty"`
+	Status         RecordStatus `json:"status"`
+	Version        int64        `json:"version,string"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+// Activity is an immutable CRM interaction.
+type Activity struct {
+	ID             string       `json:"id"`
+	OrganizationID string       `json:"organization_id,omitempty"`
+	SubjectType    SubjectType  `json:"subject_type"`
+	SubjectID      string       `json:"subject_id"`
+	Type           ActivityType `json:"type"`
+	Summary        string       `json:"summary"`
+	OccurredAt     time.Time    `json:"occurred_at"`
+	CreatedBy      string       `json:"created_by"`
+	CreatedAt      time.Time    `json:"created_at"`
+}
+
+// Opportunity is a forward-only sales pipeline record.
+type Opportunity struct {
+	ID             string           `json:"id"`
+	OrganizationID string           `json:"organization_id,omitempty"`
+	AccountID      string           `json:"account_id"`
+	Name           string           `json:"name"`
+	AmountMinor    int64            `json:"amount_minor,string"`
+	Currency       string           `json:"currency"`
+	Stage          OpportunityStage `json:"stage"`
+	Version        int64            `json:"version,string"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+type AccountWrite struct {
+	Name string `json:"name"`
+}
+
+type AccountUpdate struct {
+	Name    string `json:"name"`
+	Version int64  `json:"version,string"`
+}
+
+type ContactWrite struct {
+	AccountID string `json:"account_id,omitempty"`
+	Name      string `json:"name"`
+	Email     string `json:"email,omitempty"`
+	Phone     string `json:"phone,omitempty"`
+}
+
+type ContactUpdate struct {
+	AccountID string `json:"account_id,omitempty"`
+	Name      string `json:"name"`
+	Email     string `json:"email,omitempty"`
+	Phone     string `json:"phone,omitempty"`
+	Version   int64  `json:"version,string"`
+}
+
+type ActivityWrite struct {
+	SubjectType SubjectType  `json:"subject_type"`
+	SubjectID   string       `json:"subject_id"`
+	Type        ActivityType `json:"type"`
+	Summary     string       `json:"summary"`
+	OccurredAt  time.Time    `json:"occurred_at"`
+}
+
+type OpportunityWrite struct {
+	AccountID   string `json:"account_id"`
+	Name        string `json:"name"`
+	AmountMinor string `json:"amount_minor"`
+	Currency    string `json:"currency"`
+}
+
+type OpportunityUpdate struct {
+	AccountID   string `json:"account_id"`
+	Name        string `json:"name"`
+	AmountMinor string `json:"amount_minor"`
+	Currency    string `json:"currency"`
+	Version     int64  `json:"version,string"`
+}
+
+type TransitionInput struct {
+	Version int64 `json:"version,string"`
+}
+
+type StageInput struct {
+	Stage   OpportunityStage `json:"stage"`
+	Version int64            `json:"version,string"`
+}
+
+type AccountPage struct {
+	Items      []Account `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+type ContactPage struct {
+	Items      []Contact `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+type ActivityPage struct {
+	Items      []Activity `json:"items"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+type OpportunityPage struct {
+	Items      []Opportunity `json:"items"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+}
+
+// Store is the atomic CRM persistence boundary.
+type Store interface {
+	CreateAccount(context.Context, Account, identity.AuditEvent) error
+	GetAccount(context.Context, string, string) (Account, error)
+	ListAccounts(context.Context, string, RecordStatus, string, int) ([]Account, string, error)
+	UpdateAccount(context.Context, string, string, string, int64, time.Time, identity.AuditEvent) (Account, error)
+	TransitionAccount(context.Context, string, string, int64, RecordStatus, RecordStatus, time.Time, identity.AuditEvent) (Account, error)
+	CreateContact(context.Context, Contact, identity.AuditEvent) error
+	GetContact(context.Context, string, string) (Contact, error)
+	ListContacts(context.Context, string, RecordStatus, string, int) ([]Contact, string, error)
+	UpdateContact(context.Context, string, Contact, int64, time.Time, identity.AuditEvent) (Contact, error)
+	TransitionContact(context.Context, string, string, int64, RecordStatus, RecordStatus, time.Time, identity.AuditEvent) (Contact, error)
+	CreateActivity(context.Context, Activity, identity.AuditEvent) error
+	ListActivities(context.Context, string, SubjectType, string, string, int) ([]Activity, string, error)
+	CreateOpportunity(context.Context, Opportunity, identity.AuditEvent) error
+	GetOpportunity(context.Context, string, string) (Opportunity, error)
+	ListOpportunities(context.Context, string, OpportunityStage, string, int) ([]Opportunity, string, error)
+	UpdateOpportunity(context.Context, string, Opportunity, int64, time.Time, identity.AuditEvent) (Opportunity, error)
+	AdvanceOpportunity(context.Context, string, string, int64, OpportunityStage, OpportunityStage, time.Time, identity.AuditEvent) (Opportunity, error)
+}
+
+// Service enforces CRM domain rules independently from HTTP and SQL.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+func NewService(store Store) *Service { return &Service{store: store, now: time.Now} }
+
+func (service *Service) CreateAccount(ctx context.Context, input AccountWrite, actor identity.Principal) (Account, error) {
+	scope, err := actorScope(actor)
+	if err != nil {
+		return Account{}, err
+	}
+	name, err := requiredText(input.Name, maximumNameLength)
+	if err != nil {
+		return Account{}, err
+	}
+	now := service.now().UTC()
+	value := Account{ID: newID(), OrganizationID: scope, Name: name, Status: StatusActive, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if err := service.store.CreateAccount(ctx, value, audit(actor, "crm:accounts:create", value.ID, now)); err != nil {
+		return Account{}, wrap("create CRM account", err)
+	}
+	return value, nil
+}
+
+func (service *Service) GetAccount(ctx context.Context, id string, actor identity.Principal) (Account, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil {
+		return Account{}, err
+	}
+	value, err := service.store.GetAccount(ctx, scope, id)
+	return value, wrap("get CRM account", err)
+}
+
+func (service *Service) ListAccounts(ctx context.Context, status RecordStatus, cursor string, limit int, actor identity.Principal) (AccountPage, error) {
+	scope, err := actorScope(actor)
+	if err != nil || !validStatusFilter(status) || !validPage(cursor, limit) {
+		return AccountPage{}, ErrInvalidInput
+	}
+	items, next, err := service.store.ListAccounts(ctx, scope, status, strings.TrimSpace(cursor), limit)
+	return AccountPage{Items: items, NextCursor: next}, wrap("list CRM accounts", err)
+}
+
+func (service *Service) UpdateAccount(ctx context.Context, id string, input AccountUpdate, actor identity.Principal) (Account, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || input.Version < 1 {
+		return Account{}, ErrInvalidInput
+	}
+	name, err := requiredText(input.Name, maximumNameLength)
+	if err != nil {
+		return Account{}, err
+	}
+	now := service.now().UTC()
+	value, err := service.store.UpdateAccount(ctx, scope, id, name, input.Version, now, audit(actor, "crm:accounts:update", id, now))
+	return value, wrap("update CRM account", err)
+}
+
+func (service *Service) ArchiveAccount(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Account, error) {
+	return service.transitionAccount(ctx, id, input.Version, StatusActive, StatusArchived, "crm:accounts:archive", actor)
+}
+
+func (service *Service) ReactivateAccount(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Account, error) {
+	return service.transitionAccount(ctx, id, input.Version, StatusArchived, StatusActive, "crm:accounts:reactivate", actor)
+}
+
+func (service *Service) transitionAccount(ctx context.Context, id string, version int64, from, to RecordStatus, action string, actor identity.Principal) (Account, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || version < 1 {
+		return Account{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	value, err := service.store.TransitionAccount(ctx, scope, id, version, from, to, now, audit(actor, action, id, now))
+	return value, wrap("transition CRM account", err)
+}
+
+func (service *Service) CreateContact(ctx context.Context, input ContactWrite, actor identity.Principal) (Contact, error) {
+	scope, err := actorScope(actor)
+	if err != nil {
+		return Contact{}, err
+	}
+	normalized, err := normalizeContact(input)
+	if err != nil {
+		return Contact{}, err
+	}
+	now := service.now().UTC()
+	value := Contact{ID: newID(), OrganizationID: scope, AccountID: normalized.AccountID, Name: normalized.Name, Email: normalized.Email, Phone: normalized.Phone, Status: StatusActive, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if err := service.store.CreateContact(ctx, value, audit(actor, "crm:contacts:create", value.ID, now)); err != nil {
+		return Contact{}, wrap("create CRM contact", err)
+	}
+	return value, nil
+}
+
+func (service *Service) GetContact(ctx context.Context, id string, actor identity.Principal) (Contact, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil {
+		return Contact{}, err
+	}
+	value, err := service.store.GetContact(ctx, scope, id)
+	return value, wrap("get CRM contact", err)
+}
+
+func (service *Service) ListContacts(ctx context.Context, status RecordStatus, cursor string, limit int, actor identity.Principal) (ContactPage, error) {
+	scope, err := actorScope(actor)
+	if err != nil || !validStatusFilter(status) || !validPage(cursor, limit) {
+		return ContactPage{}, ErrInvalidInput
+	}
+	items, next, err := service.store.ListContacts(ctx, scope, status, strings.TrimSpace(cursor), limit)
+	return ContactPage{Items: items, NextCursor: next}, wrap("list CRM contacts", err)
+}
+
+func (service *Service) UpdateContact(ctx context.Context, id string, input ContactUpdate, actor identity.Principal) (Contact, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || input.Version < 1 {
+		return Contact{}, ErrInvalidInput
+	}
+	normalized, err := normalizeContact(ContactWrite{AccountID: input.AccountID, Name: input.Name, Email: input.Email, Phone: input.Phone})
+	if err != nil {
+		return Contact{}, err
+	}
+	now := service.now().UTC()
+	value := Contact{ID: id, OrganizationID: scope, AccountID: normalized.AccountID, Name: normalized.Name, Email: normalized.Email, Phone: normalized.Phone}
+	value, err = service.store.UpdateContact(ctx, scope, value, input.Version, now, audit(actor, "crm:contacts:update", id, now))
+	return value, wrap("update CRM contact", err)
+}
+
+func (service *Service) ArchiveContact(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Contact, error) {
+	return service.transitionContact(ctx, id, input.Version, StatusActive, StatusArchived, "crm:contacts:archive", actor)
+}
+
+func (service *Service) ReactivateContact(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Contact, error) {
+	return service.transitionContact(ctx, id, input.Version, StatusArchived, StatusActive, "crm:contacts:reactivate", actor)
+}
+
+func (service *Service) transitionContact(ctx context.Context, id string, version int64, from, to RecordStatus, action string, actor identity.Principal) (Contact, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || version < 1 {
+		return Contact{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	value, err := service.store.TransitionContact(ctx, scope, id, version, from, to, now, audit(actor, action, id, now))
+	return value, wrap("transition CRM contact", err)
+}
+
+func (service *Service) CreateActivity(ctx context.Context, input ActivityWrite, actor identity.Principal) (Activity, error) {
+	scope, err := actorScope(actor)
+	if err != nil || !validSubject(input.SubjectType) || !validActivityType(input.Type) {
+		return Activity{}, ErrInvalidInput
+	}
+	subjectID, err := identifier(input.SubjectID)
+	if err != nil || input.OccurredAt.IsZero() {
+		return Activity{}, ErrInvalidInput
+	}
+	summary, err := requiredText(input.Summary, maximumSummaryLength)
+	if err != nil {
+		return Activity{}, err
+	}
+	now := service.now().UTC()
+	value := Activity{ID: newID(), OrganizationID: scope, SubjectType: input.SubjectType, SubjectID: subjectID, Type: input.Type, Summary: summary, OccurredAt: input.OccurredAt.UTC(), CreatedBy: actor.UserID, CreatedAt: now}
+	if err := service.store.CreateActivity(ctx, value, audit(actor, "crm:activities:create", value.ID, now)); err != nil {
+		return Activity{}, wrap("create CRM activity", err)
+	}
+	return value, nil
+}
+
+func (service *Service) ListActivities(ctx context.Context, subjectType SubjectType, subjectID, cursor string, limit int, actor identity.Principal) (ActivityPage, error) {
+	scope, err := actorScope(actor)
+	if err != nil || !validPage(cursor, limit) || (subjectType != "" && !validSubject(subjectType)) {
+		return ActivityPage{}, ErrInvalidInput
+	}
+	if subjectType == "" && strings.TrimSpace(subjectID) != "" || subjectType != "" && strings.TrimSpace(subjectID) == "" {
+		return ActivityPage{}, ErrInvalidInput
+	}
+	if subjectID != "" {
+		subjectID, err = identifier(subjectID)
+		if err != nil {
+			return ActivityPage{}, err
+		}
+	}
+	items, next, err := service.store.ListActivities(ctx, scope, subjectType, subjectID, strings.TrimSpace(cursor), limit)
+	return ActivityPage{Items: items, NextCursor: next}, wrap("list CRM activities", err)
+}
+
+func (service *Service) CreateOpportunity(ctx context.Context, input OpportunityWrite, actor identity.Principal) (Opportunity, error) {
+	scope, err := actorScope(actor)
+	if err != nil {
+		return Opportunity{}, err
+	}
+	accountID, name, amount, currency, err := normalizeOpportunity(input)
+	if err != nil {
+		return Opportunity{}, err
+	}
+	now := service.now().UTC()
+	value := Opportunity{ID: newID(), OrganizationID: scope, AccountID: accountID, Name: name, AmountMinor: amount, Currency: currency, Stage: StageLead, Version: 1, CreatedAt: now, UpdatedAt: now}
+	if err := service.store.CreateOpportunity(ctx, value, audit(actor, "crm:opportunities:create", value.ID, now)); err != nil {
+		return Opportunity{}, wrap("create CRM opportunity", err)
+	}
+	return value, nil
+}
+
+func (service *Service) GetOpportunity(ctx context.Context, id string, actor identity.Principal) (Opportunity, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil {
+		return Opportunity{}, err
+	}
+	value, err := service.store.GetOpportunity(ctx, scope, id)
+	return value, wrap("get CRM opportunity", err)
+}
+
+func (service *Service) ListOpportunities(ctx context.Context, stage OpportunityStage, cursor string, limit int, actor identity.Principal) (OpportunityPage, error) {
+	scope, err := actorScope(actor)
+	if err != nil || !validStageFilter(stage) || !validPage(cursor, limit) {
+		return OpportunityPage{}, ErrInvalidInput
+	}
+	items, next, err := service.store.ListOpportunities(ctx, scope, stage, strings.TrimSpace(cursor), limit)
+	return OpportunityPage{Items: items, NextCursor: next}, wrap("list CRM opportunities", err)
+}
+
+func (service *Service) UpdateOpportunity(ctx context.Context, id string, input OpportunityUpdate, actor identity.Principal) (Opportunity, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || input.Version < 1 {
+		return Opportunity{}, ErrInvalidInput
+	}
+	accountID, name, amount, currency, err := normalizeOpportunity(OpportunityWrite{AccountID: input.AccountID, Name: input.Name, AmountMinor: input.AmountMinor, Currency: input.Currency})
+	if err != nil {
+		return Opportunity{}, err
+	}
+	now := service.now().UTC()
+	value := Opportunity{ID: id, OrganizationID: scope, AccountID: accountID, Name: name, AmountMinor: amount, Currency: currency}
+	value, err = service.store.UpdateOpportunity(ctx, scope, value, input.Version, now, audit(actor, "crm:opportunities:update", id, now))
+	return value, wrap("update CRM opportunity", err)
+}
+
+func (service *Service) AdvanceOpportunity(ctx context.Context, id string, input StageInput, actor identity.Principal) (Opportunity, error) {
+	scope, id, err := scopeAndID(actor, id)
+	if err != nil || input.Version < 1 {
+		return Opportunity{}, ErrInvalidInput
+	}
+	current, err := service.store.GetOpportunity(ctx, scope, id)
+	if err != nil {
+		return Opportunity{}, wrap("get CRM opportunity for transition", err)
+	}
+	if !validStageTransition(current.Stage, input.Stage) {
+		return Opportunity{}, ErrConflict
+	}
+	now := service.now().UTC()
+	value, err := service.store.AdvanceOpportunity(ctx, scope, id, input.Version, current.Stage, input.Stage, now, audit(actor, "crm:opportunities:advance", id, now))
+	return value, wrap("advance CRM opportunity", err)
+}
+
+func normalizeContact(input ContactWrite) (ContactWrite, error) {
+	name, err := requiredText(input.Name, maximumNameLength)
+	if err != nil {
+		return ContactWrite{}, err
+	}
+	accountID := strings.TrimSpace(input.AccountID)
+	if accountID != "" {
+		accountID, err = identifier(accountID)
+		if err != nil {
+			return ContactWrite{}, err
+		}
+	}
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	if email != "" {
+		address, parseErr := mail.ParseAddress(email)
+		if parseErr != nil || address.Address != email || len(email) > 254 || !printable(email) {
+			return ContactWrite{}, ErrInvalidInput
+		}
+	}
+	phone := strings.TrimSpace(input.Phone)
+	if len(phone) > maximumPhoneLength || !printable(phone) {
+		return ContactWrite{}, ErrInvalidInput
+	}
+	return ContactWrite{AccountID: accountID, Name: name, Email: email, Phone: phone}, nil
+}
+
+func normalizeOpportunity(input OpportunityWrite) (string, string, int64, string, error) {
+	accountID, err := identifier(input.AccountID)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+	name, err := requiredText(input.Name, maximumNameLength)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+	amount, err := strconv.ParseInt(input.AmountMinor, 10, 64)
+	if err != nil || amount < 0 || strconv.FormatInt(amount, 10) != input.AmountMinor {
+		return "", "", 0, "", ErrInvalidInput
+	}
+	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
+	if len(currency) != 3 || strings.IndexFunc(currency, func(character rune) bool { return character < 'A' || character > 'Z' }) >= 0 {
+		return "", "", 0, "", ErrInvalidInput
+	}
+	return accountID, name, amount, currency, nil
+}
+
+func actorScope(actor identity.Principal) (string, error) {
+	if actor.UserID == "" || len(actor.UserID) > maximumIdentifierLength || !printable(actor.UserID) {
+		return "", ErrInvalidInput
+	}
+{{- if .Tenancy}}
+	scope := strings.TrimSpace(actor.OrganizationID)
+	if scope == "" || len(scope) > maximumIdentifierLength || !printable(scope) {
+		return "", ErrInvalidInput
+	}
+	return scope, nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func scopeAndID(actor identity.Principal, value string) (string, string, error) {
+	scope, err := actorScope(actor)
+	if err != nil {
+		return "", "", err
+	}
+	id, err := identifier(value)
+	return scope, id, err
+}
+
+func identifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maximumIdentifierLength || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func requiredText(value string, maximum int) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || utf8.RuneCountInString(value) > maximum || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func validPage(cursor string, limit int) bool {
+	cursor = strings.TrimSpace(cursor)
+	return limit >= 1 && limit <= 100 && len(cursor) <= maximumIdentifierLength && printable(cursor)
+}
+
+func validStatusFilter(value RecordStatus) bool { return value == "" || value == StatusActive || value == StatusArchived }
+func validStageFilter(value OpportunityStage) bool {
+	return value == "" || value == StageLead || value == StageQualified || value == StageProposal || value == StageWon || value == StageLost
+}
+func validActivityType(value ActivityType) bool {
+	return value == ActivityNote || value == ActivityCall || value == ActivityEmail || value == ActivityMeeting
+}
+func validSubject(value SubjectType) bool {
+	return value == SubjectAccount || value == SubjectContact || value == SubjectOpportunity
+}
+func validStageTransition(from, to OpportunityStage) bool {
+	return to == StageLost && (from == StageLead || from == StageQualified || from == StageProposal) ||
+		from == StageLead && to == StageQualified || from == StageQualified && to == StageProposal || from == StageProposal && to == StageWon
+}
+
+func printable(value string) bool {
+	return strings.IndexFunc(value, func(character rune) bool { return !unicode.IsGraphic(character) }) < 0
+}
+
+func audit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{ID: newID(), UserID: actor.UserID, Action: action, Outcome: "succeeded", Target: target, CreatedAt: now}
+}
+
+func wrap(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Join(errors.New(operation), err)
+}
+
+func newID() string { return rand.Text() }

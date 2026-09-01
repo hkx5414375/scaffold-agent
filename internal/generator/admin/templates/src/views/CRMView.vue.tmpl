@@ -1,0 +1,507 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, reactive, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import type {
+  CRMAccount,
+  CRMActivity,
+  CRMActivityType,
+  CRMContact,
+  CRMOpportunity,
+  CRMOpportunityStage,
+  CRMPage,
+  CRMRecordStatus,
+  CRMSubjectType,
+} from "../types";
+
+const accounts = ref<CRMAccount[]>([]);
+const contacts = ref<CRMContact[]>([]);
+const opportunities = ref<CRMOpportunity[]>([]);
+const activities = ref<CRMActivity[]>([]);
+const loading = ref(false);
+const accountStatus = ref<CRMRecordStatus | "">("");
+const contactStatus = ref<CRMRecordStatus | "">("");
+const opportunityStage = ref<CRMOpportunityStage | "">("");
+const accountDialog = ref(false);
+const contactDialog = ref(false);
+const opportunityDialog = ref(false);
+const activityDialog = ref(false);
+const editingAccount = ref<CRMAccount | null>(null);
+const editingContact = ref<CRMContact | null>(null);
+const editingOpportunity = ref<CRMOpportunity | null>(null);
+const accountForm = reactive({ name: "" });
+const contactForm = reactive({ account_id: "", name: "", email: "", phone: "" });
+const opportunityForm = reactive({ account_id: "", name: "", amount_minor: "0", currency: "USD" });
+const activityForm = reactive({
+  subject_type: "account" as CRMSubjectType,
+  subject_id: "",
+  type: "note" as CRMActivityType,
+  summary: "",
+  occurred_at: new Date().toISOString(),
+});
+
+onMounted(() => refresh());
+
+async function refresh(): Promise<void> {
+  loading.value = true;
+  try {
+    const accountQuery = accountStatus.value
+      ? `?limit=100&status=${accountStatus.value}`
+      : "?limit=100";
+    const contactQuery = contactStatus.value
+      ? `?limit=100&status=${contactStatus.value}`
+      : "?limit=100";
+    const opportunityQuery = opportunityStage.value
+      ? `?limit=100&stage=${opportunityStage.value}`
+      : "?limit=100";
+    const [accountPage, contactPage, opportunityPage, activityPage] = await Promise.all([
+      request<CRMPage<CRMAccount>>(`/api/v1/crm/accounts${accountQuery}`),
+      request<CRMPage<CRMContact>>(`/api/v1/crm/contacts${contactQuery}`),
+      request<CRMPage<CRMOpportunity>>(`/api/v1/crm/opportunities${opportunityQuery}`),
+      request<CRMPage<CRMActivity>>("/api/v1/crm/activities?limit=100"),
+    ]);
+    accounts.value = accountPage.items;
+    contacts.value = contactPage.items;
+    opportunities.value = opportunityPage.items;
+    activities.value = activityPage.items;
+  } catch (error) {
+    showError(error, "CRM records could not be loaded");
+  } finally {
+    loading.value = false;
+  }
+}
+
+function openAccount(value?: CRMAccount): void {
+  editingAccount.value = value ?? null;
+  accountForm.name = value?.name ?? "";
+  accountDialog.value = true;
+}
+
+async function saveAccount(): Promise<void> {
+  const value = editingAccount.value;
+  try {
+    await request<CRMAccount>(value ? `/api/v1/crm/accounts/${value.id}` : "/api/v1/crm/accounts", {
+      method: value ? "PUT" : "POST",
+      body: JSON.stringify(value ? { ...accountForm, version: value.version } : accountForm),
+    });
+    accountDialog.value = false;
+    ElMessage.success(value ? "Account updated" : "Account created");
+    await refresh();
+  } catch (error) {
+    showError(error, "Account could not be saved");
+  }
+}
+
+async function transitionAccount(
+  value: CRMAccount,
+  action: "archive" | "reactivate",
+): Promise<void> {
+  if (action === "archive" && !(await confirmArchive("account"))) return;
+  try {
+    await request<CRMAccount>(`/api/v1/crm/accounts/${value.id}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: value.version }),
+    });
+    await refresh();
+  } catch (error) {
+    showError(error, `Account could not be ${action}d`);
+  }
+}
+
+function openContact(value?: CRMContact): void {
+  editingContact.value = value ?? null;
+  Object.assign(contactForm, {
+    account_id: value?.account_id ?? "",
+    name: value?.name ?? "",
+    email: value?.email ?? "",
+    phone: value?.phone ?? "",
+  });
+  contactDialog.value = true;
+}
+
+async function saveContact(): Promise<void> {
+  const value = editingContact.value;
+  try {
+    await request<CRMContact>(value ? `/api/v1/crm/contacts/${value.id}` : "/api/v1/crm/contacts", {
+      method: value ? "PUT" : "POST",
+      body: JSON.stringify(value ? { ...contactForm, version: value.version } : contactForm),
+    });
+    contactDialog.value = false;
+    ElMessage.success(value ? "Contact updated" : "Contact created");
+    await refresh();
+  } catch (error) {
+    showError(error, "Contact could not be saved");
+  }
+}
+
+async function transitionContact(
+  value: CRMContact,
+  action: "archive" | "reactivate",
+): Promise<void> {
+  if (action === "archive" && !(await confirmArchive("contact"))) return;
+  try {
+    await request<CRMContact>(`/api/v1/crm/contacts/${value.id}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: value.version }),
+    });
+    await refresh();
+  } catch (error) {
+    showError(error, `Contact could not be ${action}d`);
+  }
+}
+
+function openOpportunity(value?: CRMOpportunity): void {
+  editingOpportunity.value = value ?? null;
+  Object.assign(opportunityForm, {
+    account_id: value?.account_id ?? "",
+    name: value?.name ?? "",
+    amount_minor: value?.amount_minor ?? "0",
+    currency: value?.currency ?? "USD",
+  });
+  opportunityDialog.value = true;
+}
+
+async function saveOpportunity(): Promise<void> {
+  const value = editingOpportunity.value;
+  try {
+    await request<CRMOpportunity>(
+      value ? `/api/v1/crm/opportunities/${value.id}` : "/api/v1/crm/opportunities",
+      {
+        method: value ? "PUT" : "POST",
+        body: JSON.stringify(
+          value ? { ...opportunityForm, version: value.version } : opportunityForm,
+        ),
+      },
+    );
+    opportunityDialog.value = false;
+    ElMessage.success(value ? "Opportunity updated" : "Opportunity created");
+    await refresh();
+  } catch (error) {
+    showError(error, "Opportunity could not be saved");
+  }
+}
+
+function nextStages(stage: CRMOpportunityStage): CRMOpportunityStage[] {
+  if (stage === "lead") return ["qualified", "lost"];
+  if (stage === "qualified") return ["proposal", "lost"];
+  if (stage === "proposal") return ["won", "lost"];
+  return [];
+}
+
+async function advanceOpportunity(
+  value: CRMOpportunity,
+  stage: CRMOpportunityStage,
+): Promise<void> {
+  try {
+    await request<CRMOpportunity>(`/api/v1/crm/opportunities/${value.id}/advance`, {
+      method: "POST",
+      body: JSON.stringify({ stage, version: value.version }),
+    });
+    await refresh();
+  } catch (error) {
+    showError(error, "Opportunity stage could not be changed");
+  }
+}
+
+function openActivity(subjectType?: CRMSubjectType, subjectId?: string): void {
+  Object.assign(activityForm, {
+    subject_type: subjectType ?? "account",
+    subject_id: subjectId ?? "",
+    type: "note",
+    summary: "",
+    occurred_at: new Date().toISOString(),
+  });
+  activityDialog.value = true;
+}
+
+async function saveActivity(): Promise<void> {
+  try {
+    await request<CRMActivity>("/api/v1/crm/activities", {
+      method: "POST",
+      body: JSON.stringify(activityForm),
+    });
+    activityDialog.value = false;
+    ElMessage.success("Activity recorded");
+    await refresh();
+  } catch (error) {
+    showError(error, "Activity could not be recorded");
+  }
+}
+
+async function confirmArchive(kind: string): Promise<boolean> {
+  try {
+    await ElMessageBox.confirm(
+      `Archive this ${kind}? It can be reactivated later.`,
+      `Archive ${kind}`,
+      {
+        type: "warning",
+        confirmButtonText: "Archive",
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section v-loading="loading">
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">Relationships</p>
+        <h1>CRM workspace</h1>
+      </div>
+      <el-button @click="openActivity()">Record activity</el-button>
+    </div>
+
+    <el-tabs class="workspace-tabs">
+      <el-tab-pane label="Accounts" name="accounts">
+        <div class="table-actions">
+          <el-select v-model="accountStatus" clearable placeholder="All statuses" @change="refresh">
+            <el-option label="Active" value="active" /><el-option
+              label="Archived"
+              value="archived"
+            />
+          </el-select>
+          <el-button type="primary" @click="openAccount()">Create account</el-button>
+        </div>
+        <el-table :data="accounts" row-key="id">
+          <el-table-column prop="name" label="Account" min-width="220" />
+          <el-table-column prop="status" label="Status" width="120" />
+          <el-table-column label="Actions" width="260">
+            <template #default="scope">
+              <el-button link type="primary" @click="openAccount(scope.row)">Edit</el-button>
+              <el-button link @click="openActivity('account', scope.row.id)">Activity</el-button>
+              <el-button
+                v-if="scope.row.status === 'active'"
+                link
+                type="danger"
+                @click="transitionAccount(scope.row, 'archive')"
+                >Archive</el-button
+              >
+              <el-button
+                v-else
+                link
+                type="success"
+                @click="transitionAccount(scope.row, 'reactivate')"
+                >Reactivate</el-button
+              >
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <el-tab-pane label="Contacts" name="contacts">
+        <div class="table-actions">
+          <el-select v-model="contactStatus" clearable placeholder="All statuses" @change="refresh">
+            <el-option label="Active" value="active" /><el-option
+              label="Archived"
+              value="archived"
+            />
+          </el-select>
+          <el-button type="primary" @click="openContact()">Create contact</el-button>
+        </div>
+        <el-table :data="contacts" row-key="id">
+          <el-table-column prop="name" label="Contact" min-width="180" />
+          <el-table-column prop="email" label="Email" min-width="220" />
+          <el-table-column prop="phone" label="Phone" min-width="140" />
+          <el-table-column prop="status" label="Status" width="110" />
+          <el-table-column label="Actions" width="250">
+            <template #default="scope">
+              <el-button link type="primary" @click="openContact(scope.row)">Edit</el-button>
+              <el-button link @click="openActivity('contact', scope.row.id)">Activity</el-button>
+              <el-button
+                v-if="scope.row.status === 'active'"
+                link
+                type="danger"
+                @click="transitionContact(scope.row, 'archive')"
+                >Archive</el-button
+              >
+              <el-button
+                v-else
+                link
+                type="success"
+                @click="transitionContact(scope.row, 'reactivate')"
+                >Reactivate</el-button
+              >
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <el-tab-pane label="Pipeline" name="pipeline">
+        <div class="table-actions">
+          <el-select
+            v-model="opportunityStage"
+            clearable
+            placeholder="All stages"
+            @change="refresh"
+          >
+            <el-option
+              v-for="stage in ['lead', 'qualified', 'proposal', 'won', 'lost']"
+              :key="stage"
+              :label="stage"
+              :value="stage"
+            />
+          </el-select>
+          <el-button type="primary" @click="openOpportunity()">Create opportunity</el-button>
+        </div>
+        <el-table :data="opportunities" row-key="id">
+          <el-table-column prop="name" label="Opportunity" min-width="200" />
+          <el-table-column prop="amount_minor" label="Amount (minor)" width="150" />
+          <el-table-column prop="currency" label="Currency" width="100" />
+          <el-table-column prop="stage" label="Stage" width="110" />
+          <el-table-column label="Actions" min-width="280">
+            <template #default="scope">
+              <el-button
+                v-if="nextStages(scope.row.stage).length"
+                link
+                type="primary"
+                @click="openOpportunity(scope.row)"
+                >Edit</el-button
+              >
+              <el-button link @click="openActivity('opportunity', scope.row.id)"
+                >Activity</el-button
+              >
+              <el-button
+                v-for="stage in nextStages(scope.row.stage)"
+                :key="stage"
+                link
+                :type="stage === 'lost' ? 'danger' : 'success'"
+                @click="advanceOpportunity(scope.row, stage)"
+                >{{ "{{" }} stage {{ "}}" }}</el-button
+              >
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <el-tab-pane label="Activity" name="activity">
+        <el-table :data="activities" row-key="id">
+          <el-table-column prop="occurred_at" label="Occurred" min-width="190" />
+          <el-table-column prop="type" label="Type" width="110" />
+          <el-table-column prop="subject_type" label="Subject" width="130" />
+          <el-table-column prop="summary" label="Summary" min-width="280" />
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
+
+    <el-dialog
+      v-model="accountDialog"
+      :title="editingAccount ? 'Edit account' : 'Create account'"
+      width="min(520px, 92vw)"
+    >
+      <el-form label-position="top"
+        ><el-form-item label="Name" required
+          ><el-input v-model="accountForm.name" maxlength="160" /></el-form-item
+      ></el-form>
+      <template #footer
+        ><el-button @click="accountDialog = false">Cancel</el-button
+        ><el-button type="primary" @click="saveAccount">Save</el-button></template
+      >
+    </el-dialog>
+
+    <el-dialog
+      v-model="contactDialog"
+      :title="editingContact ? 'Edit contact' : 'Create contact'"
+      width="min(560px, 92vw)"
+    >
+      <el-form label-position="top">
+        <el-form-item label="Account"
+          ><el-select v-model="contactForm.account_id" clearable filterable
+            ><el-option
+              v-for="account in accounts.filter((item) => item.status === 'active')"
+              :key="account.id"
+              :label="account.name"
+              :value="account.id" /></el-select
+        ></el-form-item>
+        <el-form-item label="Name" required
+          ><el-input v-model="contactForm.name" maxlength="160"
+        /></el-form-item>
+        <el-form-item label="Email"
+          ><el-input v-model="contactForm.email" maxlength="254"
+        /></el-form-item>
+        <el-form-item label="Phone"
+          ><el-input v-model="contactForm.phone" maxlength="64"
+        /></el-form-item>
+      </el-form>
+      <template #footer
+        ><el-button @click="contactDialog = false">Cancel</el-button
+        ><el-button type="primary" @click="saveContact">Save</el-button></template
+      >
+    </el-dialog>
+
+    <el-dialog
+      v-model="opportunityDialog"
+      :title="editingOpportunity ? 'Edit opportunity' : 'Create opportunity'"
+      width="min(560px, 92vw)"
+    >
+      <el-form label-position="top">
+        <el-form-item label="Account" required
+          ><el-select v-model="opportunityForm.account_id" filterable
+            ><el-option
+              v-for="account in accounts.filter((item) => item.status === 'active')"
+              :key="account.id"
+              :label="account.name"
+              :value="account.id" /></el-select
+        ></el-form-item>
+        <el-form-item label="Name" required
+          ><el-input v-model="opportunityForm.name" maxlength="160"
+        /></el-form-item>
+        <el-form-item label="Amount in minor units" required
+          ><el-input v-model="opportunityForm.amount_minor" inputmode="numeric"
+        /></el-form-item>
+        <el-form-item label="ISO currency" required
+          ><el-input v-model="opportunityForm.currency" maxlength="3"
+        /></el-form-item>
+      </el-form>
+      <template #footer
+        ><el-button @click="opportunityDialog = false">Cancel</el-button
+        ><el-button type="primary" @click="saveOpportunity">Save</el-button></template
+      >
+    </el-dialog>
+
+    <el-dialog v-model="activityDialog" title="Record activity" width="min(600px, 92vw)">
+      <el-form label-position="top">
+        <el-form-item label="Subject type" required
+          ><el-select v-model="activityForm.subject_type"
+            ><el-option label="Account" value="account" /><el-option
+              label="Contact"
+              value="contact" /><el-option label="Opportunity" value="opportunity" /></el-select
+        ></el-form-item>
+        <el-form-item label="Subject ID" required
+          ><el-input v-model="activityForm.subject_id"
+        /></el-form-item>
+        <el-form-item label="Type" required
+          ><el-select v-model="activityForm.type"
+            ><el-option label="Note" value="note" /><el-option
+              label="Call"
+              value="call" /><el-option label="Email" value="email" /><el-option
+              label="Meeting"
+              value="meeting" /></el-select
+        ></el-form-item>
+        <el-form-item label="Occurred at (ISO 8601)" required
+          ><el-input v-model="activityForm.occurred_at"
+        /></el-form-item>
+        <el-form-item label="Summary" required
+          ><el-input
+            v-model="activityForm.summary"
+            type="textarea"
+            :rows="4"
+            maxlength="4000"
+            show-word-limit
+        /></el-form-item>
+      </el-form>
+      <template #footer
+        ><el-button @click="activityDialog = false">Cancel</el-button
+        ><el-button type="primary" @click="saveActivity">Record</el-button></template
+      >
+    </el-dialog>
+  </section>
+</template>

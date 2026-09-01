@@ -1410,6 +1410,254 @@ paths:
         "500":
           $ref: "#/components/responses/ErrorResponse"
 {{end}}
+{{if .CRM}}
+  /api/v1/crm/accounts:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: createCRMAccount
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CRMAccountWrite"}
+      responses:
+        "201":
+          description: CRM account created
+          content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccount"}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "401": {$ref: "#/components/responses/ErrorResponse"}
+        "403": {$ref: "#/components/responses/ErrorResponse"}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+    get:
+      operationId: listCRMAccounts
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/CRMRecordStatus"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Bounded CRM account page
+          content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccountPage"}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "401": {$ref: "#/components/responses/ErrorResponse"}
+        "403": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: getCRMAccount
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses:
+        "200": {description: One CRM account, content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccount"}}}}
+        "404": {$ref: "#/components/responses/ErrorResponse"}
+    put:
+      operationId: updateCRMAccount
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccountUpdate"}}}}
+      responses:
+        "200": {description: CRM account updated, content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccount"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/accounts/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: archiveCRMAccount
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMTransition"}}}}
+      responses:
+        "200": {description: CRM account archived, content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccount"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/accounts/{id}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: reactivateCRMAccount
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMTransition"}}}}
+      responses:
+        "200": {description: CRM account reactivated, content: {application/json: {schema: {$ref: "#/components/schemas/CRMAccount"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/contacts:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: createCRMContact
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContactWrite"}}}}
+      responses:
+        "201": {description: CRM contact created, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContact"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+    get:
+      operationId: listCRMContacts
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/CRMRecordStatus"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200": {description: Bounded CRM contact page, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContactPage"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/contacts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: getCRMContact
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses:
+        "200": {description: One CRM contact, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContact"}}}}
+        "404": {$ref: "#/components/responses/ErrorResponse"}
+    put:
+      operationId: updateCRMContact
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContactUpdate"}}}}
+      responses:
+        "200": {description: CRM contact updated, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContact"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/contacts/{id}/archive:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: archiveCRMContact
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMTransition"}}}}
+      responses:
+        "200": {description: CRM contact archived, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContact"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/contacts/{id}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: reactivateCRMContact
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMTransition"}}}}
+      responses:
+        "200": {description: CRM contact reactivated, content: {application/json: {schema: {$ref: "#/components/schemas/CRMContact"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/activities:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: createCRMActivity
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMActivityWrite"}}}}
+      responses:
+        "201": {description: Immutable CRM activity recorded, content: {application/json: {schema: {$ref: "#/components/schemas/CRMActivity"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "404": {$ref: "#/components/responses/ErrorResponse"}
+    get:
+      operationId: listCRMActivities
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters:
+        - {name: subject_type, in: query, schema: {type: string, enum: [account, contact, opportunity]}}
+        - {name: subject_id, in: query, schema: {type: string}}
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200": {description: Bounded immutable activity page, content: {application/json: {schema: {$ref: "#/components/schemas/CRMActivityPage"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/opportunities:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: createCRMOpportunity
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunityWrite"}}}}
+      responses:
+        "201": {description: Lead opportunity created, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunity"}}}}
+        "400": {$ref: "#/components/responses/ErrorResponse"}
+        "404": {$ref: "#/components/responses/ErrorResponse"}
+    get:
+      operationId: listCRMOpportunities
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      parameters:
+        - $ref: "#/components/parameters/CRMOpportunityStage"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200": {description: Bounded opportunity page, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunityPage"}}}}
+  /api/v1/crm/opportunities/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    get:
+      operationId: getCRMOpportunity
+      x-required-permission: crm:read
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      responses:
+        "200": {description: One CRM opportunity, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunity"}}}}
+        "404": {$ref: "#/components/responses/ErrorResponse"}
+    put:
+      operationId: updateCRMOpportunity
+      x-required-permission: crm:write
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunityUpdate"}}}}
+      responses:
+        "200": {description: Nonterminal CRM opportunity updated, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunity"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+  /api/v1/crm/opportunities/{id}/advance:
+    parameters:
+      - $ref: "#/components/parameters/EntityId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationId"
+{{- end}}
+    post:
+      operationId: advanceCRMOpportunity
+      x-required-permission: crm:pipeline:manage
+      security: [{sessionCookie: []}, {bearerToken: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: "#/components/schemas/CRMStageTransition"}}}}
+      responses:
+        "200": {description: Opportunity advanced exactly one stage or lost, content: {application/json: {schema: {$ref: "#/components/schemas/CRMOpportunity"}}}}
+        "409": {$ref: "#/components/responses/ErrorResponse"}
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
 {{- if .Tenancy}}
@@ -1684,7 +1932,7 @@ components:
       required: true
       schema:
         type: string
-{{if or .Approvals .Catalog .CustomerAccounts}}
+{{if or .Approvals .Catalog .CustomerAccounts .CRM}}
     ApprovalStatus:
       name: status
       in: query
@@ -1720,6 +1968,16 @@ components:
       schema:
         type: string
         enum: [active, suspended, closed]
+{{end}}
+{{if .CRM}}
+    CRMRecordStatus:
+      name: status
+      in: query
+      schema: {type: string, enum: [active, archived]}
+    CRMOpportunityStage:
+      name: stage
+      in: query
+      schema: {type: string, enum: [lead, qualified, proposal, won, lost]}
 {{end}}
 {{if .Tenancy}}
     OrganizationId:
@@ -2270,6 +2528,166 @@ components:
             $ref: "#/components/schemas/CustomerAccount"
         next_cursor:
           type: string
+{{end}}
+{{if .CRM}}
+    CRMAccount:
+      type: object
+      required: [id, name, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        name: {type: string, minLength: 1, maxLength: 160}
+        status: {type: string, enum: [active, archived]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CRMAccountWrite:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+    CRMAccountUpdate:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 160}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CRMContact:
+      type: object
+      required: [id, name, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        email: {type: string, format: email, maxLength: 254}
+        phone: {type: string, maxLength: 64}
+        status: {type: string, enum: [active, archived]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CRMContactWrite:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        email: {type: string, format: email, maxLength: 254}
+        phone: {type: string, maxLength: 64}
+    CRMContactUpdate:
+      type: object
+      additionalProperties: false
+      required: [name, version]
+      properties:
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        email: {type: string, format: email, maxLength: 254}
+        phone: {type: string, maxLength: 64}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CRMActivity:
+      type: object
+      required: [id, subject_type, subject_id, type, summary, occurred_at, created_by, created_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        subject_type: {type: string, enum: [account, contact, opportunity]}
+        subject_id: {type: string}
+        type: {type: string, enum: [note, call, email, meeting]}
+        summary: {type: string, minLength: 1, maxLength: 4000}
+        occurred_at: {type: string, format: date-time}
+        created_by: {type: string}
+        created_at: {type: string, format: date-time}
+    CRMActivityWrite:
+      type: object
+      additionalProperties: false
+      required: [subject_type, subject_id, type, summary, occurred_at]
+      properties:
+        subject_type: {type: string, enum: [account, contact, opportunity]}
+        subject_id: {type: string}
+        type: {type: string, enum: [note, call, email, meeting]}
+        summary: {type: string, minLength: 1, maxLength: 4000}
+        occurred_at: {type: string, format: date-time}
+    CRMOpportunity:
+      type: object
+      required: [id, account_id, name, amount_minor, currency, stage, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id: {type: string}
+{{- if .Tenancy}}
+        organization_id: {type: string}
+{{- end}}
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        amount_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Z]{3}$"}
+        stage: {type: string, enum: [lead, qualified, proposal, won, lost]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CRMOpportunityWrite:
+      type: object
+      additionalProperties: false
+      required: [account_id, name, amount_minor, currency]
+      properties:
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        amount_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Za-z]{3}$"}
+    CRMOpportunityUpdate:
+      type: object
+      additionalProperties: false
+      required: [account_id, name, amount_minor, currency, version]
+      properties:
+        account_id: {type: string}
+        name: {type: string, minLength: 1, maxLength: 160}
+        amount_minor: {type: string, pattern: "^(0|[1-9][0-9]{0,18})$"}
+        currency: {type: string, pattern: "^[A-Za-z]{3}$"}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CRMTransition:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CRMStageTransition:
+      type: object
+      additionalProperties: false
+      required: [stage, version]
+      properties:
+        stage: {type: string, enum: [qualified, proposal, won, lost]}
+        version: {type: string, pattern: "^[1-9][0-9]*$"}
+    CRMAccountPage:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/CRMAccount"}}
+        next_cursor: {type: string}
+    CRMContactPage:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/CRMContact"}}
+        next_cursor: {type: string}
+    CRMActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/CRMActivity"}}
+        next_cursor: {type: string}
+    CRMOpportunityPage:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/CRMOpportunity"}}
+        next_cursor: {type: string}
 {{end}}
 {{if .Approvals}}
     ApprovalRequest:

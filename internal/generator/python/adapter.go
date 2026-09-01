@@ -249,6 +249,7 @@ type templateData struct {
 	Approvals             bool
 	Catalog               bool
 	CustomerAccounts      bool
+	CRM                   bool
 	CSVTransfer           bool
 }
 

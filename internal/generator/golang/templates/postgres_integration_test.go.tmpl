@@ -37,6 +37,10 @@ import (
 	"{{.ModulePath}}/internal/customeraccounts"
 	customerpostgres "{{.ModulePath}}/internal/customeraccounts/postgres"
 	{{- end}}
+	{{- if .CRM}}
+	"{{.ModulePath}}/internal/crm"
+	crmpostgres "{{.ModulePath}}/internal/crm/postgres"
+	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
 	{{- if .Cache}}
@@ -452,6 +456,96 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	var customerAuditCount int
 	if err := pool.QueryRow(ctx, `select count(*) from audit_events where target = $1 and action like 'customer%'`, customer.ID).Scan(&customerAuditCount); err != nil || customerAuditCount < 5 {
 		t.Fatalf("customer audit count = %d, %v, want at least 5", customerAuditCount, err)
+	}
+{{- end}}
+
+{{- if .CRM}}
+	for _, permission := range []string{"crm:read", "crm:write", "crm:pipeline:manage"} {
+		allowed, err := identityStore.HasPermission(ctx, "admin", permission)
+		if err != nil || !allowed {
+			t.Fatalf("HasPermission(admin, %s) = %t, %v", permission, allowed, err)
+		}
+		allowed, err = identityStore.HasPermission(ctx, "user", permission)
+		if err != nil || allowed {
+			t.Fatalf("HasPermission(user, %s) = %t, %v, want denied", permission, allowed, err)
+		}
+	}
+	crmStore := crmpostgres.New(pool)
+	rolledBackAccount := crm.Account{
+		ID: "crm-account-rolled-back", OrganizationID: organizationID, Name: "Rolled back",
+		Status: crm.StatusActive, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := crmStore.CreateAccount(ctx, rolledBackAccount, duplicateAudit); err == nil {
+		t.Fatal("CRM CreateAccount(duplicate audit) error = nil, want transaction failure")
+	}
+	if _, err := crmStore.GetAccount(ctx, organizationID, rolledBackAccount.ID); !errors.Is(err, crm.ErrNotFound) {
+		t.Fatalf("CRM GetAccount(rolled-back) error = %v, want ErrNotFound", err)
+	}
+	crmService := crm.NewService(crmStore)
+	crmActor := identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID}
+	account, err := crmService.CreateAccount(ctx, crm.AccountWrite{Name: " Integration Account "}, crmActor)
+	if err != nil || account.Name != "Integration Account" || account.Status != crm.StatusActive {
+		t.Fatalf("CRM CreateAccount() = %#v, %v", account, err)
+	}
+	contact, err := crmService.CreateContact(ctx, crm.ContactWrite{
+		AccountID: account.ID, Name: " Integration Contact ", Email: " CONTACT@EXAMPLE.COM ", Phone: " +1 555 ",
+	}, crmActor)
+	if err != nil || contact.Email != "contact@example.com" || contact.AccountID != account.ID {
+		t.Fatalf("CRM CreateContact() = %#v, %v", contact, err)
+	}
+	activity, err := crmService.CreateActivity(ctx, crm.ActivityWrite{
+		SubjectType: crm.SubjectContact, SubjectID: contact.ID, Type: crm.ActivityMeeting,
+		Summary: " Integration meeting ", OccurredAt: now.Add(-time.Hour),
+	}, crmActor)
+	if err != nil || activity.SubjectID != contact.ID || activity.Summary != "Integration meeting" {
+		t.Fatalf("CRM CreateActivity() = %#v, %v", activity, err)
+	}
+	opportunity, err := crmService.CreateOpportunity(ctx, crm.OpportunityWrite{
+		AccountID: account.ID, Name: " Integration Deal ", AmountMinor: "12500", Currency: "usd",
+	}, crmActor)
+	if err != nil || opportunity.Stage != crm.StageLead || opportunity.AmountMinor != 12500 || opportunity.Currency != "USD" {
+		t.Fatalf("CRM CreateOpportunity() = %#v, %v", opportunity, err)
+	}
+	if _, err := crmService.AdvanceOpportunity(ctx, opportunity.ID, crm.StageInput{Stage: crm.StageWon, Version: opportunity.Version}, crmActor); !errors.Is(err, crm.ErrConflict) {
+		t.Fatalf("CRM AdvanceOpportunity(skip) error = %v, want ErrConflict", err)
+	}
+	for _, stage := range []crm.OpportunityStage{crm.StageQualified, crm.StageProposal, crm.StageWon} {
+		opportunity, err = crmService.AdvanceOpportunity(ctx, opportunity.ID, crm.StageInput{Stage: stage, Version: opportunity.Version}, crmActor)
+		if err != nil || opportunity.Stage != stage {
+			t.Fatalf("CRM AdvanceOpportunity(%s) = %#v, %v", stage, opportunity, err)
+		}
+	}
+	if _, err := crmService.UpdateOpportunity(ctx, opportunity.ID, crm.OpportunityUpdate{
+		AccountID: account.ID, Name: opportunity.Name, AmountMinor: "1", Currency: "USD", Version: opportunity.Version,
+	}, crmActor); !errors.Is(err, crm.ErrConflict) {
+		t.Fatalf("CRM UpdateOpportunity(terminal) error = %v, want ErrConflict", err)
+	}
+	listedActivities, nextActivityCursor, err := crmStore.ListActivities(ctx, organizationID, crm.SubjectContact, contact.ID, "", 20)
+	if err != nil || len(listedActivities) != 1 || listedActivities[0].ID != activity.ID || nextActivityCursor != "" {
+		t.Fatalf("CRM ListActivities() = %#v, %q, %v", listedActivities, nextActivityCursor, err)
+	}
+{{- if .Tenancy}}
+	if _, err := crmStore.GetAccount(ctx, "different-organization", account.ID); !errors.Is(err, crm.ErrNotFound) {
+		t.Fatalf("CRM GetAccount(cross-organization) error = %v, want ErrNotFound", err)
+	}
+{{- end}}
+{{- if .TenancyLifecycle}}
+	if _, err := lifecycle.Deactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("CRM Deactivate() error = %v", err)
+	}
+	if _, err := crmService.GetAccount(ctx, account.ID, crmActor); !errors.Is(err, crm.ErrNotFound) {
+		t.Fatalf("CRM GetAccount(inactive organization) error = %v, want ErrNotFound", err)
+	}
+	if _, err := crmService.CreateAccount(ctx, crm.AccountWrite{Name: "Blocked"}, crmActor); !errors.Is(err, crm.ErrNotFound) {
+		t.Fatalf("CRM CreateAccount(inactive organization) error = %v, want ErrNotFound", err)
+	}
+	if _, err := lifecycle.Reactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("CRM Reactivate organization() error = %v", err)
+	}
+{{- end}}
+	var crmAuditCount int
+	if err := pool.QueryRow(ctx, `select count(*) from audit_events where action like 'crm:%'`).Scan(&crmAuditCount); err != nil || crmAuditCount < 7 {
+		t.Fatalf("CRM audit count = %d, %v, want at least 7", crmAuditCount, err)
 	}
 {{- end}}
 

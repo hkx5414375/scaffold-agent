@@ -1,0 +1,78 @@
+insert ignore into identity_permissions (code, description) values
+    ('crm:read', 'Read CRM accounts, contacts, activities, and opportunities'),
+    ('crm:write', 'Create and update CRM accounts, contacts, activities, and opportunities'),
+    ('crm:pipeline:manage', 'Advance CRM opportunity stages');
+
+insert ignore into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'crm:read'), ('admin', 'crm:write'), ('admin', 'crm:pipeline:manage');
+
+create table if not exists crm_accounts (
+    id varchar(191) primary key,
+    organization_id varchar(191){{if .Tenancy}} not null{{end}},
+    name varchar(160) not null,
+    status varchar(16) not null,
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+    constraint crm_accounts_status_ck check (status in ('active', 'archived')),
+    constraint crm_accounts_version_ck check (version > 0){{if .Tenancy}},
+    constraint crm_accounts_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index crm_accounts_scope_status_id_idx on crm_accounts ({{if .Tenancy}}organization_id, {{end}}status, id);
+
+create table if not exists crm_contacts (
+    id varchar(191) primary key,
+    organization_id varchar(191){{if .Tenancy}} not null{{end}},
+    account_id varchar(191),
+    name varchar(160) not null,
+    email varchar(254),
+    phone varchar(64),
+    status varchar(16) not null,
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+    constraint crm_contacts_status_ck check (status in ('active', 'archived')),
+    constraint crm_contacts_version_ck check (version > 0),
+    constraint crm_contacts_account_fk foreign key (account_id) references crm_accounts(id){{if .Tenancy}},
+    constraint crm_contacts_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}},
+    unique key crm_contacts_scope_email_uq ({{if .Tenancy}}organization_id, {{end}}email)
+);
+create index crm_contacts_scope_status_id_idx on crm_contacts ({{if .Tenancy}}organization_id, {{end}}status, id);
+create index crm_contacts_account_id_idx on crm_contacts (account_id, id);
+
+create table if not exists crm_opportunities (
+    id varchar(191) primary key,
+    organization_id varchar(191){{if .Tenancy}} not null{{end}},
+    account_id varchar(191) not null,
+    name varchar(160) not null,
+    amount_minor bigint not null,
+    currency char(3) not null,
+    stage varchar(16) not null,
+    version bigint not null,
+    created_at timestamp(6) not null,
+    updated_at timestamp(6) not null,
+    constraint crm_opportunities_amount_ck check (amount_minor >= 0),
+    constraint crm_opportunities_stage_ck check (stage in ('lead', 'qualified', 'proposal', 'won', 'lost')),
+    constraint crm_opportunities_version_ck check (version > 0),
+    constraint crm_opportunities_account_fk foreign key (account_id) references crm_accounts(id){{if .Tenancy}},
+    constraint crm_opportunities_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index crm_opportunities_scope_stage_id_idx on crm_opportunities ({{if .Tenancy}}organization_id, {{end}}stage, id);
+create index crm_opportunities_account_id_idx on crm_opportunities (account_id, id);
+
+create table if not exists crm_activities (
+    id varchar(191) primary key,
+    organization_id varchar(191){{if .Tenancy}} not null{{end}},
+    subject_type varchar(16) not null,
+    subject_id varchar(191) not null,
+    activity_type varchar(16) not null,
+    summary text not null,
+    occurred_at timestamp(6) not null,
+    created_by varchar(191) not null,
+    created_at timestamp(6) not null,
+    constraint crm_activities_subject_ck check (subject_type in ('account', 'contact', 'opportunity')),
+    constraint crm_activities_type_ck check (activity_type in ('note', 'call', 'email', 'meeting')),
+    constraint crm_activities_creator_fk foreign key (created_by) references identity_users(id){{if .Tenancy}},
+    constraint crm_activities_organization_fk foreign key (organization_id) references organizations(id) on delete cascade{{end}}
+);
+create index crm_activities_scope_subject_id_idx on crm_activities ({{if .Tenancy}}organization_id, {{end}}subject_type, subject_id, id);

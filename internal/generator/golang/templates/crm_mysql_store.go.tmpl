@@ -1,0 +1,547 @@
+// Package mysql persists CRM core records in MySQL.
+package mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
+
+	"{{.ModulePath}}/internal/crm"
+	"{{.ModulePath}}/internal/identity"
+)
+
+// Store is the MySQL CRM repository.
+type Store struct{ database *sql.DB }
+
+// New returns a MySQL CRM store.
+func New(database *sql.DB) *Store { return &Store{database: database} }
+
+func (store *Store) CreateAccount(ctx context.Context, value crm.Account, audit identity.AuditEvent) error {
+	return store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, value.OrganizationID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `insert into crm_accounts
+			(id, organization_id, name, status, version, created_at, updated_at)
+			values (?, ?, ?, ?, ?, ?, ?)`, value.ID, nullable(value.OrganizationID), value.Name,
+			value.Status, value.Version, value.CreatedAt, value.UpdatedAt)
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+}
+
+func (store *Store) GetAccount(ctx context.Context, scope, id string) (crm.Account, error) {
+	return scanAccount(store.database.QueryRowContext(ctx, accountSelect+`
+		where account.id = ? and coalesce(account.organization_id, '') = ?`+activeScopePredicate("account"), id, scope))
+}
+
+func (store *Store) ListAccounts(ctx context.Context, scope string, status crm.RecordStatus, cursor string, limit int) ([]crm.Account, string, error) {
+	rows, err := store.database.QueryContext(ctx, accountSelect+`
+		where coalesce(account.organization_id, '') = ? and (? = '' or account.status = ?)
+			and (? = '' or account.id > ?)`+activeScopePredicate("account")+`
+		order by account.id limit ?`, scope, status, status, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query CRM accounts: %w", err)
+	}
+	defer rows.Close()
+	items := make([]crm.Account, 0, limit+1)
+	for rows.Next() {
+		value, scanErr := scanAccount(rows)
+		if scanErr != nil {
+			return nil, "", scanErr
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate CRM accounts: %w", err)
+	}
+	return accountPage(items, limit)
+}
+
+func (store *Store) UpdateAccount(ctx context.Context, scope, id, name string, version int64, now time.Time, audit identity.AuditEvent) (crm.Account, error) {
+	var value crm.Account
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_accounts set name=?, version=version+1, updated_at=?
+			where id=? and coalesce(organization_id, '')=? and version=? and status='active'`, name, now, id, scope, version)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getAccount(ctx, tx, scope, id)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+func (store *Store) TransitionAccount(ctx context.Context, scope, id string, version int64, from, to crm.RecordStatus, now time.Time, audit identity.AuditEvent) (crm.Account, error) {
+	var value crm.Account
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_accounts set status=?, version=version+1, updated_at=?
+			where id=? and coalesce(organization_id, '')=? and version=? and status=?`, to, now, id, scope, version, from)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getAccount(ctx, tx, scope, id)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+func (store *Store) CreateContact(ctx context.Context, value crm.Contact, audit identity.AuditEvent) error {
+	return store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, value.OrganizationID); err != nil {
+			return err
+		}
+		if err := requireActiveAccount(ctx, tx, value.OrganizationID, value.AccountID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `insert into crm_contacts
+			(id, organization_id, account_id, name, email, phone, status, version, created_at, updated_at)
+			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, value.ID, nullable(value.OrganizationID), nullable(value.AccountID),
+			value.Name, nullable(value.Email), nullable(value.Phone), value.Status, value.Version, value.CreatedAt, value.UpdatedAt)
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+}
+
+func (store *Store) GetContact(ctx context.Context, scope, id string) (crm.Contact, error) {
+	return scanContact(store.database.QueryRowContext(ctx, contactSelect+`
+		where contact.id=? and coalesce(contact.organization_id, '')=?`+activeScopePredicate("contact"), id, scope))
+}
+
+func (store *Store) ListContacts(ctx context.Context, scope string, status crm.RecordStatus, cursor string, limit int) ([]crm.Contact, string, error) {
+	rows, err := store.database.QueryContext(ctx, contactSelect+`
+		where coalesce(contact.organization_id, '')=? and (?='' or contact.status=?)
+			and (?='' or contact.id>?)`+activeScopePredicate("contact")+`
+		order by contact.id limit ?`, scope, status, status, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query CRM contacts: %w", err)
+	}
+	defer rows.Close()
+	items := make([]crm.Contact, 0, limit+1)
+	for rows.Next() {
+		value, scanErr := scanContact(rows)
+		if scanErr != nil {
+			return nil, "", scanErr
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate CRM contacts: %w", err)
+	}
+	return contactPage(items, limit)
+}
+
+func (store *Store) UpdateContact(ctx context.Context, scope string, value crm.Contact, version int64, now time.Time, audit identity.AuditEvent) (crm.Contact, error) {
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		if err := requireActiveAccount(ctx, tx, scope, value.AccountID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_contacts set account_id=?, name=?, email=?, phone=?,
+			version=version+1, updated_at=? where id=? and coalesce(organization_id, '')=? and version=? and status='active'`,
+			nullable(value.AccountID), value.Name, nullable(value.Email), nullable(value.Phone), now, value.ID, scope, version)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getContact(ctx, tx, scope, value.ID)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+func (store *Store) TransitionContact(ctx context.Context, scope, id string, version int64, from, to crm.RecordStatus, now time.Time, audit identity.AuditEvent) (crm.Contact, error) {
+	var value crm.Contact
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_contacts set status=?, version=version+1, updated_at=?
+			where id=? and coalesce(organization_id, '')=? and version=? and status=?`, to, now, id, scope, version, from)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getContact(ctx, tx, scope, id)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+func (store *Store) CreateActivity(ctx context.Context, value crm.Activity, audit identity.AuditEvent) error {
+	return store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, value.OrganizationID); err != nil {
+			return err
+		}
+		if err := requireSubject(ctx, tx, value.OrganizationID, value.SubjectType, value.SubjectID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `insert into crm_activities
+			(id, organization_id, subject_type, subject_id, activity_type, summary, occurred_at, created_by, created_at)
+			values (?, ?, ?, ?, ?, ?, ?, ?, ?)`, value.ID, nullable(value.OrganizationID), value.SubjectType,
+			value.SubjectID, value.Type, value.Summary, value.OccurredAt, value.CreatedBy, value.CreatedAt)
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+}
+
+func (store *Store) ListActivities(ctx context.Context, scope string, subjectType crm.SubjectType, subjectID, cursor string, limit int) ([]crm.Activity, string, error) {
+	rows, err := store.database.QueryContext(ctx, activitySelect+`
+		where coalesce(activity.organization_id, '')=? and (?='' or activity.subject_type=?)
+			and (?='' or activity.subject_id=?) and (?='' or activity.id>?)`+activeScopePredicate("activity")+`
+		order by activity.id limit ?`, scope, subjectType, subjectType, subjectID, subjectID, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query CRM activities: %w", err)
+	}
+	defer rows.Close()
+	items := make([]crm.Activity, 0, limit+1)
+	for rows.Next() {
+		value, scanErr := scanActivity(rows)
+		if scanErr != nil {
+			return nil, "", scanErr
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate CRM activities: %w", err)
+	}
+	return activityPage(items, limit)
+}
+
+func (store *Store) CreateOpportunity(ctx context.Context, value crm.Opportunity, audit identity.AuditEvent) error {
+	return store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, value.OrganizationID); err != nil {
+			return err
+		}
+		if err := requireActiveAccount(ctx, tx, value.OrganizationID, value.AccountID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `insert into crm_opportunities
+			(id, organization_id, account_id, name, amount_minor, currency, stage, version, created_at, updated_at)
+			values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, value.ID, nullable(value.OrganizationID), value.AccountID,
+			value.Name, value.AmountMinor, value.Currency, value.Stage, value.Version, value.CreatedAt, value.UpdatedAt)
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+}
+
+func (store *Store) GetOpportunity(ctx context.Context, scope, id string) (crm.Opportunity, error) {
+	return scanOpportunity(store.database.QueryRowContext(ctx, opportunitySelect+`
+		where opportunity.id=? and coalesce(opportunity.organization_id, '')=?`+activeScopePredicate("opportunity"), id, scope))
+}
+
+func (store *Store) ListOpportunities(ctx context.Context, scope string, stage crm.OpportunityStage, cursor string, limit int) ([]crm.Opportunity, string, error) {
+	rows, err := store.database.QueryContext(ctx, opportunitySelect+`
+		where coalesce(opportunity.organization_id, '')=? and (?='' or opportunity.stage=?)
+			and (?='' or opportunity.id>?)`+activeScopePredicate("opportunity")+`
+		order by opportunity.id limit ?`, scope, stage, stage, cursor, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query CRM opportunities: %w", err)
+	}
+	defer rows.Close()
+	items := make([]crm.Opportunity, 0, limit+1)
+	for rows.Next() {
+		value, scanErr := scanOpportunity(rows)
+		if scanErr != nil {
+			return nil, "", scanErr
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("iterate CRM opportunities: %w", err)
+	}
+	return opportunityPage(items, limit)
+}
+
+func (store *Store) UpdateOpportunity(ctx context.Context, scope string, value crm.Opportunity, version int64, now time.Time, audit identity.AuditEvent) (crm.Opportunity, error) {
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		if err := requireActiveAccount(ctx, tx, scope, value.AccountID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_opportunities set account_id=?, name=?, amount_minor=?, currency=?,
+			version=version+1, updated_at=? where id=? and coalesce(organization_id, '')=? and version=?
+			and stage not in ('won','lost')`, value.AccountID, value.Name, value.AmountMinor, value.Currency,
+			now, value.ID, scope, version)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getOpportunity(ctx, tx, scope, value.ID)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+func (store *Store) AdvanceOpportunity(ctx context.Context, scope, id string, version int64, from, to crm.OpportunityStage, now time.Time, audit identity.AuditEvent) (crm.Opportunity, error) {
+	var value crm.Opportunity
+	err := store.mutate(ctx, func(tx *sql.Tx) error {
+		if err := requireActiveScope(ctx, tx, scope); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `update crm_opportunities set stage=?, version=version+1, updated_at=?
+			where id=? and coalesce(organization_id, '')=? and version=? and stage=?`, to, now, id, scope, version, from)
+		if err != nil {
+			return persistenceError(err)
+		}
+		if err := requireMutation(result); err != nil {
+			return err
+		}
+		value, err = getOpportunity(ctx, tx, scope, id)
+		if err != nil {
+			return err
+		}
+		return appendAudit(ctx, tx, audit)
+	})
+	return value, err
+}
+
+const accountSelect = `select account.id, coalesce(account.organization_id, ''), account.name,
+	account.status, account.version, account.created_at, account.updated_at from crm_accounts account`
+const contactSelect = `select contact.id, coalesce(contact.organization_id, ''), coalesce(contact.account_id, ''),
+	contact.name, coalesce(contact.email, ''), coalesce(contact.phone, ''), contact.status, contact.version,
+	contact.created_at, contact.updated_at from crm_contacts contact`
+const activitySelect = `select activity.id, coalesce(activity.organization_id, ''), activity.subject_type,
+	activity.subject_id, activity.activity_type, activity.summary, activity.occurred_at, activity.created_by,
+	activity.created_at from crm_activities activity`
+const opportunitySelect = `select opportunity.id, coalesce(opportunity.organization_id, ''), opportunity.account_id,
+	opportunity.name, opportunity.amount_minor, opportunity.currency, opportunity.stage, opportunity.version,
+	opportunity.created_at, opportunity.updated_at from crm_opportunities opportunity`
+
+func activeScopePredicate(alias string) string {
+{{- if .Tenancy}}
+	return ` and exists (select 1 from organizations organization where organization.id=` + alias + `.organization_id and organization.status='active')`
+{{- else}}
+	return ""
+{{- end}}
+}
+
+func requireActiveScope(ctx context.Context, tx *sql.Tx, scope string) error {
+{{- if .Tenancy}}
+	var id string
+	if err := tx.QueryRowContext(ctx, `select id from organizations where id=? and status='active' for update`, scope).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return crm.ErrNotFound
+		}
+		return fmt.Errorf("lock CRM organization scope: %w", err)
+	}
+{{- end}}
+	return nil
+}
+
+func requireActiveAccount(ctx context.Context, tx *sql.Tx, scope, id string) error {
+	if id == "" {
+		return nil
+	}
+	var found string
+	if err := tx.QueryRowContext(ctx, `select id from crm_accounts where id=? and coalesce(organization_id, '')=? and status='active' for update`, id, scope).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return crm.ErrNotFound
+		}
+		return fmt.Errorf("lock CRM account: %w", err)
+	}
+	return nil
+}
+
+func requireSubject(ctx context.Context, tx *sql.Tx, scope string, subjectType crm.SubjectType, id string) error {
+	table := map[crm.SubjectType]string{crm.SubjectAccount: "crm_accounts", crm.SubjectContact: "crm_contacts", crm.SubjectOpportunity: "crm_opportunities"}[subjectType]
+	var found string
+	query := `select id from ` + table + ` where id=? and coalesce(organization_id, '')=? for update`
+	if err := tx.QueryRowContext(ctx, query, id, scope).Scan(&found); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return crm.ErrNotFound
+		}
+		return fmt.Errorf("lock CRM activity subject: %w", err)
+	}
+	return nil
+}
+
+func getAccount(ctx context.Context, tx *sql.Tx, scope, id string) (crm.Account, error) {
+	return scanAccount(tx.QueryRowContext(ctx, accountSelect+` where account.id=? and coalesce(account.organization_id, '')=?`, id, scope))
+}
+
+func getContact(ctx context.Context, tx *sql.Tx, scope, id string) (crm.Contact, error) {
+	return scanContact(tx.QueryRowContext(ctx, contactSelect+` where contact.id=? and coalesce(contact.organization_id, '')=?`, id, scope))
+}
+
+func getOpportunity(ctx context.Context, tx *sql.Tx, scope, id string) (crm.Opportunity, error) {
+	return scanOpportunity(tx.QueryRowContext(ctx, opportunitySelect+` where opportunity.id=? and coalesce(opportunity.organization_id, '')=?`, id, scope))
+}
+
+func (store *Store) mutate(ctx context.Context, operation func(*sql.Tx) error) error {
+	tx, err := store.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin CRM mutation: %w", err)
+	}
+	if err := operation(tx); err != nil {
+		return rollback(tx, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit CRM mutation: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, tx *sql.Tx, event identity.AuditEvent) error {
+	_, err := tx.ExecContext(ctx, `insert into audit_events
+		(id,user_id,action,outcome,target,ip_address,user_agent,created_at)
+		values (?,nullif(?,''),?,?,nullif(?,''),nullif(?,''),nullif(?,''),?)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target, event.IPAddress, event.UserAgent, event.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("append CRM audit event: %w", err)
+	}
+	return nil
+}
+
+func requireMutation(result sql.Result) error {
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect CRM mutation: %w", err)
+	}
+	if count != 1 {
+		return crm.ErrConflict
+	}
+	return nil
+}
+
+type rowScanner interface{ Scan(...any) error }
+
+func scanAccount(row rowScanner) (crm.Account, error) {
+	var value crm.Account
+	if err := row.Scan(&value.ID, &value.OrganizationID, &value.Name, &value.Status, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+		return crm.Account{}, scanError("account", err)
+	}
+	return value, nil
+}
+
+func scanContact(row rowScanner) (crm.Contact, error) {
+	var value crm.Contact
+	if err := row.Scan(&value.ID, &value.OrganizationID, &value.AccountID, &value.Name, &value.Email, &value.Phone, &value.Status, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+		return crm.Contact{}, scanError("contact", err)
+	}
+	return value, nil
+}
+
+func scanActivity(row rowScanner) (crm.Activity, error) {
+	var value crm.Activity
+	if err := row.Scan(&value.ID, &value.OrganizationID, &value.SubjectType, &value.SubjectID, &value.Type, &value.Summary, &value.OccurredAt, &value.CreatedBy, &value.CreatedAt); err != nil {
+		return crm.Activity{}, scanError("activity", err)
+	}
+	return value, nil
+}
+
+func scanOpportunity(row rowScanner) (crm.Opportunity, error) {
+	var value crm.Opportunity
+	if err := row.Scan(&value.ID, &value.OrganizationID, &value.AccountID, &value.Name, &value.AmountMinor, &value.Currency, &value.Stage, &value.Version, &value.CreatedAt, &value.UpdatedAt); err != nil {
+		return crm.Opportunity{}, scanError("opportunity", err)
+	}
+	return value, nil
+}
+
+func scanError(kind string, err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return crm.ErrNotFound
+	}
+	return fmt.Errorf("scan CRM %s: %w", kind, err)
+}
+
+func accountPage(items []crm.Account, limit int) ([]crm.Account, string, error) {
+	if len(items) <= limit {
+		return items, "", nil
+	}
+	return items[:limit], items[limit-1].ID, nil
+}
+
+func contactPage(items []crm.Contact, limit int) ([]crm.Contact, string, error) {
+	if len(items) <= limit {
+		return items, "", nil
+	}
+	return items[:limit], items[limit-1].ID, nil
+}
+
+func activityPage(items []crm.Activity, limit int) ([]crm.Activity, string, error) {
+	if len(items) <= limit {
+		return items, "", nil
+	}
+	return items[:limit], items[limit-1].ID, nil
+}
+
+func opportunityPage(items []crm.Opportunity, limit int) ([]crm.Opportunity, string, error) {
+	if len(items) <= limit {
+		return items, "", nil
+	}
+	return items[:limit], items[limit-1].ID, nil
+}
+
+func nullable(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func persistenceError(err error) error {
+	var databaseError *mysqldriver.MySQLError
+	if errors.As(err, &databaseError) && databaseError.Number == 1062 {
+		return crm.ErrConflict
+	}
+	return err
+}
+
+func rollback(tx *sql.Tx, cause error) error {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return errors.Join(cause, fmt.Errorf("roll back CRM mutation: %w", err))
+	}
+	return cause
+}
+
+var _ crm.Store = (*Store)(nil)

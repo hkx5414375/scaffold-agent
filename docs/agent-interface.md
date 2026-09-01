@@ -173,6 +173,19 @@ invent email verification or password recovery until a notification-dependent
 capability supplies those workflows, and must not merge customer identity into
 staff roles, staff tokens, or staff cookies.
 
+Selecting `crm-core` version `0.1.0` with the Go adapter generates business
+accounts, contacts, immutable activities, forward-only opportunities,
+PostgreSQL or MySQL persistence, OpenAPI, permission-protected routes, and the
+shared Vue administration view. Business accounts are not tenancy
+organizations, and contacts do not become staff or storefront customers.
+Amounts use minor units and decimal JSON strings. Opportunities advance only
+through `lead`, `qualified`, `proposal`, and `won`; any nonterminal stage may
+move to terminal `lost`. Tenant projects require `organization-tenancy`
+`0.3.0`, and inactive organizations cannot read or write CRM records. Agents
+must reuse `crm:read`, `crm:write`, and `crm:pipeline:manage`, keep activities
+immutable, and never skip pipeline stages. Java and Python reject this
+capability until their parity implementations are complete.
+
 ## STDIO protocol
 
 Run the server with:

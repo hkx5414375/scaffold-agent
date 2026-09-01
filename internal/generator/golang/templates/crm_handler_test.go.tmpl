@@ -1,0 +1,40 @@
+package httpapi
+
+import (
+	"errors"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"{{.ModulePath}}/internal/crm"
+)
+
+func TestCRMErrorContractIsStable(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "invalid", err: crm.ErrInvalidInput, status: 400, code: "crm.invalid"},
+		{name: "missing", err: crm.ErrNotFound, status: 404, code: "crm.not_found"},
+		{name: "conflict", err: crm.ErrConflict, status: 409, code: "crm.conflict"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handleError(response, "test CRM", errors.Join(errors.New("wrapped"), test.err))
+			if response.Code != test.status || !strings.Contains(response.Body.String(), test.code) {
+				t.Fatalf("response = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestCRMPageLimitRejectsNonInteger(t *testing.T) {
+	request := httptest.NewRequest("GET", "/api/v1/crm/accounts?limit=many", nil)
+	response := httptest.NewRecorder()
+	if _, ok := pageLimit(response, request); ok || response.Code != 400 || !strings.Contains(response.Body.String(), "request.invalid") {
+		t.Fatalf("pageLimit response = %d %s", response.Code, response.Body.String())
+	}
+}

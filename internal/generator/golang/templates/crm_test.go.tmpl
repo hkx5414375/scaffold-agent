@@ -1,0 +1,171 @@
+package crm
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestServiceNormalizesCRMRecordsAndAuditsMutations(t *testing.T) {
+	store := &recordingStore{}
+	service := NewService(store)
+	now := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "org-1"{{end}}}
+
+	account, err := service.CreateAccount(context.Background(), AccountWrite{Name: "  Acme  "}, actor)
+	if err != nil || account.Name != "Acme" || account.Status != StatusActive || account.Version != 1 {
+		t.Fatalf("CreateAccount() = %#v, %v", account, err)
+	}
+	contact, err := service.CreateContact(context.Background(), ContactWrite{
+		AccountID: account.ID, Name: "  Alice  ", Email: " ALICE@EXAMPLE.COM ", Phone: " +1 555 ",
+	}, actor)
+	if err != nil || contact.Email != "alice@example.com" || contact.Name != "Alice" || contact.Phone != "+1 555" {
+		t.Fatalf("CreateContact() = %#v, %v", contact, err)
+	}
+	activity, err := service.CreateActivity(context.Background(), ActivityWrite{
+		SubjectType: SubjectAccount, SubjectID: account.ID, Type: ActivityCall,
+		Summary: "  Discovery call  ", OccurredAt: now.Add(-time.Hour),
+	}, actor)
+	if err != nil || activity.Summary != "Discovery call" || activity.CreatedBy != actor.UserID {
+		t.Fatalf("CreateActivity() = %#v, %v", activity, err)
+	}
+	opportunity, err := service.CreateOpportunity(context.Background(), OpportunityWrite{
+		AccountID: account.ID, Name: "  Renewal  ", AmountMinor: "12500", Currency: "usd",
+	}, actor)
+	if err != nil || opportunity.AmountMinor != 12500 || opportunity.Currency != "USD" || opportunity.Stage != StageLead {
+		t.Fatalf("CreateOpportunity() = %#v, %v", opportunity, err)
+	}
+	if len(store.audits) != 4 || store.audits[0].Action != "crm:accounts:create" || store.audits[3].Action != "crm:opportunities:create" {
+		t.Fatalf("audit events = %#v", store.audits)
+	}
+}
+
+func TestServiceEnforcesForwardOnlyOpportunityPipeline(t *testing.T) {
+	store := &recordingStore{opportunity: Opportunity{ID: "deal-1", Stage: StageLead, Version: 1}}
+	service := NewService(store)
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "org-1"{{end}}}
+
+	advanced, err := service.AdvanceOpportunity(context.Background(), "deal-1", StageInput{Stage: StageQualified, Version: 1}, actor)
+	if err != nil || advanced.Stage != StageQualified || advanced.Version != 2 {
+		t.Fatalf("AdvanceOpportunity() = %#v, %v", advanced, err)
+	}
+	store.opportunity = advanced
+	_, err = service.AdvanceOpportunity(context.Background(), "deal-1", StageInput{Stage: StageWon, Version: 2}, actor)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("AdvanceOpportunity(skip stage) error = %v", err)
+	}
+	store.opportunity.Stage = StageProposal
+	store.opportunity.Version = 3
+	closed, err := service.AdvanceOpportunity(context.Background(), "deal-1", StageInput{Stage: StageLost, Version: 3}, actor)
+	if err != nil || closed.Stage != StageLost {
+		t.Fatalf("AdvanceOpportunity(lost) = %#v, %v", closed, err)
+	}
+	store.opportunity = closed
+	_, err = service.AdvanceOpportunity(context.Background(), "deal-1", StageInput{Stage: StageWon, Version: closed.Version}, actor)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("AdvanceOpportunity(terminal) error = %v", err)
+	}
+}
+
+func TestServiceRejectsInvalidPortableInput(t *testing.T) {
+	service := NewService(&recordingStore{})
+	actor := identity.Principal{UserID: "user-1"{{if .Tenancy}}, OrganizationID: "org-1"{{end}}}
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "email", run: func() error { _, err := service.CreateContact(context.Background(), ContactWrite{Name: "Alice", Email: "broken"}, actor); return err }},
+		{name: "amount", run: func() error { _, err := service.CreateOpportunity(context.Background(), OpportunityWrite{AccountID: "account-1", Name: "Deal", AmountMinor: "01", Currency: "USD"}, actor); return err }},
+		{name: "currency", run: func() error { _, err := service.CreateOpportunity(context.Background(), OpportunityWrite{AccountID: "account-1", Name: "Deal", AmountMinor: "1", Currency: "US1"}, actor); return err }},
+		{name: "activity pair", run: func() error { _, err := service.ListActivities(context.Background(), SubjectAccount, "", "", 20, actor); return err }},
+		{name: "page", run: func() error { _, err := service.ListAccounts(context.Background(), "", "", 101, actor); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.run(); !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+type recordingStore struct {
+	audits      []identity.AuditEvent
+	opportunity Opportunity
+}
+
+func (store *recordingStore) record(event identity.AuditEvent) { store.audits = append(store.audits, event) }
+func (store *recordingStore) CreateAccount(_ context.Context, _ Account, event identity.AuditEvent) error {
+	store.record(event)
+	return nil
+}
+func (store *recordingStore) GetAccount(context.Context, string, string) (Account, error) {
+	return Account{}, ErrNotFound
+}
+func (store *recordingStore) ListAccounts(context.Context, string, RecordStatus, string, int) ([]Account, string, error) {
+	return []Account{}, "", nil
+}
+func (store *recordingStore) UpdateAccount(_ context.Context, _ string, id, name string, version int64, now time.Time, event identity.AuditEvent) (Account, error) {
+	store.record(event)
+	return Account{ID: id, Name: name, Status: StatusActive, Version: version + 1, UpdatedAt: now}, nil
+}
+func (store *recordingStore) TransitionAccount(_ context.Context, _ string, id string, version int64, _ RecordStatus, to RecordStatus, now time.Time, event identity.AuditEvent) (Account, error) {
+	store.record(event)
+	return Account{ID: id, Status: to, Version: version + 1, UpdatedAt: now}, nil
+}
+func (store *recordingStore) CreateContact(_ context.Context, _ Contact, event identity.AuditEvent) error {
+	store.record(event)
+	return nil
+}
+func (store *recordingStore) GetContact(context.Context, string, string) (Contact, error) {
+	return Contact{}, ErrNotFound
+}
+func (store *recordingStore) ListContacts(context.Context, string, RecordStatus, string, int) ([]Contact, string, error) {
+	return []Contact{}, "", nil
+}
+func (store *recordingStore) UpdateContact(_ context.Context, _ string, value Contact, version int64, now time.Time, event identity.AuditEvent) (Contact, error) {
+	store.record(event)
+	value.Version, value.UpdatedAt = version+1, now
+	return value, nil
+}
+func (store *recordingStore) TransitionContact(_ context.Context, _ string, id string, version int64, _ RecordStatus, to RecordStatus, now time.Time, event identity.AuditEvent) (Contact, error) {
+	store.record(event)
+	return Contact{ID: id, Status: to, Version: version + 1, UpdatedAt: now}, nil
+}
+func (store *recordingStore) CreateActivity(_ context.Context, _ Activity, event identity.AuditEvent) error {
+	store.record(event)
+	return nil
+}
+func (store *recordingStore) ListActivities(context.Context, string, SubjectType, string, string, int) ([]Activity, string, error) {
+	return []Activity{}, "", nil
+}
+func (store *recordingStore) CreateOpportunity(_ context.Context, value Opportunity, event identity.AuditEvent) error {
+	store.record(event)
+	store.opportunity = value
+	return nil
+}
+func (store *recordingStore) GetOpportunity(context.Context, string, string) (Opportunity, error) {
+	if store.opportunity.ID == "" {
+		return Opportunity{}, ErrNotFound
+	}
+	return store.opportunity, nil
+}
+func (store *recordingStore) ListOpportunities(context.Context, string, OpportunityStage, string, int) ([]Opportunity, string, error) {
+	return []Opportunity{}, "", nil
+}
+func (store *recordingStore) UpdateOpportunity(_ context.Context, _ string, value Opportunity, version int64, now time.Time, event identity.AuditEvent) (Opportunity, error) {
+	store.record(event)
+	value.Version, value.UpdatedAt = version+1, now
+	return value, nil
+}
+func (store *recordingStore) AdvanceOpportunity(_ context.Context, _ string, id string, version int64, _ OpportunityStage, to OpportunityStage, now time.Time, event identity.AuditEvent) (Opportunity, error) {
+	store.record(event)
+	store.opportunity = Opportunity{ID: id, Stage: to, Version: version + 1, UpdatedAt: now}
+	return store.opportunity, nil
+}
+
+var _ Store = (*recordingStore)(nil)

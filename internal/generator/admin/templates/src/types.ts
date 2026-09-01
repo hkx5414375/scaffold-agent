@@ -174,6 +174,66 @@ export interface CustomerPage {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .CRM}}
+
+export type CRMRecordStatus = "active" | "archived";
+export type CRMOpportunityStage = "lead" | "qualified" | "proposal" | "won" | "lost";
+export type CRMActivityType = "note" | "call" | "email" | "meeting";
+export type CRMSubjectType = "account" | "contact" | "opportunity";
+
+export interface CRMAccount {
+  id: string;
+  organization_id?: string;
+  name: string;
+  status: CRMRecordStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CRMContact {
+  id: string;
+  organization_id?: string;
+  account_id?: string;
+  name: string;
+  email?: string;
+  phone?: string;
+  status: CRMRecordStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CRMOpportunity {
+  id: string;
+  organization_id?: string;
+  account_id: string;
+  name: string;
+  amount_minor: string;
+  currency: string;
+  stage: CRMOpportunityStage;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CRMActivity {
+  id: string;
+  organization_id?: string;
+  subject_type: CRMSubjectType;
+  subject_id: string;
+  type: CRMActivityType;
+  summary: string;
+  occurred_at: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface CRMPage<T> {
+  items: T[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

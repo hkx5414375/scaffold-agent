@@ -34,6 +34,11 @@ import (
 	customerhttp "{{.ModulePath}}/internal/customeraccounts/httpapi"
 	customerdatabase "{{.ModulePath}}/internal/customeraccounts/{{.Database.PackageName}}"
 {{- end}}
+{{- if .CRM}}
+	"{{.ModulePath}}/internal/crm"
+	crmhttp "{{.ModulePath}}/internal/crm/httpapi"
+	crmdatabase "{{.ModulePath}}/internal/crm/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Files}}
 	"{{.ModulePath}}/internal/files"
 	fileshttp "{{.ModulePath}}/internal/files/httpapi"
@@ -138,6 +143,10 @@ func run() error {
 	customerService := customeraccounts.NewService(customerdatabase.New(pool))
 	customerAPI := customerhttp.New(customerService, secureCookies)
 {{- end}}
+{{- if .CRM}}
+	crmService := crm.NewService(crmdatabase.New(pool))
+	crmAPI := crmhttp.New(crmService)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -174,6 +183,9 @@ func run() error {
 {{- end}}
 {{- if .CustomerAccounts}}
 		customerAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .CRM}}
+		crmAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .JobAdmin}}
 		jobAdminAPI.Register(mux, identityAPI)

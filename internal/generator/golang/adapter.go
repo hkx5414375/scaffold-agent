@@ -55,6 +55,8 @@ const (
 	catalogVersion          = "0.1.0"
 	customerCapability      = "customer-accounts"
 	customerVersion         = "0.1.0"
+	crmCapability           = "crm-core"
+	crmVersion              = "0.1.0"
 )
 
 //go:embed all:templates
@@ -129,6 +131,9 @@ type databaseTemplateSet struct {
 	CustomerStorePath                 string
 	CustomerStoreTemplate             string
 	CustomerMigrationTemplate         string
+	CRMStorePath                      string
+	CRMStoreTemplate                  string
+	CRMMigrationTemplate              string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -180,6 +185,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CustomerStorePath:                 "internal/customeraccounts/postgres/store.go",
 		CustomerStoreTemplate:             "templates/customer_accounts_postgres_store.go.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_postgres.sql.tmpl",
+		CRMStorePath:                      "internal/crm/postgres/store.go",
+		CRMStoreTemplate:                  "templates/crm_postgres_store.go.tmpl",
+		CRMMigrationTemplate:              "templates/crm_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -230,6 +238,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		CustomerStorePath:                 "internal/customeraccounts/mysql/store.go",
 		CustomerStoreTemplate:             "templates/customer_accounts_mysql_store.go.tmpl",
 		CustomerMigrationTemplate:         "templates/customer_accounts_mysql.sql.tmpl",
+		CRMStorePath:                      "internal/crm/mysql/store.go",
+		CRMStoreTemplate:                  "templates/crm_mysql_store.go.tmpl",
+		CRMMigrationTemplate:              "templates/crm_mysql.sql.tmpl",
 	},
 }
 
@@ -366,6 +377,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: crmCapability, Version: crmVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable CRM accounts, contacts, immutable activities, and forward-only opportunities",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -461,6 +482,13 @@ var customerTemplates = map[string]string{
 	"internal/customeraccounts/httpapi/handler_test.go": "templates/customer_accounts_handler_test.go.tmpl",
 }
 
+var crmTemplates = map[string]string{
+	"internal/crm/crm.go":                  "templates/crm.go.tmpl",
+	"internal/crm/crm_test.go":             "templates/crm_test.go.tmpl",
+	"internal/crm/httpapi/handler.go":      "templates/crm_handler.go.tmpl",
+	"internal/crm/httpapi/handler_test.go": "templates/crm_handler_test.go.tmpl",
+}
+
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -514,6 +542,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	approvalsEnabled := false
 	catalogEnabled := false
 	customerEnabled := false
+	crmEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -555,12 +584,18 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == customerCapability {
 			customerEnabled = true
 		}
+		if pack.Metadata.Name == crmCapability {
+			crmEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0")
 	}
 	if customerEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("customer-accounts with organization-tenancy requires organization-tenancy 0.3.0")
+	}
+	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, errors.New("crm-core with organization-tenancy requires organization-tenancy 0.3.0")
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine, approvalsEnabled)
 	if err != nil {
@@ -591,6 +626,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Approvals:        approvalsEnabled,
 		Catalog:          catalogEnabled,
 		CustomerAccounts: customerEnabled,
+		CRM:              crmEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -627,6 +663,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if customerEnabled {
+		data.MigrationCount++
+	}
+	if crmEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+len(storefrontui.BaseTemplates)+1)
@@ -870,6 +909,26 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if crmEnabled {
+		for path, templatePath := range crmTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: crmCapability}
+		}
+		targets[database.CRMStorePath] = renderTarget{
+			TemplatePath: database.CRMStoreTemplate,
+			Owner:        crmCapability,
+		}
+		targets["internal/platform/migrate/migrations/000280_crm_core.sql"] = renderTarget{
+			TemplatePath: database.CRMMigrationTemplate,
+			Owner:        crmCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/CRMView.vue"] = renderTarget{
+				TemplatePath: "templates/src/views/CRMView.vue.tmpl",
+				Owner:        crmCapability,
+				SharedAdmin:  true,
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -954,6 +1013,7 @@ type templateData struct {
 	Approvals        bool
 	Catalog          bool
 	CustomerAccounts bool
+	CRM              bool
 	MigrationCount   int
 }
 

@@ -970,6 +970,89 @@ func TestCustomerAccountsRequiresLifecycleTenancyWhenScoped(t *testing.T) {
 	}
 }
 
+func TestGenerateCRMCoreAcrossDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, engine := range []string{"postgresql", "mysql"} {
+		engine := engine
+		t.Run(engine, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = engine
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+				{Name: crmCapability, Version: crmVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if generated.CapabilityLock[crmCapability] != crmVersion {
+				t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+			}
+			storePath := "internal/crm/" + databaseTemplates[engine].Data.PackageName + "/store.go"
+			for _, path := range []string{
+				"internal/crm/crm.go",
+				"internal/crm/crm_test.go",
+				"internal/crm/httpapi/handler.go",
+				"internal/crm/httpapi/handler_test.go",
+				storePath,
+				"internal/platform/migrate/migrations/000280_crm_core.sql",
+				"web/admin/src/views/CRMView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != crmCapability {
+					t.Errorf("Generate() CRM output %s is missing or has the wrong owner", path)
+				}
+			}
+			for _, output := range generated.Outputs {
+				if !strings.HasSuffix(output.Path, ".go") {
+					continue
+				}
+				formatted, err := format.Source(output.Content)
+				if err != nil {
+					t.Fatalf("generated %q is invalid Go: %v\n%s", output.Path, err, output.Content)
+				}
+				if !bytes.Equal(formatted, output.Content) {
+					t.Fatalf("generated %q is not gofmt formatted", output.Path)
+				}
+			}
+			if mainSource := string(outputContent(generated, "cmd/server/main.go")); !strings.Contains(mainSource, "crmAPI.Register") {
+				t.Fatal("Generate() did not wire CRM routes")
+			}
+			var document struct {
+				Paths map[string]any `yaml:"paths"`
+			}
+			openAPI := outputContent(generated, "api/openapi.yaml")
+			if err := yaml.Unmarshal(openAPI, &document); err != nil {
+				t.Fatalf("generated CRM OpenAPI is invalid YAML: %v\n%s", err, openAPI)
+			}
+			for _, path := range []string{
+				"/api/v1/crm/accounts", "/api/v1/crm/contacts",
+				"/api/v1/crm/activities", "/api/v1/crm/opportunities/{id}/advance",
+			} {
+				if document.Paths[path] == nil {
+					t.Errorf("generated CRM OpenAPI is missing %s", path)
+				}
+			}
+		})
+	}
+}
+
+func TestCRMCoreRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyMembersVersion},
+		{Name: crmCapability, Version: crmVersion},
+	}
+	if _, err := New().Generate(context.Background(), project); err == nil ||
+		!strings.Contains(err.Error(), "crm-core with organization-tenancy requires organization-tenancy 0.3.0") {
+		t.Fatalf("Generate() error = %v, want lifecycle tenancy requirement", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 
