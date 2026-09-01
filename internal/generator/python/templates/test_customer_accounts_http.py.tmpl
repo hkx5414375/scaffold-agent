@@ -1,0 +1,170 @@
+"""Customer-only cookie, storefront routes, administration transport, and errors."""
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from test_customer_accounts import SCOPE, MemoryRepository, _actor, _registration, _service
+
+import {{.PackageName}}.customer_accounts.service as customer_service_module
+from {{.PackageName}}.customer_accounts.http import (
+    CUSTOMER_SESSION_COOKIE,
+    get_customer,
+    install_error_handlers,
+    list_customers,
+    reactivate_customer,
+    router,
+    suspend_customer,
+)
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerError,
+    CustomerErrorKind,
+    CustomerStatus,
+    CustomerTransition,
+)
+
+
+@pytest.fixture(autouse=True)
+def fast_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(customer_service_module, "hash_password", lambda value: f"hash:{value}")
+    monkeypatch.setattr(
+        customer_service_module,
+        "verify_password",
+        lambda encoded, value: encoded == f"hash:{value}",
+    )
+
+
+def _application() -> tuple[FastAPI, MemoryRepository]:
+    repository = MemoryRepository()
+    application = FastAPI()
+    application.state.customer_account_service = _service(repository)
+    application.state.cookie_secure = False
+    install_error_handlers(application)
+    application.include_router(router)
+    return application, repository
+
+
+def _headers() -> dict[str, str]:
+    return {{if .Tenancy}}{"X-Organization-ID": SCOPE}{{else}}{}{{end}}
+
+
+def test_storefront_routes_use_only_the_customer_cookie_and_revoke_on_password_change() -> None:
+    application, _repository = _application()
+    client = TestClient(application)
+    registration = client.post(
+        "/api/v1/storefront/account/register",
+        headers=_headers(),
+        json=_registration().model_dump(),
+    )
+    assert registration.status_code == 201
+    assert registration.json()["customer"]["email"] == "customer@example.com"
+    cookie = registration.headers["set-cookie"]
+    assert f"{CUSTOMER_SESSION_COOKIE}=" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=lax" in cookie
+    assert "scaffold_session=" not in cookie
+
+    me = client.get("/api/v1/storefront/account/me", headers=_headers())
+    assert me.status_code == 200
+    assert me.json()["customer"]["status"] == "active"
+    profile = client.put(
+        "/api/v1/storefront/account/profile",
+        headers=_headers(),
+        json={"display_name": "Updated Customer", "version": "1"},
+    )
+    assert profile.status_code == 200
+    assert profile.json()["customer"]["version"] == "2"
+    password = client.put(
+        "/api/v1/storefront/account/password",
+        headers=_headers(),
+        json={
+            "current_password": "correct-password",
+            "new_password": "replacement-password",
+            "version": "2",
+        },
+    )
+    assert password.status_code == 200
+    assert password.json()["reauthentication_required"] is True
+    assert "Max-Age=0" in password.headers["set-cookie"]
+    assert client.get("/api/v1/storefront/account/me", headers=_headers()).status_code == 401
+
+    login = client.post(
+        "/api/v1/storefront/account/login",
+        headers=_headers(),
+        json={"email": "customer@example.com", "password": "replacement-password"},
+    )
+    assert login.status_code == 200
+    logout = client.post("/api/v1/storefront/account/logout", headers=_headers())
+    assert logout.status_code == 204
+    assert client.get("/api/v1/storefront/account/me", headers=_headers()).status_code == 401
+
+
+def test_close_clears_cookie_and_admin_transport_covers_lifecycle() -> None:
+    application, repository = _application()
+    service = application.state.customer_account_service
+    registered = service.register(SCOPE, _registration(), "ip", "agent")
+    actor = _actor()
+
+    assert list_customers(actor, service, "active", "", 20).items == [registered.customer]
+    assert get_customer(registered.customer.id, actor, service) == registered.customer
+    suspended = suspend_customer(
+        registered.customer.id,
+        CustomerTransition(version="1"),
+        actor,
+        service,
+    )
+    assert suspended.status == CustomerStatus.SUSPENDED
+    active = reactivate_customer(
+        registered.customer.id,
+        CustomerTransition(version="2"),
+        actor,
+        service,
+    )
+    assert active.status == CustomerStatus.ACTIVE
+
+    client = TestClient(application)
+    login = client.post(
+        "/api/v1/storefront/account/login",
+        headers=_headers(),
+        json={"email": active.email, "password": "correct-password"},
+    )
+    assert login.status_code == 200
+    closed = client.post(
+        "/api/v1/storefront/account/close",
+        headers=_headers(),
+        json={"version": "3"},
+    )
+    assert closed.status_code == 200
+    assert closed.json()["customer"]["status"] == "closed"
+    assert "Max-Age=0" in closed.headers["set-cookie"]
+    assert repository.customers[active.id].status == CustomerStatus.CLOSED
+
+
+def test_customer_errors_are_stable_and_do_not_expose_storage_details() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure/{kind}")
+    def failure(kind: str) -> None:
+        category = CustomerErrorKind(kind)
+        message = {
+            CustomerErrorKind.INVALID: "customer account input is invalid",
+            CustomerErrorKind.INVALID_CREDENTIALS: "invalid customer credentials",
+            CustomerErrorKind.NOT_FOUND: "customer account was not found",
+            CustomerErrorKind.CONFLICT: "customer account conflicts with current state",
+            CustomerErrorKind.STORAGE: "customer account operation could not be completed",
+        }[category]
+        raise CustomerError(category, message)
+
+    client = TestClient(application)
+    expected = {
+        "invalid": (400, "customer.invalid"),
+        "invalid_credentials": (401, "customer.invalid_credentials"),
+        "not_found": (404, "customer.not_found"),
+        "conflict": (409, "customer.conflict"),
+        "storage": (500, "internal.error"),
+    }
+    for kind, (status, code) in expected.items():
+        response = client.get(f"/failure/{kind}")
+        assert response.status_code == status
+        assert response.json()["code"] == code
+        assert "database" not in response.json()["message"]

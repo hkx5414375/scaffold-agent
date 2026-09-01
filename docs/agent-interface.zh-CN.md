@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 服务，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、原子 CSV 导入导出 0.1、便携审批 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。Go、Java、Python 现已具备相同的 M5 能力集合与同一套 Nuxt 商城底座。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 服务，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、原子 CSV 导入导出 0.1、便携审批 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。Go、Java、Python 现已具备相同的 M5 能力集合、同一套 Nuxt 商城底座、便携商品目录和独立商城顾客账户能力。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`，Python 对等写法参见 `examples/task-service-python/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
@@ -50,7 +50,7 @@ Go、Java 或 Python 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须�
 
 选择 `commerce-catalog` `0.1.0` 后，Go、Java 或 Python 适配器会独立于 Blueprint 通用 CRUD 模块生成商品领域、PostgreSQL/MySQL 存储、OpenAPI、管理接口和公开接口；如果同时选择组织租户，必须使用 `organization-tenancy` `0.3.0`，以便公开接口隐藏已停用组织。SKU 和币种会规范成大写，金额采用最小货币单位的 `int64`，金额和版本在 JSON 中都使用十进制字符串。商品只允许从草稿发布为上架，再永久归档；所有写操作与安全审计在同一事务提交。公开接口只返回已上架商品。若同时选择 `storefront: nuxt`，还会生成 SSR 商品列表、详情页和服务端代理；租户标识必须通过服务端 `SCAFFOLD_ORGANIZATION_ID` 提供，AI 不得把它或后端地址暴露到浏览器配置。
 
-Go 或 Java 适配器选择 `customer-accounts` `0.1.0` 后，会生成与后台员工 RBAC 完全分离的商城顾客主体、最长 30 天的顾客专用浏览器会话、PostgreSQL/MySQL 存储、OpenAPI、后台管理接口和公开/自助账户接口。顾客不会写入后台角色，不复用 `scaffold_session` Cookie。邮箱按组织转为小写并保持唯一；改密、停用、恢复和关闭账户都携带乐观版本，撤销顾客会话，并在同一事务写入审计。租户项目必须使用 `organization-tenancy` `0.3.0`。同时选择 `storefront: nuxt` 时，会生成注册、登录、资料、改密和销户页，但 `SCAFFOLD_ORGANIZATION_ID` 与后端地址仍只存在于服务端。AI 不得在没有通知依赖能力时虚构邮箱验证或密码找回，也不得把顾客身份并入员工角色、员工 Token 或员工 Cookie。Python 在完成同一契约验收前会拒绝该能力。
+Go、Java 或 Python 适配器选择 `customer-accounts` `0.1.0` 后，会生成与后台员工 RBAC 完全分离的商城顾客主体、最长 30 天的顾客专用浏览器会话、PostgreSQL/MySQL 存储、OpenAPI、后台管理接口和公开/自助账户接口。顾客不会写入后台角色，不复用 `scaffold_session` Cookie。邮箱按组织转为小写并保持唯一；改密、停用、恢复和关闭账户都携带乐观版本，撤销顾客会话，并在同一事务写入审计。租户项目必须使用 `organization-tenancy` `0.3.0`。同时选择 `storefront: nuxt` 时，会生成注册、登录、资料、改密和销户页，但 `SCAFFOLD_ORGANIZATION_ID` 与后端地址仍只存在于服务端。AI 不得在没有通知依赖能力时虚构邮箱验证或密码找回，也不得把顾客身份并入员工角色、员工 Token 或员工 Cookie。
 
 ## STDIO 协议
 

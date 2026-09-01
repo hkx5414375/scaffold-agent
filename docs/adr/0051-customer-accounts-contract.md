@@ -1,6 +1,6 @@
 # ADR 0051：顾客账户与会员生命周期契约
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-09-01
 
 ## 背景
@@ -21,4 +21,4 @@
 
 - AI 可以直接选择成熟的顾客身份边界，不必把后台 RBAC 改造成公开会员系统。
 - 订单、购物车、优惠和支付能力可以引用稳定顾客 ID，同时保持匿名购物能力可独立组合。
-- 本 ADR 只有在 Go、Java、Python、PostgreSQL、MySQL、共享 Vue 顾客管理和 Nuxt 注册/登录/账户页门禁全部通过后才改为 Accepted。
+- Go、Java、Python 已在 PostgreSQL、MySQL、共享 Vue 顾客管理和 Nuxt 注册/登录/账户页门禁下通过同一契约验收。

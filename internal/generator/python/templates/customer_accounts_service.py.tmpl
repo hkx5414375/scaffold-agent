@@ -1,0 +1,566 @@
+"""Storefront customer identity, session, profile, and lifecycle use cases."""
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerAccount,
+    CustomerError,
+    CustomerErrorKind,
+    CustomerLogin,
+    CustomerPage,
+    CustomerPasswordChange,
+    CustomerProfileUpdate,
+    CustomerRecord,
+    CustomerRegistration,
+    CustomerSession,
+    CustomerStatus,
+    CustomerTransition,
+)
+from {{.PackageName}}.customer_accounts.repository import (
+    CustomerConflict,
+    CustomerMutation,
+    CustomerRepository,
+    CustomerStatusTransition,
+)
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.identity.passwords import DUMMY_HASH, hash_password, verify_password
+from {{.PackageName}}.identity.tokens import digest_token, new_token
+
+CUSTOMER_SESSION_LIFETIME = timedelta(days=30)
+MAXIMUM_AUDIT_VALUE_LENGTH = 512
+MAXIMUM_CREDENTIAL_LENGTH = 512
+MAXIMUM_IDENTIFIER_LENGTH = 191
+MAXIMUM_DISPLAY_NAME_LENGTH = 160
+EMAIL_PATTERN = re.compile(
+    r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+    r"(?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerAuthentication:
+    """Raw customer cookie credential and safe account returned once."""
+
+    token: str
+    customer: CustomerAccount
+
+
+class CustomerAccountService:
+    """Customer use cases independent from HTTP and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: CustomerRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def register(
+        self,
+        organization_id: str,
+        value: CustomerRegistration,
+        ip_address: str,
+        user_agent: str,
+    ) -> CustomerAuthentication:
+        """Create an active customer and a customer-only browser session."""
+        scope = _public_scope(organization_id)
+        email = _normalize_email(value.email)
+        display_name = _display_name(value.display_name)
+        try:
+            password_hash = hash_password(value.password)
+        except Exception as error:
+            raise _invalid() from error
+        now = _now(self._clock)
+        customer = CustomerRecord(
+            id=str(uuid4()),
+            organization_id=scope,
+            email=email,
+            password_hash=password_hash,
+            display_name=display_name,
+            status=CustomerStatus.ACTIVE,
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        raw_token = new_token()
+        session = CustomerSession(
+            token_hash=digest_token(raw_token),
+            customer_id=customer.id,
+            expires_at=now + CUSTOMER_SESSION_LIFETIME,
+            created_at=now,
+        )
+        try:
+            self._repository.register(
+                customer,
+                session,
+                _audit("customer.register", "succeeded", customer.id, ip_address, user_agent, now),
+            )
+        except CustomerConflict as error:
+            raise _conflict() from error
+        except CustomerError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return CustomerAuthentication(raw_token, customer.public())
+
+    def login(
+        self,
+        organization_id: str,
+        value: CustomerLogin,
+        ip_address: str,
+        user_agent: str,
+    ) -> CustomerAuthentication:
+        """Verify one scoped active customer and create a customer-only session."""
+        try:
+            scope = _public_scope(organization_id)
+            email = _normalize_email(value.email)
+        except CustomerError:
+            verify_password(DUMMY_HASH, value.password)
+            self._deny_login("", ip_address, user_agent)
+            raise _invalid_credentials() from None
+        try:
+            customer = self._repository.find_by_email(scope, email)
+        except Exception as error:
+            raise _storage() from error
+        if customer is None:
+            verify_password(DUMMY_HASH, value.password)
+            self._deny_login("", ip_address, user_agent)
+            raise _invalid_credentials()
+        password_valid = verify_password(customer.password_hash, value.password)
+        if customer.status != CustomerStatus.ACTIVE or not password_valid:
+            self._deny_login(customer.id, ip_address, user_agent)
+            raise _invalid_credentials()
+        raw_token = new_token()
+        now = _now(self._clock)
+        session = CustomerSession(
+            token_hash=digest_token(raw_token),
+            customer_id=customer.id,
+            expires_at=now + CUSTOMER_SESSION_LIFETIME,
+            created_at=now,
+        )
+        try:
+            self._repository.create_session(
+                session,
+                _audit("customer.login", "succeeded", customer.id, ip_address, user_agent, now),
+            )
+        except CustomerConflict as error:
+            self._deny_login(customer.id, ip_address, user_agent)
+            raise _invalid_credentials() from error
+        except Exception as error:
+            raise _storage() from error
+        return CustomerAuthentication(raw_token, customer.public())
+
+    def authenticate(self, organization_id: str, raw_token: str) -> CustomerRecord:
+        """Resolve one active customer cookie inside its explicit storefront scope."""
+        if not raw_token or len(raw_token) > MAXIMUM_CREDENTIAL_LENGTH:
+            raise _invalid_credentials()
+        try:
+            scope = _public_scope(organization_id)
+            customer = self._repository.find_by_session(
+                scope,
+                digest_token(raw_token),
+                _now(self._clock),
+            )
+        except CustomerError:
+            raise _invalid_credentials() from None
+        except Exception as error:
+            raise _storage() from error
+        if customer is None or customer.status != CustomerStatus.ACTIVE:
+            raise _invalid_credentials()
+        return customer
+
+    def logout(
+        self,
+        organization_id: str,
+        raw_token: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> None:
+        """Revoke the current customer session without revealing invalid cookies."""
+        try:
+            customer = self.authenticate(organization_id, raw_token)
+        except CustomerError as error:
+            if error.kind == CustomerErrorKind.INVALID_CREDENTIALS:
+                return
+            raise
+        now = _now(self._clock)
+        try:
+            self._repository.delete_session(
+                digest_token(raw_token),
+                _audit("customer.logout", "succeeded", customer.id, ip_address, user_agent, now),
+            )
+        except Exception as error:
+            raise _storage() from error
+
+    def update_profile(
+        self,
+        customer: CustomerRecord,
+        value: CustomerProfileUpdate,
+        ip_address: str,
+        user_agent: str,
+    ) -> CustomerAccount:
+        """Update the current active customer's display name."""
+        now = _now(self._clock)
+        mutation = CustomerMutation(
+            organization_id=customer.organization_id,
+            customer_id=_identifier(customer.id),
+            expected_version=_version(value.version),
+            display_name=_display_name(value.display_name),
+            updated_at=now,
+        )
+        return self._mutate(
+            lambda: self._repository.update_profile(
+                mutation,
+                _audit(
+                    "customer.profile.update",
+                    "succeeded",
+                    customer.id,
+                    ip_address,
+                    user_agent,
+                    now,
+                ),
+            )
+        ).public()
+
+    def change_password(
+        self,
+        customer: CustomerRecord,
+        value: CustomerPasswordChange,
+        ip_address: str,
+        user_agent: str,
+    ) -> CustomerAccount:
+        """Change the password and revoke every customer session."""
+        if not verify_password(customer.password_hash, value.current_password):
+            raise _invalid_credentials()
+        try:
+            password_hash = hash_password(value.new_password)
+        except Exception as error:
+            raise _invalid() from error
+        now = _now(self._clock)
+        mutation = CustomerMutation(
+            organization_id=customer.organization_id,
+            customer_id=_identifier(customer.id),
+            expected_version=_version(value.version),
+            password_hash=password_hash,
+            updated_at=now,
+        )
+        return self._mutate(
+            lambda: self._repository.change_password(
+                mutation,
+                _audit(
+                    "customer.password.change",
+                    "succeeded",
+                    customer.id,
+                    ip_address,
+                    user_agent,
+                    now,
+                ),
+            )
+        ).public()
+
+    def close(
+        self,
+        customer: CustomerRecord,
+        value: CustomerTransition,
+        ip_address: str,
+        user_agent: str,
+    ) -> CustomerAccount:
+        """Permanently close the current account and revoke every session."""
+        now = _now(self._clock)
+        return self._transition(
+            customer.organization_id,
+            _identifier(customer.id),
+            _version(value.version),
+            CustomerStatus.ACTIVE,
+            CustomerStatus.CLOSED,
+            _audit("customer.close", "succeeded", customer.id, ip_address, user_agent, now),
+            now,
+        ).public()
+
+    def get(self, customer_id: str, actor: Principal) -> CustomerAccount:
+        """Read one customer inside the employee's current organization scope."""
+        scope = _administration_scope(actor)
+        normalized_id = _identifier(customer_id)
+        try:
+            customer = self._repository.get(scope, normalized_id)
+        except Exception as error:
+            raise _storage() from error
+        if customer is None:
+            raise _not_found()
+        return customer.public()
+
+    def list(
+        self,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> CustomerPage:
+        """List one bounded keyset page inside the employee scope."""
+        scope = _administration_scope(actor)
+        normalized_status = status.strip()
+        normalized_cursor = cursor.strip()
+        if (
+            normalized_status not in {"", *(item.value for item in CustomerStatus)}
+            or limit < 1
+            or limit > 100
+            or len(normalized_cursor) > MAXIMUM_IDENTIFIER_LENGTH
+            or not _printable(normalized_cursor)
+        ):
+            raise _invalid()
+        try:
+            page = self._repository.list_page(
+                scope,
+                normalized_status,
+                normalized_cursor,
+                limit,
+            )
+        except Exception as error:
+            raise _storage() from error
+        return CustomerPage(
+            items=[customer.public() for customer in page.items],
+            next_cursor=page.next_cursor,
+        )
+
+    def suspend(
+        self,
+        customer_id: str,
+        value: CustomerTransition,
+        actor: Principal,
+    ) -> CustomerAccount:
+        """Suspend an active customer and revoke every session."""
+        return self._admin_transition(
+            customer_id,
+            value,
+            CustomerStatus.ACTIVE,
+            CustomerStatus.SUSPENDED,
+            "customers:accounts:suspend",
+            actor,
+        )
+
+    def reactivate(
+        self,
+        customer_id: str,
+        value: CustomerTransition,
+        actor: Principal,
+    ) -> CustomerAccount:
+        """Reactivate a suspended customer without restoring sessions."""
+        return self._admin_transition(
+            customer_id,
+            value,
+            CustomerStatus.SUSPENDED,
+            CustomerStatus.ACTIVE,
+            "customers:accounts:reactivate",
+            actor,
+        )
+
+    def _admin_transition(
+        self,
+        customer_id: str,
+        value: CustomerTransition,
+        from_status: CustomerStatus,
+        to_status: CustomerStatus,
+        action: str,
+        actor: Principal,
+    ) -> CustomerAccount:
+        scope = _administration_scope(actor)
+        normalized_id = _identifier(customer_id)
+        now = _now(self._clock)
+        return self._transition(
+            scope,
+            normalized_id,
+            _version(value.version),
+            from_status,
+            to_status,
+            AuditEvent(
+                id=str(uuid4()),
+                user_id=actor.user_id,
+                action=action,
+                outcome="succeeded",
+                target=normalized_id,
+                ip_address=None,
+                user_agent=None,
+                created_at=now,
+            ),
+            now,
+        ).public()
+
+    def _transition(
+        self,
+        organization_id: str,
+        customer_id: str,
+        version: int,
+        from_status: CustomerStatus,
+        to_status: CustomerStatus,
+        audit: AuditEvent,
+        now: datetime,
+    ) -> CustomerRecord:
+        transition = CustomerStatusTransition(
+            organization_id=organization_id,
+            customer_id=customer_id,
+            expected_version=version,
+            from_status=from_status,
+            to_status=to_status,
+            updated_at=now,
+        )
+        return self._mutate(lambda: self._repository.transition(transition, audit))
+
+    def _mutate(self, operation: Callable[[], CustomerRecord]) -> CustomerRecord:
+        try:
+            return operation()
+        except CustomerConflict as error:
+            raise _conflict() from error
+        except CustomerError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+    def _deny_login(self, customer_id: str, ip_address: str, user_agent: str) -> None:
+        now = _now(self._clock)
+        try:
+            self._repository.append_audit(
+                _audit(
+                    "customer.login",
+                    "denied",
+                    customer_id or None,
+                    ip_address,
+                    user_agent,
+                    now,
+                )
+            )
+        except Exception as error:
+            raise _storage() from error
+
+
+def _public_scope(value: str) -> str:
+    normalized = value.strip()
+{{- if .Tenancy}}
+    if not _required(normalized, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+{{- else}}
+    if normalized:
+        raise _invalid()
+{{- end}}
+    return normalized
+
+
+def _administration_scope(actor: Principal) -> str:
+    if not _required(actor.user_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid_credentials()
+{{- if .Tenancy}}
+    organization_id = (actor.organization_id or "").strip()
+    if not _required(organization_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid_credentials()
+    return organization_id
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _normalize_email(value: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) > 254 or EMAIL_PATTERN.fullmatch(normalized) is None:
+        raise _invalid()
+    return normalized
+
+
+def _display_name(value: str) -> str:
+    normalized = value.strip()
+    if not _required(normalized, MAXIMUM_DISPLAY_NAME_LENGTH):
+        raise _invalid()
+    return normalized
+
+
+def _identifier(value: str) -> str:
+    normalized = value.strip()
+    if not _required(normalized, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+    return normalized
+
+
+def _version(value: str) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as error:
+        raise _invalid() from error
+    if number < 1 or number > 2**63 - 1 or str(number) != value:
+        raise _invalid()
+    return number
+
+
+def _required(value: str, maximum: int) -> bool:
+    return bool(value) and len(value) <= maximum and _printable(value)
+
+
+def _printable(value: str) -> bool:
+    return all(character.isprintable() for character in value)
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _audit(
+    action: str,
+    outcome: str,
+    target: str | None,
+    ip_address: str | None,
+    user_agent: str | None,
+    now: datetime,
+) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=None,
+        action=action,
+        outcome=outcome,
+        target=_safe_audit_value(target),
+        ip_address=_safe_audit_value(ip_address),
+        user_agent=_safe_audit_value(user_agent),
+        created_at=now,
+    )
+
+
+def _safe_audit_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return "".join(character for character in value if character.isprintable())[
+        :MAXIMUM_AUDIT_VALUE_LENGTH
+    ]
+
+
+def _invalid() -> CustomerError:
+    return CustomerError(CustomerErrorKind.INVALID, "customer account input is invalid")
+
+
+def _invalid_credentials() -> CustomerError:
+    return CustomerError(
+        CustomerErrorKind.INVALID_CREDENTIALS,
+        "invalid customer credentials",
+    )
+
+
+def _not_found() -> CustomerError:
+    return CustomerError(CustomerErrorKind.NOT_FOUND, "customer account was not found")
+
+
+def _conflict() -> CustomerError:
+    return CustomerError(
+        CustomerErrorKind.CONFLICT,
+        "customer account conflicts with current state",
+    )
+
+
+def _storage() -> CustomerError:
+    return CustomerError(
+        CustomerErrorKind.STORAGE,
+        "customer account operation could not be completed",
+    )

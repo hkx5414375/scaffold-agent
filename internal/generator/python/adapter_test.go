@@ -182,6 +182,99 @@ func TestCommerceCatalogRequiresLifecycleTenancyWhenScoped(t *testing.T) {
 	}
 }
 
+func TestGenerateCustomerAccountsAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Metadata.DisplayName = "Generated Python Customer Store"
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: customerOwner, Version: customerVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[customerOwner] != customerVersion ||
+				generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				generated.CapabilityLock[adminui.Owner] != adminui.Version ||
+				generated.CapabilityLock[storefrontOwner] != storefrontVersion {
+				t.Fatalf("Generate(%s) capability lock = %#v", database, generated.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/demo_service/customer_accounts/models.py",
+				"src/demo_service/customer_accounts/service.py",
+				"src/demo_service/customer_accounts/repository.py",
+				"src/demo_service/customer_accounts/http.py",
+				"src/demo_service/migration/versions/000270_customer_accounts.py",
+				"tests/test_customer_accounts.py",
+				"tests/test_customer_accounts_database.py",
+				"tests/test_customer_accounts_http.py",
+				"web/admin/src/views/CustomerAccountsView.vue",
+				"web/storefront/app/pages/account/index.vue",
+				"web/storefront/server/api/storefront/account/login.post.ts",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != customerOwner {
+					t.Errorf("Generate(%s) customer output %s is missing or has the wrong owner", database, path)
+				}
+			}
+			assertions := map[string][]string{
+				"src/demo_service/main.py": {
+					"app.state.customer_account_service = CustomerAccountService",
+					"application.include_router(customer_router)",
+				},
+				"src/demo_service/customer_accounts/repository.py": {
+					"organizations.c.status == \"active\"",
+					"delete(customer_sessions)",
+					"append_audit(connection, audit)",
+				},
+				"api/openapi.yaml": {
+					"/api/v1/storefront/account/register:",
+					"/api/v1/customers/{id}/suspend:",
+					"customers:accounts:manage",
+					"scaffold_customer_session",
+				},
+				"web/admin/src/App.vue": {"CustomerAccountsView"},
+			}
+			for path, fragments := range assertions {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+			var contract map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+				t.Fatalf("generated customer OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestCustomerAccountsRequiresLifecycleTenancy(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: customerOwner, Version: customerVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate(tenancy %s) error = %v", version, err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 	t.Parallel()
 

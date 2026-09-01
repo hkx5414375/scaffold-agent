@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates the same platform boundary with deterministic uv locks and locked quality gates. Go, Java, and Python expose the same M5 capability set, shared Nuxt storefront foundation, and portable commerce catalog. Go and Java additionally expose the customer account slice while Python parity is in progress.
+The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates the same platform boundary with deterministic uv locks and locked quality gates. Go, Java, and Python expose the same M5 capability set, shared Nuxt storefront foundation, portable commerce catalog, and separate storefront customer accounts.
 
 See `examples/task-service/scaffold.yaml` for the Go business-module contract and
 `examples/task-service-java/scaffold.yaml` and
@@ -159,7 +159,7 @@ nuxt`, Nuxt adds SSR list/detail pages and forwards the server-only
 `SCAFFOLD_ORGANIZATION_ID`; agents must not move tenant selection or backend
 addresses into browser-visible configuration.
 
-Selecting `customer-accounts` version `0.1.0` with the Go or Java adapter generates a
+Selecting `customer-accounts` version `0.1.0` with the Go, Java, or Python adapter generates a
 storefront customer principal, 30-day customer-only browser sessions,
 PostgreSQL or MySQL persistence, OpenAPI, staff administration routes, and
 public/self-service account routes. It never adds customers to staff RBAC or
@@ -171,8 +171,7 @@ Nuxt adds registration, login, profile, password, and closure pages while keepin
 `SCAFFOLD_ORGANIZATION_ID` and the backend address server-only. Agents must not
 invent email verification or password recovery until a notification-dependent
 capability supplies those workflows, and must not merge customer identity into
-staff roles, staff tokens, or staff cookies. The Python adapter rejects this
-capability until its parity implementation passes the same contract.
+staff roles, staff tokens, or staff cookies.
 
 ## STDIO protocol
 

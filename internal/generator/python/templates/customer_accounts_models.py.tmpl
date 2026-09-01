@@ -1,0 +1,225 @@
+"""Storefront customer records and SQLAlchemy table metadata."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from {{.PackageName}}.identity.models import metadata
+
+POSITIVE_VERSION = r"^[1-9][0-9]*$"
+
+customer_accounts = sa.Table(
+    "customer_accounts",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("email", sa.String(254), nullable=False),
+    sa.Column("password_hash", sa.Text(), nullable=False),
+    sa.Column("display_name", sa.String(160), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('active', 'suspended', 'closed')",
+        name="customer_accounts_status",
+    ),
+    sa.CheckConstraint("version > 0", name="customer_accounts_version"),
+    sa.UniqueConstraint(
+{{- if .Tenancy}}
+        "organization_id",
+{{- end}}
+        "email",
+        name="customer_accounts_scope_email_unique",
+    ),
+)
+sa.Index(
+    "customer_accounts_scope_status_idx",
+{{- if .Tenancy}}
+    customer_accounts.c.organization_id,
+{{- end}}
+    customer_accounts.c.status,
+    customer_accounts.c.id,
+)
+
+customer_sessions = sa.Table(
+    "customer_sessions",
+    metadata,
+    sa.Column("token_hash", sa.String(64), primary_key=True),
+    sa.Column(
+        "customer_id",
+        sa.String(191),
+        sa.ForeignKey("customer_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+sa.Index(
+    "customer_sessions_customer_expiry_idx",
+    customer_sessions.c.customer_id,
+    customer_sessions.c.expires_at,
+)
+
+
+class CustomerStatus(StrEnum):
+    """Portable customer account lifecycle states."""
+
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    CLOSED = "closed"
+
+
+class CustomerErrorKind(StrEnum):
+    """Stable customer account failure categories."""
+
+    INVALID = "invalid"
+    INVALID_CREDENTIALS = "invalid_credentials"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    STORAGE = "storage"
+
+
+class CustomerError(Exception):
+    """Expected customer failure without persistence internals."""
+
+    def __init__(self, kind: CustomerErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class StrictModel(BaseModel):
+    """Reject fields outside the stable customer contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CustomerAccount(StrictModel):
+    """Safe storefront customer representation without credentials."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    email: str = Field(min_length=3, max_length=254)
+    display_name: str = Field(min_length=1, max_length=160)
+    status: CustomerStatus
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerRecord:
+    """Internal customer record including its password verifier."""
+
+    id: str
+    organization_id: str
+    email: str
+    password_hash: str
+    display_name: str
+    status: CustomerStatus
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+    def public(self) -> CustomerAccount:
+        """Return the safe API representation."""
+        return CustomerAccount(
+            id=self.id,
+{{- if .Tenancy}}
+            organization_id=self.organization_id,
+{{- end}}
+            email=self.email,
+            display_name=self.display_name,
+            status=self.status,
+            version=str(self.version),
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerSession:
+    """Digest-backed customer browser session."""
+
+    token_hash: str
+    customer_id: str
+    expires_at: datetime
+    created_at: datetime
+
+
+class CustomerRegistration(StrictModel):
+    """New customer registration input."""
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=12, max_length=1024)
+    display_name: str = Field(min_length=1, max_length=160)
+
+
+class CustomerLogin(StrictModel):
+    """Customer credential input."""
+
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class CustomerProfileUpdate(StrictModel):
+    """Optimistic profile replacement."""
+
+    display_name: str = Field(min_length=1, max_length=160)
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class CustomerPasswordChange(StrictModel):
+    """Optimistic password change input."""
+
+    current_password: str = Field(min_length=1, max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class CustomerTransition(StrictModel):
+    """Optimistic lifecycle transition input."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class CustomerEnvelope(StrictModel):
+    """Stable self-service customer response."""
+
+    customer: CustomerAccount
+
+
+class CustomerPasswordChanged(CustomerEnvelope):
+    """Password response requiring a fresh customer login."""
+
+    reauthentication_required: bool = True
+
+
+class CustomerPage(StrictModel):
+    """Bounded keyset customer page."""
+
+    items: list[CustomerAccount]
+    next_cursor: str

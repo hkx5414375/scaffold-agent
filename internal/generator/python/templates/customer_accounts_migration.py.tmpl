@@ -1,0 +1,110 @@
+"""Create separate storefront customer identities and sessions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000270_customer_accounts"
+down_revision: str | None = {{if .Catalog}}"000260_commerce_catalog"{{else if .Approvals}}"000250_approval_workflows"{{else if .CSVTransfer}}"000240_csv_import_export"{{else if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else if .Business}}"000002_business"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create customer records, digest-only sessions, and administrator grants."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {"code": "customers:accounts:read", "description": "Read customer accounts"},
+        {
+            "code": "customers:accounts:manage",
+            "description": "Suspend and reactivate customer accounts",
+        },
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in rows],
+    )
+
+    op.create_table(
+        "customer_accounts",
+        sa.Column("id", sa.String(191), primary_key=True),
+        sa.Column(
+            "organization_id",
+            sa.String(191),
+{{- if .Tenancy}}
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+{{- else}}
+            nullable=True,
+{{- end}}
+        ),
+        sa.Column("email", sa.String(254), nullable=False),
+        sa.Column("password_hash", sa.Text(), nullable=False),
+        sa.Column("display_name", sa.String(160), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "status in ('active', 'suspended', 'closed')",
+            name="customer_accounts_status",
+        ),
+        sa.CheckConstraint("version > 0", name="customer_accounts_version"),
+        sa.UniqueConstraint(
+{{- if .Tenancy}}
+            "organization_id",
+{{- end}}
+            "email",
+            name="customer_accounts_scope_email_unique",
+        ),
+    )
+    op.create_index(
+        "customer_accounts_scope_status_idx",
+        "customer_accounts",
+        [{{if .Tenancy}}"organization_id", {{end}}"status", "id"],
+    )
+    op.create_table(
+        "customer_sessions",
+        sa.Column("token_hash", sa.String(64), primary_key=True),
+        sa.Column(
+            "customer_id",
+            sa.String(191),
+            sa.ForeignKey("customer_accounts.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    )
+    op.create_index(
+        "customer_sessions_customer_expiry_idx",
+        "customer_sessions",
+        ["customer_id", "expires_at"],
+    )
+
+
+def downgrade() -> None:
+    """Remove customer storage and administrator grants."""
+    op.drop_table("customer_sessions")
+    op.drop_table("customer_accounts")
+    codes = ["customers:accounts:read", "customers:accounts:manage"]
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

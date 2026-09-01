@@ -42,6 +42,19 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/storefront/products", "get"),
         ("/api/v1/storefront/products/{id}", "get"),
 {{- end}}
+{{- if .CustomerAccounts}}
+        ("/api/v1/storefront/account/register", "post"),
+        ("/api/v1/storefront/account/login", "post"),
+        ("/api/v1/storefront/account/logout", "post"),
+        ("/api/v1/storefront/account/me", "get"),
+        ("/api/v1/storefront/account/profile", "put"),
+        ("/api/v1/storefront/account/password", "put"),
+        ("/api/v1/storefront/account/close", "post"),
+        ("/api/v1/customers", "get"),
+        ("/api/v1/customers/{id}", "get"),
+        ("/api/v1/customers/{id}/suspend", "post"),
+        ("/api/v1/customers/{id}/reactivate", "post"),
+{{- end}}
 {{- if .Tenancy}}
         ("/api/v1/organizations", "post"),
         ("/api/v1/organizations", "get"),
@@ -214,6 +227,18 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert catalog_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
+{{- if .CustomerAccounts}}
+
+    customer_tree = ast.parse(
+        (PACKAGE / "customer_accounts" / "service.py").read_text(encoding="utf-8")
+    )
+    customer_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(customer_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert customer_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

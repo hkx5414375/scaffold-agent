@@ -1,0 +1,407 @@
+"""Transactional customer persistence with atomic audit and session revocation."""
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, cast
+
+from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.elements import ColumnElement
+
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerRecord,
+    CustomerSession,
+    CustomerStatus,
+    customer_accounts,
+    customer_sessions,
+)
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organizations
+{{- end}}
+
+
+class CustomerConflict(Exception):
+    """A unique, version, state, or scope predicate rejected a mutation."""
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerMutation:
+    """Normalized optimistic customer mutation."""
+
+    organization_id: str
+    customer_id: str
+    expected_version: int
+    updated_at: datetime
+    display_name: str = ""
+    password_hash: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerStatusTransition:
+    """Database-enforced customer lifecycle transition."""
+
+    organization_id: str
+    customer_id: str
+    expected_version: int
+    from_status: CustomerStatus
+    to_status: CustomerStatus
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerPageResult:
+    """Internal bounded keyset page."""
+
+    items: list[CustomerRecord]
+    next_cursor: str
+
+
+class CustomerRepository(Protocol):
+    """Persistence seam for customer account transactions."""
+
+    def register(
+        self,
+        customer: CustomerRecord,
+        session: CustomerSession,
+        audit: AuditEvent,
+    ) -> None: ...
+
+    def find_by_email(self, organization_id: str, email: str) -> CustomerRecord | None: ...
+
+    def create_session(self, session: CustomerSession, audit: AuditEvent) -> None: ...
+
+    def find_by_session(
+        self,
+        organization_id: str,
+        token_hash: str,
+        now: datetime,
+    ) -> CustomerRecord | None: ...
+
+    def delete_session(self, token_hash: str, audit: AuditEvent) -> None: ...
+
+    def append_audit(self, audit: AuditEvent) -> None: ...
+
+    def update_profile(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord: ...
+
+    def change_password(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord: ...
+
+    def get(self, organization_id: str, customer_id: str) -> CustomerRecord | None: ...
+
+    def list_page(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> CustomerPageResult: ...
+
+    def transition(
+        self,
+        transition: CustomerStatusTransition,
+        audit: AuditEvent,
+    ) -> CustomerRecord: ...
+
+
+class SQLAlchemyCustomerRepository:
+    """SQLAlchemy adapter repeating scope, version, and lifecycle predicates in SQL."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def register(
+        self,
+        customer: CustomerRecord,
+        session: CustomerSession,
+        audit: AuditEvent,
+    ) -> None:
+        try:
+            with self._engine.begin() as connection:
+{{- if .Tenancy}}
+                active_organization = connection.scalar(
+                    select(organizations.c.id)
+                    .where(
+                        organizations.c.id == customer.organization_id,
+                        organizations.c.status == "active",
+                    )
+                    .with_for_update()
+                )
+                if active_organization is None:
+                    raise CustomerConflict()
+{{- end}}
+                connection.execute(insert(customer_accounts).values(**_customer_values(customer)))
+                connection.execute(insert(customer_sessions).values(**_session_values(session)))
+                append_audit(connection, audit)
+        except IntegrityError as error:
+            raise CustomerConflict() from error
+
+    def find_by_email(self, organization_id: str, email: str) -> CustomerRecord | None:
+        statement = select(customer_accounts)
+{{- if .Tenancy}}
+        statement = statement.join(
+            organizations,
+            organizations.c.id == customer_accounts.c.organization_id,
+        )
+{{- end}}
+        statement = statement.where(
+            func.coalesce(customer_accounts.c.organization_id, "") == organization_id,
+            customer_accounts.c.email == email,
+{{- if .Tenancy}}
+            organizations.c.status == "active",
+{{- end}}
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_customer(row) if row is not None else None
+
+    def create_session(self, session: CustomerSession, audit: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            active_customer = select(customer_accounts.c.id)
+{{- if .Tenancy}}
+            active_customer = active_customer.join(
+                organizations,
+                organizations.c.id == customer_accounts.c.organization_id,
+            )
+{{- end}}
+            active_customer = active_customer.where(
+                customer_accounts.c.id == session.customer_id,
+                customer_accounts.c.status == "active",
+{{- if .Tenancy}}
+                organizations.c.status == "active",
+{{- end}}
+            ).with_for_update()
+            if connection.scalar(active_customer) is None:
+                raise CustomerConflict()
+            connection.execute(insert(customer_sessions).values(**_session_values(session)))
+            append_audit(connection, audit)
+
+    def find_by_session(
+        self,
+        organization_id: str,
+        token_hash: str,
+        now: datetime,
+    ) -> CustomerRecord | None:
+        statement = select(customer_accounts).join(
+            customer_sessions,
+            customer_sessions.c.customer_id == customer_accounts.c.id,
+        )
+{{- if .Tenancy}}
+        statement = statement.join(
+            organizations,
+            organizations.c.id == customer_accounts.c.organization_id,
+        )
+{{- end}}
+        statement = statement.where(
+            func.coalesce(customer_accounts.c.organization_id, "") == organization_id,
+            customer_sessions.c.token_hash == token_hash,
+            customer_sessions.c.expires_at > now,
+            customer_accounts.c.status == CustomerStatus.ACTIVE.value,
+{{- if .Tenancy}}
+            organizations.c.status == "active",
+{{- end}}
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_customer(row) if row is not None else None
+
+    def delete_session(self, token_hash: str, audit: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(
+                delete(customer_sessions).where(customer_sessions.c.token_hash == token_hash)
+            )
+            append_audit(connection, audit)
+
+    def append_audit(self, audit: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            append_audit(connection, audit)
+
+    def update_profile(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(customer_accounts)
+                .where(*_mutation_predicates(mutation), customer_accounts.c.status == "active")
+                .values(
+                    display_name=mutation.display_name,
+                    version=customer_accounts.c.version + 1,
+                    updated_at=mutation.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            append_audit(connection, audit)
+            return _read_changed(connection, mutation.organization_id, mutation.customer_id)
+
+    def change_password(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(customer_accounts)
+                .where(*_mutation_predicates(mutation), customer_accounts.c.status == "active")
+                .values(
+                    password_hash=mutation.password_hash,
+                    version=customer_accounts.c.version + 1,
+                    updated_at=mutation.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            connection.execute(
+                delete(customer_sessions).where(
+                    customer_sessions.c.customer_id == mutation.customer_id
+                )
+            )
+            append_audit(connection, audit)
+            return _read_changed(connection, mutation.organization_id, mutation.customer_id)
+
+    def get(self, organization_id: str, customer_id: str) -> CustomerRecord | None:
+        statement = select(customer_accounts).where(
+            customer_accounts.c.id == customer_id,
+            func.coalesce(customer_accounts.c.organization_id, "") == organization_id,
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_customer(row) if row is not None else None
+
+    def list_page(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> CustomerPageResult:
+        statement = select(customer_accounts).where(
+            func.coalesce(customer_accounts.c.organization_id, "") == organization_id
+        )
+        if status:
+            statement = statement.where(customer_accounts.c.status == status)
+        if cursor:
+            statement = statement.where(customer_accounts.c.id > cursor)
+        statement = statement.order_by(customer_accounts.c.id).limit(limit + 1)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        values = [_map_customer(row) for row in rows]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return CustomerPageResult(values[:limit], next_cursor)
+
+    def transition(
+        self,
+        transition: CustomerStatusTransition,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                update(customer_accounts)
+                .where(
+                    customer_accounts.c.id == transition.customer_id,
+                    func.coalesce(customer_accounts.c.organization_id, "")
+                    == transition.organization_id,
+                    customer_accounts.c.version == transition.expected_version,
+                    customer_accounts.c.status == transition.from_status.value,
+                )
+                .values(
+                    status=transition.to_status.value,
+                    version=customer_accounts.c.version + 1,
+                    updated_at=transition.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            connection.execute(
+                delete(customer_sessions).where(
+                    customer_sessions.c.customer_id == transition.customer_id
+                )
+            )
+            append_audit(connection, audit)
+            return _read_changed(
+                connection,
+                transition.organization_id,
+                transition.customer_id,
+            )
+
+
+def _mutation_predicates(mutation: CustomerMutation) -> tuple[ColumnElement[bool], ...]:
+    return (
+        customer_accounts.c.id == mutation.customer_id,
+        func.coalesce(customer_accounts.c.organization_id, "") == mutation.organization_id,
+        customer_accounts.c.version == mutation.expected_version,
+    )
+
+
+def _read_changed(
+    connection: Connection,
+    organization_id: str,
+    customer_id: str,
+) -> CustomerRecord:
+    row = (
+        connection.execute(
+            select(customer_accounts).where(
+                customer_accounts.c.id == customer_id,
+                func.coalesce(customer_accounts.c.organization_id, "") == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_customer(row)
+
+
+def _require_mutation(changed: int) -> None:
+    if changed != 1:
+        raise CustomerConflict()
+
+
+def _customer_values(value: CustomerRecord) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": value.organization_id or None,
+        "email": value.email,
+        "password_hash": value.password_hash,
+        "display_name": value.display_name,
+        "status": value.status.value,
+        "version": value.version,
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _session_values(value: CustomerSession) -> dict[str, object]:
+    return {
+        "token_hash": value.token_hash,
+        "customer_id": value.customer_id,
+        "expires_at": value.expires_at,
+        "created_at": value.created_at,
+    }
+
+
+def _map_customer(row: RowMapping) -> CustomerRecord:
+    return CustomerRecord(
+        id=str(row["id"]),
+        organization_id=str(row["organization_id"] or ""),
+        email=str(row["email"]),
+        password_hash=str(row["password_hash"]),
+        display_name=str(row["display_name"]),
+        status=CustomerStatus(str(row["status"])),
+        version=int(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

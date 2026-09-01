@@ -1,0 +1,294 @@
+"""Customer-only storefront transport and protected administration routes."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Cookie, Depends, FastAPI, Header, Query, Request, Response
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerAccount,
+    CustomerEnvelope,
+    CustomerError,
+    CustomerErrorKind,
+    CustomerLogin,
+    CustomerPage,
+    CustomerPasswordChange,
+    CustomerPasswordChanged,
+    CustomerProfileUpdate,
+    CustomerRecord,
+    CustomerRegistration,
+    CustomerTransition,
+)
+from {{.PackageName}}.customer_accounts.service import CustomerAccountService
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import client_context, require_permission
+from {{.PackageName}}.identity.models import Principal
+
+CUSTOMER_SESSION_COOKIE = "scaffold_customer_session"
+MAXIMUM_CREDENTIAL_LENGTH = 512
+CUSTOMER_SESSION_MAX_AGE = 30 * 24 * 60 * 60
+router = APIRouter(tags=["customer-accounts"])
+
+
+def customer_account_service(request: Request) -> CustomerAccountService:
+    """Resolve the process-scoped customer account service."""
+    service: CustomerAccountService = request.app.state.customer_account_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable customer failure responses."""
+
+    @app.exception_handler(CustomerError)
+    async def customer_error(_request: Request, error: CustomerError) -> JSONResponse:
+        status, code = {
+            CustomerErrorKind.INVALID: (400, "customer.invalid"),
+            CustomerErrorKind.INVALID_CREDENTIALS: (401, "customer.invalid_credentials"),
+            CustomerErrorKind.NOT_FOUND: (404, "customer.not_found"),
+            CustomerErrorKind.CONFLICT: (409, "customer.conflict"),
+            CustomerErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+def current_customer(
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+    customer_session: Annotated[
+        str | None,
+        Cookie(alias=CUSTOMER_SESSION_COOKIE),
+    ] = None,
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+) -> CustomerRecord:
+    """Authenticate one bounded customer cookie in the storefront scope."""
+    token = customer_session or ""
+    if len(token) > MAXIMUM_CREDENTIAL_LENGTH:
+        raise CustomerError(
+            CustomerErrorKind.INVALID_CREDENTIALS,
+            "invalid customer credentials",
+        )
+    return service.authenticate(organization_id or "", token)
+
+
+def _set_customer_cookie(request: Request, response: Response, token: str, max_age: int) -> None:
+    response.set_cookie(
+        key=CUSTOMER_SESSION_COOKIE,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=bool(request.app.state.cookie_secure),
+        samesite="lax",
+        path="/",
+    )
+
+
+@router.post(
+    "/api/v1/storefront/account/register",
+    response_model=CustomerEnvelope,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def register_customer(
+    value: CustomerRegistration,
+    request: Request,
+    response: Response,
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+) -> CustomerEnvelope:
+    """Register a customer and create a separate customer session."""
+    ip_address, user_agent = client_context(request)
+    result = service.register(organization_id or "", value, ip_address, user_agent)
+    _set_customer_cookie(request, response, result.token, CUSTOMER_SESSION_MAX_AGE)
+    return CustomerEnvelope(customer=result.customer)
+
+
+@router.post(
+    "/api/v1/storefront/account/login",
+    response_model=CustomerEnvelope,
+    response_model_exclude_none=True,
+)
+def login_customer(
+    value: CustomerLogin,
+    request: Request,
+    response: Response,
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+) -> CustomerEnvelope:
+    """Authenticate a customer and create a separate customer session."""
+    ip_address, user_agent = client_context(request)
+    result = service.login(organization_id or "", value, ip_address, user_agent)
+    _set_customer_cookie(request, response, result.token, CUSTOMER_SESSION_MAX_AGE)
+    return CustomerEnvelope(customer=result.customer)
+
+
+@router.post("/api/v1/storefront/account/logout", status_code=204)
+def logout_customer(
+    request: Request,
+    response: Response,
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+    customer_session: Annotated[
+        str | None,
+        Cookie(alias=CUSTOMER_SESSION_COOKIE),
+    ] = None,
+    organization_id: Annotated[
+        str | None,
+        Header(alias="X-Organization-ID", max_length=191),
+    ] = None,
+) -> None:
+    """Revoke or harmlessly ignore the current customer cookie."""
+    ip_address, user_agent = client_context(request)
+    token = customer_session or ""
+    if len(token) <= MAXIMUM_CREDENTIAL_LENGTH:
+        service.logout(organization_id or "", token, ip_address, user_agent)
+    _set_customer_cookie(request, response, "", 0)
+
+
+@router.get(
+    "/api/v1/storefront/account/me",
+    response_model=CustomerEnvelope,
+    response_model_exclude_none=True,
+)
+def current_customer_account(
+    customer: Annotated[CustomerRecord, Depends(current_customer)],
+) -> CustomerEnvelope:
+    """Return the current customer account."""
+    return CustomerEnvelope(customer=customer.public())
+
+
+@router.put(
+    "/api/v1/storefront/account/profile",
+    response_model=CustomerEnvelope,
+    response_model_exclude_none=True,
+)
+def update_customer_profile(
+    value: CustomerProfileUpdate,
+    request: Request,
+    customer: Annotated[CustomerRecord, Depends(current_customer)],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerEnvelope:
+    """Update the current customer's profile."""
+    ip_address, user_agent = client_context(request)
+    return CustomerEnvelope(
+        customer=service.update_profile(customer, value, ip_address, user_agent)
+    )
+
+
+@router.put(
+    "/api/v1/storefront/account/password",
+    response_model=CustomerPasswordChanged,
+    response_model_exclude_none=True,
+)
+def change_customer_password(
+    value: CustomerPasswordChange,
+    request: Request,
+    response: Response,
+    customer: Annotated[CustomerRecord, Depends(current_customer)],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerPasswordChanged:
+    """Change the password, revoke all sessions, and clear the current cookie."""
+    ip_address, user_agent = client_context(request)
+    changed = service.change_password(customer, value, ip_address, user_agent)
+    _set_customer_cookie(request, response, "", 0)
+    return CustomerPasswordChanged(customer=changed)
+
+
+@router.post(
+    "/api/v1/storefront/account/close",
+    response_model=CustomerEnvelope,
+    response_model_exclude_none=True,
+)
+def close_customer_account(
+    value: CustomerTransition,
+    request: Request,
+    response: Response,
+    customer: Annotated[CustomerRecord, Depends(current_customer)],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerEnvelope:
+    """Close the current customer permanently and clear its cookie."""
+    ip_address, user_agent = client_context(request)
+    closed = service.close(customer, value, ip_address, user_agent)
+    _set_customer_cookie(request, response, "", 0)
+    return CustomerEnvelope(customer=closed)
+
+
+@router.get(
+    "/api/v1/customers",
+    response_model=CustomerPage,
+    response_model_exclude_none=True,
+)
+def list_customers(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("customers:accounts:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> CustomerPage:
+    """List customer accounts in the administrator's current scope."""
+    return service.list(status, cursor, limit, principal)
+
+
+@router.get(
+    "/api/v1/customers/{id}",
+    response_model=CustomerAccount,
+    response_model_exclude_none=True,
+)
+def get_customer(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("customers:accounts:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerAccount:
+    """Read one customer account in the administrator's current scope."""
+    return service.get(id, principal)
+
+
+@router.post(
+    "/api/v1/customers/{id}/suspend",
+    response_model=CustomerAccount,
+    response_model_exclude_none=True,
+)
+def suspend_customer(
+    id: str,
+    value: CustomerTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("customers:accounts:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerAccount:
+    """Suspend one active customer and revoke every session."""
+    return service.suspend(id, value, principal)
+
+
+@router.post(
+    "/api/v1/customers/{id}/reactivate",
+    response_model=CustomerAccount,
+    response_model_exclude_none=True,
+)
+def reactivate_customer(
+    id: str,
+    value: CustomerTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("customers:accounts:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CustomerAccountService, Depends(customer_account_service)],
+) -> CustomerAccount:
+    """Reactivate one suspended customer without restoring sessions."""
+    return service.reactivate(id, value, principal)

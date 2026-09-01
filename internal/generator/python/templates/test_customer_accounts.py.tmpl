@@ -1,0 +1,465 @@
+"""Customer account normalization, isolation, sessions, and lifecycle contracts."""
+
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime
+
+import pytest
+
+import {{.PackageName}}.customer_accounts.service as customer_service_module
+from {{.PackageName}}.customer_accounts.models import (
+    CustomerError,
+    CustomerErrorKind,
+    CustomerLogin,
+    CustomerPasswordChange,
+    CustomerProfileUpdate,
+    CustomerRecord,
+    CustomerRegistration,
+    CustomerSession,
+    CustomerStatus,
+    CustomerTransition,
+)
+from {{.PackageName}}.customer_accounts.repository import (
+    CustomerConflict,
+    CustomerMutation,
+    CustomerPageResult,
+    CustomerStatusTransition,
+)
+from {{.PackageName}}.customer_accounts.service import CustomerAccountService
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.identity.passwords import DUMMY_HASH
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+SCOPE = {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+OTHER_SCOPE = {{if .Tenancy}}"organization-2"{{else}}""{{end}}
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.customers: dict[str, CustomerRecord] = {}
+        self.sessions: dict[str, CustomerSession] = {}
+        self.audits: list[AuditEvent] = []
+        self.failure: Exception | None = None
+
+    def register(
+        self,
+        customer: CustomerRecord,
+        session: CustomerSession,
+        audit: AuditEvent,
+    ) -> None:
+        self._fail()
+        if any(
+            item.organization_id == customer.organization_id and item.email == customer.email
+            for item in self.customers.values()
+        ):
+            raise CustomerConflict()
+        self.customers[customer.id] = customer
+        self.sessions[session.token_hash] = session
+        self.audits.append(audit)
+
+    def find_by_email(self, organization_id: str, email: str) -> CustomerRecord | None:
+        self._fail()
+        return next(
+            (
+                customer
+                for customer in self.customers.values()
+                if customer.organization_id == organization_id and customer.email == email
+            ),
+            None,
+        )
+
+    def create_session(self, session: CustomerSession, audit: AuditEvent) -> None:
+        self._fail()
+        self.sessions[session.token_hash] = session
+        self.audits.append(audit)
+
+    def find_by_session(
+        self,
+        organization_id: str,
+        token_hash: str,
+        now: datetime,
+    ) -> CustomerRecord | None:
+        self._fail()
+        session = self.sessions.get(token_hash)
+        if session is None or session.expires_at <= now:
+            return None
+        customer = self.customers.get(session.customer_id)
+        if (
+            customer is None
+            or customer.organization_id != organization_id
+            or customer.status != CustomerStatus.ACTIVE
+        ):
+            return None
+        return customer
+
+    def delete_session(self, token_hash: str, audit: AuditEvent) -> None:
+        self._fail()
+        self.sessions.pop(token_hash, None)
+        self.audits.append(audit)
+
+    def append_audit(self, audit: AuditEvent) -> None:
+        self._fail()
+        self.audits.append(audit)
+
+    def update_profile(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        self._fail()
+        current = self._mutable(mutation)
+        changed = replace(
+            current,
+            display_name=mutation.display_name,
+            version=current.version + 1,
+            updated_at=mutation.updated_at,
+        )
+        self.customers[current.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def change_password(
+        self,
+        mutation: CustomerMutation,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        self._fail()
+        current = self._mutable(mutation)
+        changed = replace(
+            current,
+            password_hash=mutation.password_hash,
+            version=current.version + 1,
+            updated_at=mutation.updated_at,
+        )
+        self.customers[current.id] = changed
+        self._revoke(current.id)
+        self.audits.append(audit)
+        return changed
+
+    def get(self, organization_id: str, customer_id: str) -> CustomerRecord | None:
+        self._fail()
+        customer = self.customers.get(customer_id)
+        if customer is None or customer.organization_id != organization_id:
+            return None
+        return customer
+
+    def list_page(
+        self,
+        organization_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> CustomerPageResult:
+        self._fail()
+        values = sorted(
+            (
+                customer
+                for customer in self.customers.values()
+                if customer.organization_id == organization_id
+                and (not status or customer.status.value == status)
+                and (not cursor or customer.id > cursor)
+            ),
+            key=lambda customer: customer.id,
+        )
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return CustomerPageResult(values[:limit], next_cursor)
+
+    def transition(
+        self,
+        transition: CustomerStatusTransition,
+        audit: AuditEvent,
+    ) -> CustomerRecord:
+        self._fail()
+        current = self.customers.get(transition.customer_id)
+        if (
+            current is None
+            or current.organization_id != transition.organization_id
+            or current.version != transition.expected_version
+            or current.status != transition.from_status
+        ):
+            raise CustomerConflict()
+        changed = replace(
+            current,
+            status=transition.to_status,
+            version=current.version + 1,
+            updated_at=transition.updated_at,
+        )
+        self.customers[current.id] = changed
+        self._revoke(current.id)
+        self.audits.append(audit)
+        return changed
+
+    def _mutable(self, mutation: CustomerMutation) -> CustomerRecord:
+        current = self.customers.get(mutation.customer_id)
+        if (
+            current is None
+            or current.organization_id != mutation.organization_id
+            or current.version != mutation.expected_version
+            or current.status != CustomerStatus.ACTIVE
+        ):
+            raise CustomerConflict()
+        return current
+
+    def _revoke(self, customer_id: str) -> None:
+        self.sessions = {
+            token_hash: session
+            for token_hash, session in self.sessions.items()
+            if session.customer_id != customer_id
+        }
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+@pytest.fixture(autouse=True)
+def fast_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(customer_service_module, "hash_password", lambda value: f"hash:{value}")
+    monkeypatch.setattr(
+        customer_service_module,
+        "verify_password",
+        lambda encoded, value: encoded == f"hash:{value}",
+    )
+
+
+def _service(repository: MemoryRepository) -> CustomerAccountService:
+    return CustomerAccountService(repository, lambda: NOW)
+
+
+def _actor(scope: str = SCOPE) -> Principal:
+    return Principal(
+        user_id="admin-1",
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=scope,
+{{- end}}
+    )
+
+
+def _registration(email: str = " Customer@Example.com ") -> CustomerRegistration:
+    return CustomerRegistration(
+        email=email,
+        password="correct-password",
+        display_name=" Customer One ",
+    )
+
+
+def test_registration_profile_password_and_customer_session_are_independent() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    registered = service.register(SCOPE, _registration(), "127.0.0.1", "browser")
+
+    assert registered.customer.email == "customer@example.com"
+    assert registered.customer.display_name == "Customer One"
+    assert registered.customer.status == CustomerStatus.ACTIVE
+    assert registered.customer.version == "1"
+    current = service.authenticate(SCOPE, registered.token)
+    assert current.id == registered.customer.id
+
+    profiled = service.update_profile(
+        current,
+        CustomerProfileUpdate(display_name="Customer Two", version="1"),
+        "127.0.0.1",
+        "browser",
+    )
+    assert profiled.display_name == "Customer Two"
+    assert profiled.version == "2"
+
+    current = repository.customers[current.id]
+    changed = service.change_password(
+        current,
+        CustomerPasswordChange(
+            current_password="correct-password",
+            new_password="replacement-password",
+            version="2",
+        ),
+        "127.0.0.1",
+        "browser",
+    )
+    assert changed.version == "3"
+    with pytest.raises(CustomerError) as revoked:
+        service.authenticate(SCOPE, registered.token)
+    assert revoked.value.kind == CustomerErrorKind.INVALID_CREDENTIALS
+    with pytest.raises(CustomerError):
+        service.login(
+            SCOPE,
+            CustomerLogin(email=changed.email, password="correct-password"),
+            "127.0.0.1",
+            "browser",
+        )
+    logged_in = service.login(
+        SCOPE,
+        CustomerLogin(email=changed.email, password="replacement-password"),
+        "127.0.0.1",
+        "browser",
+    )
+    service.logout(SCOPE, logged_in.token, "127.0.0.1", "browser")
+    with pytest.raises(CustomerError):
+        service.authenticate(SCOPE, logged_in.token)
+    service.logout(SCOPE, "missing", "127.0.0.1", "browser")
+
+
+def test_administration_lifecycle_is_scoped_optimistic_and_terminal() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    registered = service.register(SCOPE, _registration(), "ip", "agent")
+    actor = _actor()
+
+    assert service.get(registered.customer.id, actor) == registered.customer
+    assert service.list("active", "", 20, actor).items == [registered.customer]
+    suspended = service.suspend(
+        registered.customer.id,
+        CustomerTransition(version="1"),
+        actor,
+    )
+    assert suspended.status == CustomerStatus.SUSPENDED
+    with pytest.raises(CustomerError) as denied:
+        service.login(
+            SCOPE,
+            CustomerLogin(email=registered.customer.email, password="correct-password"),
+            "ip",
+            "agent",
+        )
+    assert denied.value.kind == CustomerErrorKind.INVALID_CREDENTIALS
+    active = service.reactivate(
+        registered.customer.id,
+        CustomerTransition(version="2"),
+        actor,
+    )
+    assert active.status == CustomerStatus.ACTIVE
+    login = service.login(
+        SCOPE,
+        CustomerLogin(email=registered.customer.email, password="correct-password"),
+        "ip",
+        "agent",
+    )
+    closed = service.close(
+        repository.customers[active.id],
+        CustomerTransition(version="3"),
+        "ip",
+        "agent",
+    )
+    assert closed.status == CustomerStatus.CLOSED
+    with pytest.raises(CustomerError):
+        service.authenticate(SCOPE, login.token)
+    with pytest.raises(CustomerError) as terminal:
+        service.reactivate(active.id, CustomerTransition(version="4"), actor)
+    assert terminal.value.kind == CustomerErrorKind.CONFLICT
+    assert [audit.action for audit in repository.audits] == [
+        "customer.register",
+        "customers:accounts:suspend",
+        "customer.login",
+        "customers:accounts:reactivate",
+        "customer.login",
+        "customer.close",
+    ]
+
+
+def test_duplicate_scope_hiding_invalid_inputs_and_storage_errors() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    registered = service.register(SCOPE, _registration(), "ip", "agent")
+    with pytest.raises(CustomerError) as duplicate:
+        service.register(SCOPE, _registration("customer@example.com"), "ip", "agent")
+    assert duplicate.value.kind == CustomerErrorKind.CONFLICT
+
+{{- if .Tenancy}}
+    other = service.register(OTHER_SCOPE, _registration("customer@example.com"), "ip", "agent")
+    assert other.customer.organization_id == OTHER_SCOPE
+    with pytest.raises(CustomerError) as hidden:
+        service.get(registered.customer.id, _actor(OTHER_SCOPE))
+    assert hidden.value.kind == CustomerErrorKind.NOT_FOUND
+{{- else}}
+    with pytest.raises(CustomerError) as invalid_scope:
+        service.register("unexpected", _registration("other@example.com"), "ip", "agent")
+    assert invalid_scope.value.kind == CustomerErrorKind.INVALID
+{{- end}}
+
+    current = repository.customers[registered.customer.id]
+    invalid_operations: list[Callable[[], object]] = [
+        lambda: service.update_profile(
+            current,
+            CustomerProfileUpdate.model_construct(display_name="bad\nname", version="1"),
+            "ip",
+            "agent",
+        ),
+        lambda: service.list("unknown", "", 20, _actor()),
+        lambda: service.list("", "bad\ncursor", 20, _actor()),
+        lambda: service.list("", "", 0, _actor()),
+        lambda: service.get(" ", _actor()),
+    ]
+    for operation in invalid_operations:
+        with pytest.raises(CustomerError) as invalid:
+            operation()
+        assert invalid.value.kind == CustomerErrorKind.INVALID
+
+    with pytest.raises(CustomerError) as stale:
+        service.update_profile(
+            current,
+            CustomerProfileUpdate(display_name="Stale", version="2"),
+            "ip",
+            "agent",
+        )
+    assert stale.value.kind == CustomerErrorKind.CONFLICT
+    with pytest.raises(CustomerError) as wrong_password:
+        service.change_password(
+            current,
+            CustomerPasswordChange(
+                current_password="wrong-password",
+                new_password="replacement-password",
+                version="1",
+            ),
+            "ip",
+            "agent",
+        )
+    assert wrong_password.value.kind == CustomerErrorKind.INVALID_CREDENTIALS
+
+    repository.failure = RuntimeError("database detail")
+    with pytest.raises(CustomerError) as storage:
+        service.get(registered.customer.id, _actor())
+    assert storage.value.kind == CustomerErrorKind.STORAGE
+    assert "database detail" not in storage.value.message
+
+
+def test_missing_and_suspended_logins_do_password_work_before_uniform_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    registered = service.register(SCOPE, _registration(), "ip", "agent")
+    customer = repository.customers[registered.customer.id]
+    repository.customers[customer.id] = replace(customer, status=CustomerStatus.SUSPENDED)
+    verified: list[str] = []
+
+    def record_verification(encoded: str, _password: str) -> bool:
+        verified.append(encoded)
+        return True
+
+    monkeypatch.setattr(customer_service_module, "verify_password", record_verification)
+    for email in ("missing@example.com", customer.email):
+        with pytest.raises(CustomerError) as denied:
+            service.login(
+                SCOPE,
+                CustomerLogin(email=email, password="any-password"),
+                "ip",
+                "agent",
+            )
+        assert denied.value.kind == CustomerErrorKind.INVALID_CREDENTIALS
+    assert verified == [DUMMY_HASH, customer.password_hash]
+
+
+def test_naive_clock_and_invalid_administrator_are_rejected() -> None:
+    service = CustomerAccountService(
+        MemoryRepository(),
+        lambda: datetime(2026, 9, 1),  # noqa: DTZ001
+    )
+    with pytest.raises(CustomerError) as invalid_clock:
+        service.register(SCOPE, _registration(), "ip", "agent")
+    assert invalid_clock.value.kind == CustomerErrorKind.INVALID
+
+    invalid_actor = Principal(user_id="", email="admin@example.com", role="admin", method="token")
+    with pytest.raises(CustomerError) as invalid_actor_error:
+        _service(MemoryRepository()).list("", "", 20, invalid_actor)
+    assert invalid_actor_error.value.kind == CustomerErrorKind.INVALID_CREDENTIALS

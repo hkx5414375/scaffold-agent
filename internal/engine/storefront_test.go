@@ -513,6 +513,83 @@ spec:
 	}
 }
 
+func TestPythonCustomerAccountsStorefrontPlanApplyVerifyBothDatabases(t *testing.T) {
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			root := t.TempDir()
+			blueprint := `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-python-customer-storefront
+  display_name: Generated Python Customer Storefront
+spec:
+  stack:
+    backend: python
+    admin_ui: none
+    storefront: nuxt
+  database:
+    engine: DATABASE
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: customer-accounts
+      version: 0.1.0
+`
+			writeBlueprint(t, root, strings.ReplaceAll(blueprint, "DATABASE", database))
+			application := New("test")
+			ctx := context.Background()
+			planned := application.Plan(ctx, PlanInput{
+				ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate,
+			})
+			if planned.Status != result.StatusOK {
+				t.Fatalf("Plan() = %#v, want ok", planned)
+			}
+			plannedData := planned.Data.(planData)
+			if plannedData.ChangeCount != 92 ||
+				plannedData.CapabilityLock["customer-accounts"] != "0.1.0" ||
+				plannedData.CapabilityLock["nuxt-storefront"] != "0.1.0" {
+				t.Fatalf("Plan() data = %#v", plannedData)
+			}
+			previewed := application.Preview(ctx, PreviewInput{
+				ProjectRoot: root, PlanID: plannedData.PlanID,
+			})
+			if previewed.Status != result.StatusOK {
+				t.Fatalf("Preview() = %#v, want ok", previewed)
+			}
+			applied := application.Apply(ctx, ApplyInput{
+				ProjectRoot: root, PlanID: plannedData.PlanID,
+				ApplyToken: previewed.Data.(previewData).ApplyToken,
+			})
+			if applied.Status != result.StatusOK {
+				t.Fatalf("Apply() = %#v, want ok", applied)
+			}
+			for _, path := range []string{
+				"src/generated_python_customer_storefront/customer_accounts/service.py",
+				"api/openapi.yaml",
+				"web/storefront/app/pages/account/index.vue",
+				"web/storefront/app/pages/account/login.vue",
+				"web/storefront/server/api/storefront/account/login.post.ts",
+				"web/storefront/server/utils/customer.ts",
+			} {
+				if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+					t.Errorf("generated Python customer storefront is missing %s: %v", path, err)
+				}
+			}
+			if database == "postgresql" && os.Getenv("SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD") == "1" {
+				runGeneratedStorefrontQualityGate(t, filepath.Join(root, "web", "storefront"))
+			}
+			verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+			if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+				t.Fatalf("Verify() = %#v, want no findings", verified)
+			}
+		})
+	}
+}
+
 func runGeneratedStorefrontQualityGate(t *testing.T, root string) {
 	t.Helper()
 	commands := [][]string{
