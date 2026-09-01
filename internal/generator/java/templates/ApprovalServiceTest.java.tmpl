@@ -1,0 +1,187 @@
+package {{.PackageName}}.approvals;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class ApprovalServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void submitsAndTransitionsWithImmutableEvidence() {
+        FakeRepository repository = new FakeRepository();
+        ApprovalService service = service(repository);
+        Principal requester = actor("requester-1");
+        Principal reviewer = actor("reviewer-1");
+
+        ApprovalRequest submitted =
+                service.submit(
+                        new ApprovalService.SubmitInput("task-1", "Review task", "details"),
+                        requester);
+        ApprovalRequest approved =
+                service.approve(
+                        submitted.id(),
+                        new ApprovalService.DecisionInput(1L, "looks good"),
+                        reviewer);
+
+        assertThat(submitted.status()).isEqualTo(ApprovalService.PENDING);
+        assertThat(approved.status()).isEqualTo(ApprovalService.APPROVED);
+        assertThat(approved.version()).isEqualTo(2L);
+        assertThat(repository.events)
+                .extracting(ApprovalEvent::status)
+                .containsExactly(ApprovalService.PENDING, ApprovalService.APPROVED);
+        assertThat(repository.audits)
+                .extracting(AuditEvent::action)
+                .containsExactly("approvals:submit", "approvals:approved");
+    }
+
+    @Test
+    void enforcesSeparationReasonsOwnershipAndOptimisticVersion() {
+        FakeRepository repository = new FakeRepository();
+        ApprovalService service = service(repository);
+        Principal requester = actor("requester-1");
+        Principal reviewer = actor("reviewer-1");
+        ApprovalRequest request =
+                service.submit(
+                        new ApprovalService.SubmitInput("task-1", "Review task", ""),
+                        requester);
+
+        assertKind(
+                () ->
+                        service.approve(
+                                request.id(),
+                                new ApprovalService.DecisionInput(1L, ""),
+                                requester),
+                ApprovalException.Kind.SELF_DECISION);
+        assertKind(
+                () ->
+                        service.reject(
+                                request.id(),
+                                new ApprovalService.DecisionInput(1L, ""),
+                                reviewer),
+                ApprovalException.Kind.INVALID);
+        assertKind(
+                () ->
+                        service.cancel(
+                                request.id(),
+                                new ApprovalService.DecisionInput(1L, ""),
+                                reviewer),
+                ApprovalException.Kind.FORBIDDEN);
+        assertKind(
+                () ->
+                        service.approve(
+                                request.id(),
+                                new ApprovalService.DecisionInput(2L, ""),
+                                reviewer),
+                ApprovalException.Kind.CONFLICT);
+        assertThat(repository.events).hasSize(1);
+    }
+
+    @Test
+    void rejectsUnsafeInputAndListFilters() {
+        ApprovalService service = service(new FakeRepository());
+
+        assertKind(
+                () ->
+                        service.submit(
+                                new ApprovalService.SubmitInput("", "summary", ""),
+                                actor("requester-1")),
+                ApprovalException.Kind.INVALID);
+        assertKind(
+                () -> service.list("unknown", "", 20, actor("reviewer-1")),
+                ApprovalException.Kind.INVALID);
+        assertKind(
+                () -> service.list("", "", 101, actor("reviewer-1")),
+                ApprovalException.Kind.INVALID);
+    }
+
+    private static ApprovalService service(FakeRepository repository) {
+        return new ApprovalService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static void assertKind(Runnable operation, ApprovalException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(ApprovalException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+    private static Principal actor(String userId) {
+        return new Principal(
+                userId,
+                userId + "@example.com",
+                "admin",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+    private static final class FakeRepository implements ApprovalRepository {
+
+        private final List<ApprovalEvent> events = new ArrayList<>();
+        private final List<AuditEvent> audits = new ArrayList<>();
+        private ApprovalRequest request;
+
+        @Override
+        public void create(
+                ApprovalRequest value, ApprovalEvent event, AuditEvent auditEvent) {
+            request = value;
+            events.add(event);
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public Optional<ApprovalRequest> get(String organizationId, String id) {
+            return request != null && request.id().equals(id)
+                    ? Optional.of(request)
+                    : Optional.empty();
+        }
+
+        @Override
+        public PageResult list(
+                String organizationId,
+                String requesterUserId,
+                String status,
+                String cursor,
+                int limit) {
+            return new PageResult(request == null ? List.of() : List.of(request), "");
+        }
+
+        @Override
+        public ApprovalRequest transition(
+                Transition transition, ApprovalEvent event, AuditEvent auditEvent) {
+            request =
+                    new ApprovalRequest(
+                            request.id(),
+                            request.organizationId(),
+                            request.subjectType(),
+                            request.subjectId(),
+                            request.requesterUserId(),
+                            request.summary(),
+                            request.details(),
+                            transition.toStatus(),
+                            request.version() + 1,
+                            transition.comment().isEmpty() ? null : transition.comment(),
+                            transition.actorUserId(),
+                            transition.resolvedAt(),
+                            request.createdAt(),
+                            transition.resolvedAt());
+            events.add(event);
+            audits.add(auditEvent);
+            return request;
+        }
+
+        @Override
+        public List<ApprovalEvent> events(String organizationId, String requestId) {
+            return List.copyOf(events);
+        }
+    }
+}

@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器现可生成 Java 21/Spring Boot 4.1 + Maven 的 PostgreSQL 或 MySQL 服务，包含有界数据库就绪检查、PBKDF2-SHA256 密码、HttpOnly 浏览器会话、只保存摘要的 Bearer Token、权限 RBAC、事务安全审计、蓝图驱动 CRUD、有界游标分页、乐观锁、组织生命周期、可靠后台任务、通知、文件资产、应用缓存、带审计的任务管理、安全 HTTP 可观测性、原子 CSV 导入导出、OpenAPI、共享 Vue/Element Plus 管理端和锁定的质量门禁；尚未实现的能力包和商城选择会被明确拒绝。Python 当前仍返回稳定诊断 `generator.adapter.unavailable`。所有不支持的选择都会失败，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器现可生成 Java 21/Spring Boot 4.1 + Maven 的 PostgreSQL 或 MySQL 服务，包含有界数据库就绪检查、PBKDF2-SHA256 密码、HttpOnly 浏览器会话、只保存摘要的 Bearer Token、权限 RBAC、事务安全审计、蓝图驱动 CRUD、有界游标分页、乐观锁、组织生命周期、可靠后台任务、通知、文件资产、应用缓存、带审计的任务管理、安全 HTTP 可观测性、原子 CSV 导入导出、单阶段审批工作流、OpenAPI、共享 Vue/Element Plus 管理端和锁定的质量门禁；Java 已与 Go 的平台能力集合对齐。Python 当前仍返回稳定诊断 `generator.adapter.unavailable`。所有不支持的选择都会失败，不会生成残缺项目。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
@@ -44,7 +44,7 @@ Go 与 Java 选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组
 
 选择 `csv-import-export` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体。生成项目会按字段顺序提供 CSV 表头、类型解析、空模板、原子且只新增的导入，以及带审计的导出；导入和导出使用独立的管理员权限。单个文档最多 5 MiB、1000 行，任意一行无效或冲突都会回滚整个导入，超出上限的导出不会返回半份文件。字符串导出会用可逆方式转义电子表格公式。AI 必须沿用生成的字段顺序和 RFC3339 时间，不得擅自改成无审计 Upsert，也不得绕过组织范围或大小限制。
 
-选择 `approval-workflows` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体，并在同一模块中显式声明名为 `approval` 的工作流，状态顺序固定为 `pending`、`approved`、`rejected`、`cancelled`。生成服务会在提交时验证当前组织范围内的业务对象，同一对象同时最多有一个待审批请求；发起人不能批准或拒绝自己的请求，只有发起人能撤回待审批请求，所有终态变更都必须携带当前版本。发起和审批使用分离的权限，每次成功提交或变更都会在同一事务中写入审批请求、不可变事件和安全审计。AI 不得让审批隐式修改业务对象、绕过职责分离、覆盖事件历史，或自行增加 Blueprint 没有声明的流程状态。
+Go 或 Java 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体，并在同一模块中显式声明名为 `approval` 的工作流，状态顺序固定为 `pending`、`approved`、`rejected`、`cancelled`。生成服务会在提交时验证当前组织范围内的业务对象，同一对象同时最多有一个待审批请求；发起人不能批准或拒绝自己的请求，只有发起人能撤回待审批请求，所有终态变更都必须携带当前版本。发起和审批使用分离的权限，每次成功提交或变更都会在同一事务中写入审批请求、不可变事件和安全审计。AI 不得让审批隐式修改业务对象、绕过职责分离、覆盖事件历史，或自行增加 Blueprint 没有声明的流程状态。
 
 ## STDIO 协议
 

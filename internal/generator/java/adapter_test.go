@@ -811,6 +811,89 @@ func TestGenerateCSVImportExportRequiresBusinessEntity(t *testing.T) {
 	}
 }
 
+func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Database.Engine = database
+			module := businessModule()
+			module.Workflows = []spec.Workflow{{
+				Name:   "approval",
+				States: []string{"pending", "approved", "rejected", "cancelled"},
+			}}
+			project.Spec.Modules = []spec.Module{module}
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: approvalsOwner, Version: approvalsVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if result.CapabilityLock[approvalsOwner] != approvalsVersion {
+				t.Fatalf("Generate() capability lock = %#v", result.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/approvals/ApprovalService.java",
+				"src/main/java/com/scaffold/generated/demoservice/approvals/JdbcApprovalRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/approvals/ApprovalController.java",
+				"src/test/java/com/scaffold/generated/demoservice/approvals/ApprovalServiceTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/approvals/ApprovalDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000250__approval_workflows.sql",
+				"web/admin/src/views/ApprovalsView.vue",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != approvalsOwner {
+					t.Errorf("Generate() approval output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated approval OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(openAPI), "/api/v1/approvals/{id}/approve:") ||
+				!strings.Contains(string(openAPI), "approvals:decide") {
+				t.Fatalf("generated approval OpenAPI is incomplete:\n%s", openAPI)
+			}
+		})
+	}
+}
+
+func TestGenerateApprovalWorkflowsRequiresBusinessAndExactWorkflow(t *testing.T) {
+	t.Parallel()
+
+	withoutBusiness := validProject()
+	withoutBusiness.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: approvalsOwner, Version: approvalsVersion,
+	}}
+	if _, err := New().Generate(context.Background(), withoutBusiness); err == nil ||
+		!strings.Contains(err.Error(), "requires one generated business entity") {
+		t.Fatalf("Generate() without business error = %v", err)
+	}
+
+	withoutWorkflow := validProject()
+	withoutWorkflow.Spec.Modules = []spec.Module{businessModule()}
+	withoutWorkflow.Spec.Capabilities = withoutBusiness.Spec.Capabilities
+	if _, err := New().Generate(context.Background(), withoutWorkflow); err == nil ||
+		!strings.Contains(err.Error(), "requires workflow approval") {
+		t.Fatalf("Generate() without workflow error = %v", err)
+	}
+
+	wrongStates := validProject()
+	module := businessModule()
+	module.Workflows = []spec.Workflow{{Name: "approval", States: []string{"pending", "approved"}}}
+	wrongStates.Spec.Modules = []spec.Module{module}
+	wrongStates.Spec.Capabilities = withoutBusiness.Spec.Capabilities
+	if _, err := New().Generate(context.Background(), wrongStates); err == nil ||
+		!strings.Contains(err.Error(), "pending, approved, rejected, cancelled") {
+		t.Fatalf("Generate() wrong workflow error = %v", err)
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

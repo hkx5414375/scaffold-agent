@@ -60,7 +60,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java job-administration 0.1 with payload-free metadata, tenant-scoped listing, dead-only retry, atomic audit, and shared administration UI.
 - [x] Java observability 0.1 with bounded request IDs, safe access logs, label-free Prometheus metrics, and whole-probe readiness deadlines.
 - [x] Java csv-import-export 0.1 with fixed field order, bounded parsing, atomic create-only import, spreadsheet-safe export, tenant scope, and audit.
-- [ ] Java platform capability parity.
+- [x] Java approval-workflows 0.1 with subject verification, separation of duties, optimistic transitions, immutable events, tenant scope, and shared administration UI.
+- [x] Java platform capability parity.
 - [ ] Python adapter with the same Blueprint, transport, security, database, and quality contracts.
 
 ## M7 — General business suite and storefront

@@ -1,0 +1,37 @@
+package {{.PackageName}}.approvals;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface ApprovalRepository {
+
+    void create(ApprovalRequest request, ApprovalEvent event, AuditEvent auditEvent);
+
+    Optional<ApprovalRequest> get(String organizationId, String id);
+
+    PageResult list(
+            String organizationId, String requesterUserId, String status, String cursor, int limit);
+
+    ApprovalRequest transition(Transition transition, ApprovalEvent event, AuditEvent auditEvent);
+
+    List<ApprovalEvent> events(String organizationId, String requestId);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    record PageResult(List<ApprovalRequest> items, String nextCursor) {}
+
+    record Transition(
+            String organizationId,
+            String requestId,
+            long expectedVersion,
+            String actorUserId,
+            String actorRule,
+            String fromStatus,
+            String toStatus,
+            String comment,
+            Instant resolvedAt) {}
+}

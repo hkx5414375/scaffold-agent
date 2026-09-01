@@ -1,0 +1,60 @@
+insert into identity_permissions (code, description) values
+    ('approvals:submit', 'Submit approval requests'),
+    ('approvals:mine', 'Read and cancel own approval requests'),
+    ('approvals:read', 'Read all approval requests and immutable events'),
+    ('approvals:decide', 'Approve or reject pending requests');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'approvals:submit'),
+    ('admin', 'approvals:mine'),
+    ('admin', 'approvals:read'),
+    ('admin', 'approvals:decide'),
+    ('user', 'approvals:submit'),
+    ('user', 'approvals:mine');
+
+create table approval_requests (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    subject_type text not null check (subject_type = '{{.Business.ModuleName}}.{{.Business.EntityName}}'),
+    subject_id text not null,
+    requester_user_id text not null references identity_users (id),
+    summary varchar(255) not null,
+    details text not null default '',
+    status text not null check (status in ('pending', 'approved', 'rejected', 'cancelled')),
+    version bigint not null check (version > 0),
+    resolution_comment text null,
+    resolved_by_user_id text null references identity_users (id),
+    resolved_at timestamptz null,
+    created_at timestamptz not null,
+    updated_at timestamptz not null,
+    check (
+        (status = 'pending' and resolved_by_user_id is null and resolved_at is null)
+        or (status <> 'pending' and resolved_by_user_id is not null and resolved_at is not null)
+    )
+);
+
+{{if .Tenancy}}create unique index approval_pending_subject_unique
+    on approval_requests (organization_id, subject_id) where status = 'pending';
+create index approval_scope_status_idx on approval_requests (organization_id, status, id);
+create index approval_scope_requester_idx
+    on approval_requests (organization_id, requester_user_id, id);
+{{else}}create unique index approval_pending_subject_unique
+    on approval_requests (subject_id) where status = 'pending';
+create index approval_status_idx on approval_requests (status, id);
+create index approval_requester_idx on approval_requests (requester_user_id, id);
+{{end}}
+
+create table approval_events (
+    id text primary key,
+    request_id text not null references approval_requests (id) on delete cascade,
+    actor_user_id text not null references identity_users (id),
+    status text not null check (status in ('pending', 'approved', 'rejected', 'cancelled')),
+    comment text null,
+    created_at timestamptz not null
+);
+
+create index approval_events_request_idx on approval_events (request_id, created_at, id);

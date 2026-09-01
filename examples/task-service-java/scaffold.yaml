@@ -29,6 +29,8 @@ spec:
       version: 0.1.0
     - name: csv-import-export
       version: 0.1.0
+    - name: approval-workflows
+      version: 0.1.0
   modules:
     - name: tasks
       entities:
@@ -53,6 +55,9 @@ spec:
         - code: tasks:task:read
         - code: tasks:task:update
         - code: tasks:task:delete
+      workflows:
+        - name: approval
+          states: [pending, approved, rejected, cancelled]
       acceptance:
         - Each CRUD operation requires its matching permission.
         - Stale update and delete versions return a conflict without changing data.

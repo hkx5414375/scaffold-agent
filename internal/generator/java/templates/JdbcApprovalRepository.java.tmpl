@@ -1,0 +1,280 @@
+package {{.PackageName}}.approvals;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcApprovalRepository implements ApprovalRepository {
+
+    private static final String REQUEST_COLUMNS =
+            "id, organization_id, subject_type, subject_id, requester_user_id, summary, "
+                    + "details, status, version, resolution_comment, resolved_by_user_id, "
+                    + "resolved_at, created_at, updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcApprovalRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public void create(
+            ApprovalRequest request, ApprovalEvent event, AuditEvent auditEvent) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    transaction -> createInternal(request, event, auditEvent));
+        } catch (DuplicateKeyException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    private void createInternal(
+            ApprovalRequest request, ApprovalEvent event, AuditEvent auditEvent) {
+        Boolean exists =
+                jdbcTemplate.queryForObject(
+                        "select exists(select 1 from {{javaSQL .Business.TableName}} "
+                                + "where id = ?"{{if .Tenancy}}
+                                + " and organization_id = ?"{{end}}
+                                + ")",
+                        Boolean.class,
+                        {{if .Tenancy}}request.subjectId(), request.organizationId(){{else}}request.subjectId(){{end}});
+        if (!Boolean.TRUE.equals(exists)) {
+            throw new ApprovalException(
+                    ApprovalException.Kind.SUBJECT_NOT_FOUND,
+                    "approval subject was not found");
+        }
+        jdbcTemplate.update(
+                "insert into approval_requests (id, organization_id, subject_type, subject_id, "
+                        + "requester_user_id, summary, details, status, version, created_at, "
+                        + "updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                request.id(),
+                request.organizationId(),
+                request.subjectType(),
+                request.subjectId(),
+                request.requesterUserId(),
+                request.summary(),
+                request.details(),
+                request.status(),
+                request.version(),
+                Timestamp.from(request.createdAt()),
+                Timestamp.from(request.updatedAt()));
+        appendEvent(event);
+        appendAudit(auditEvent);
+    }
+
+    @Override
+    public Optional<ApprovalRequest> get(String organizationId, String id) {
+        List<ApprovalRequest> requests =
+                jdbcTemplate.query(
+                        "select " + REQUEST_COLUMNS + " from approval_requests where id = ?"
+                                {{if .Tenancy}}+ " and organization_id = ?"{{end}},
+                        JdbcApprovalRepository::mapRequest,
+                        {{if .Tenancy}}new Object[] {id, organizationId}{{else}}new Object[] {id}{{end}});
+        return requests.stream().findFirst();
+    }
+
+    @Override
+    public PageResult list(
+            String organizationId,
+            String requesterUserId,
+            String status,
+            String cursor,
+            int limit) {
+        StringBuilder sql =
+                new StringBuilder("select ")
+                        .append(REQUEST_COLUMNS)
+                        .append(" from approval_requests where ");
+        List<Object> arguments = new ArrayList<>();
+{{- if .Tenancy}}
+        sql.append("organization_id = ? and ");
+        arguments.add(organizationId);
+{{- end}}
+        sql.append("(? = '' or requester_user_id = ?) ")
+                .append("and (? = '' or status = ?) ")
+                .append("and (? = '' or id > ?) order by id limit ?");
+        arguments.add(requesterUserId);
+        arguments.add(requesterUserId);
+        arguments.add(status);
+        arguments.add(status);
+        arguments.add(cursor);
+        arguments.add(cursor);
+        arguments.add(limit + 1);
+        List<ApprovalRequest> requests =
+                jdbcTemplate.query(
+                        sql.toString(),
+                        JdbcApprovalRepository::mapRequest,
+                        arguments.toArray());
+        String nextCursor = "";
+        if (requests.size() > limit) {
+            nextCursor = requests.get(limit - 1).id();
+            requests = List.copyOf(requests.subList(0, limit));
+        }
+        return new PageResult(List.copyOf(requests), nextCursor);
+    }
+
+    @Override
+    public ApprovalRequest transition(
+            Transition transition, ApprovalEvent event, AuditEvent auditEvent) {
+        ApprovalRequest request =
+                transactionTemplate.execute(
+                        transaction -> transitionInternal(transition, event, auditEvent));
+        if (request == null) {
+            throw conflict(null);
+        }
+        return request;
+    }
+
+    private ApprovalRequest transitionInternal(
+            Transition transition, ApprovalEvent event, AuditEvent auditEvent) {
+        int updated =
+                jdbcTemplate.update(
+                        "update approval_requests set status = ?, version = version + 1, "
+                                + "resolution_comment = nullif(?, ''), resolved_by_user_id = ?, "
+                                + "resolved_at = ?, updated_at = ? where id = ?{{if .Tenancy}} and organization_id = ?{{end}}"
+                                + " and status = ? and version = ? "
+                                + "and ((? = 'requester' and requester_user_id = ?) "
+                                + "or (? = 'other' and requester_user_id <> ?))",
+                        {{if .Tenancy}}new Object[] {
+                            transition.toStatus(),
+                            transition.comment(),
+                            transition.actorUserId(),
+                            Timestamp.from(transition.resolvedAt()),
+                            Timestamp.from(transition.resolvedAt()),
+                            transition.requestId(),
+                            transition.organizationId(),
+                            transition.fromStatus(),
+                            transition.expectedVersion(),
+                            transition.actorRule(),
+                            transition.actorUserId(),
+                            transition.actorRule(),
+                            transition.actorUserId()
+                        }{{else}}new Object[] {
+                            transition.toStatus(),
+                            transition.comment(),
+                            transition.actorUserId(),
+                            Timestamp.from(transition.resolvedAt()),
+                            Timestamp.from(transition.resolvedAt()),
+                            transition.requestId(),
+                            transition.fromStatus(),
+                            transition.expectedVersion(),
+                            transition.actorRule(),
+                            transition.actorUserId(),
+                            transition.actorRule(),
+                            transition.actorUserId()
+                        }{{end}});
+        if (updated != 1) {
+            throw conflict(null);
+        }
+        appendEvent(event);
+        appendAudit(auditEvent);
+        return get(transition.organizationId(), transition.requestId())
+                .orElseThrow(() -> conflict(null));
+    }
+
+    @Override
+    public List<ApprovalEvent> events(String organizationId, String requestId) {
+        return List.copyOf(
+                jdbcTemplate.query(
+                        "select event.id, event.request_id, event.actor_user_id, event.status, "
+                                + "event.comment, event.created_at from approval_events event "
+                                + "join approval_requests request on request.id = event.request_id "
+                                + "where event.request_id = ?{{if .Tenancy}} and request.organization_id = ?{{end}}"
+                                + " order by event.created_at, event.id",
+                        JdbcApprovalRepository::mapEvent,
+                        {{if .Tenancy}}new Object[] {requestId, organizationId}{{else}}new Object[] {requestId}{{end}}));
+    }
+
+    private void appendEvent(ApprovalEvent event) {
+        jdbcTemplate.update(
+                "insert into approval_events "
+                        + "(id, request_id, actor_user_id, status, comment, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?)",
+                event.id(),
+                event.requestId(),
+                event.actorUserId(),
+                event.status(),
+                event.comment(),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                event.userId(),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static ApprovalRequest mapRequest(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new ApprovalRequest(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("subject_type"),
+                resultSet.getString("subject_id"),
+                resultSet.getString("requester_user_id"),
+                resultSet.getString("summary"),
+                resultSet.getString("details"),
+                resultSet.getString("status"),
+                resultSet.getLong("version"),
+                resultSet.getString("resolution_comment"),
+                resultSet.getString("resolved_by_user_id"),
+                instant(resultSet.getTimestamp("resolved_at")),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant());
+    }
+
+    private static ApprovalEvent mapEvent(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new ApprovalEvent(
+                resultSet.getString("id"),
+                resultSet.getString("request_id"),
+                resultSet.getString("actor_user_id"),
+                resultSet.getString("status"),
+                resultSet.getString("comment"),
+                resultSet.getTimestamp("created_at").toInstant());
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static ApprovalException conflict(Throwable cause) {
+        ApprovalException exception =
+                new ApprovalException(
+                        ApprovalException.Kind.CONFLICT,
+                        "approval request conflicts with current state");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+}

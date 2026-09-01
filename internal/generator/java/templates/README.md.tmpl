@@ -151,6 +151,22 @@ organization-scoped query and emits no partial document. Text cells that could b
 spreadsheet formulas use a reversible apostrophe escape. Use a background-job and
 object-storage workflow for larger migrations; do not relax these synchronous limits.
 {{end}}
+{{if .Approvals}}
+
+## Approval workflows
+
+The approval API provides separate submitter permissions (`approvals:submit` and
+`approvals:mine`) and reviewer permissions (`approvals:read` and
+`approvals:decide`). Submission verifies the generated business subject in the
+current organization and permits only one pending request for that subject.
+
+Requesters cannot approve or reject their own requests, and only the requester may
+cancel a pending request. Rejection requires a reason. Every terminal operation
+must send the current decimal-string `version`; each successful submission or
+transition commits the request, one immutable event, and one audit event in the
+same transaction. A decision records evidence only and never mutates the business
+subject implicitly.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

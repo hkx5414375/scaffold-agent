@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL with bounded database readiness, PBKDF2-SHA256 passwords, HttpOnly browser sessions, digest-only bearer tokens, permission RBAC, transactional security audit, Blueprint-driven CRUD, bounded keyset pagination, optimistic concurrency, organization lifecycle, durable jobs, notifications, file assets, application cache, audited job administration, safe HTTP observability, atomic CSV transfer, OpenAPI, the shared Vue/Element Plus administration project, and locked quality gates. Capabilities and storefronts without complete Java slices are rejected explicitly. Python currently returns the stable `generator.adapter.unavailable` diagnostic. Unsupported selections always fail explicitly instead of producing partial output.
+The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL with bounded database readiness, PBKDF2-SHA256 passwords, HttpOnly browser sessions, digest-only bearer tokens, permission RBAC, transactional security audit, Blueprint-driven CRUD, bounded keyset pagination, optimistic concurrency, organization lifecycle, durable jobs, notifications, file assets, application cache, audited job administration, safe HTTP observability, atomic CSV transfer, single-stage approval workflows, OpenAPI, the shared Vue/Element Plus administration project, and locked quality gates. Java now has parity with the Go platform capability set. Python currently returns the stable `generator.adapter.unavailable` diagnostic. Unsupported selections always fail explicitly instead of producing partial output.
 
 See `examples/task-service/scaffold.yaml` for the Go business-module contract and
 `examples/task-service-java/scaffold.yaml` for the Java-equivalent contract.
@@ -121,7 +121,7 @@ to prevent spreadsheet formula execution. Agents must use the generated field
 order and RFC3339 datetimes, must not turn import into an unaudited upsert, and
 must not bypass organization scope or the generated limits.
 
-Selecting `approval-workflows` version `0.1.0` requires one generated business
+Selecting `approval-workflows` version `0.1.0` on Go or Java requires one generated business
 entity and one explicit module workflow named `approval` whose ordered states are
 `pending`, `approved`, `rejected`, and `cancelled`. The generated service verifies
 the tenant-scoped subject at submission, permits at most one pending request per

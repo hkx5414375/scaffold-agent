@@ -1,0 +1,24 @@
+package {{.PackageName}}.approvals;
+
+public final class ApprovalException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        SUBJECT_NOT_FOUND,
+        CONFLICT,
+        SELF_DECISION,
+        FORBIDDEN
+    }
+
+    private final Kind kind;
+
+    public ApprovalException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

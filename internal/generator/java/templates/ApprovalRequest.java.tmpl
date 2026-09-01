@@ -1,0 +1,23 @@
+package {{.PackageName}}.approvals;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record ApprovalRequest(
+        String id,
+        String organizationId,
+        String subjectType,
+        String subjectId,
+        String requesterUserId,
+        String summary,
+        String details,
+        String status,
+        @JsonSerialize(using = ToStringSerializer.class) long version,
+        String resolutionComment,
+        String resolvedByUserId,
+        Instant resolvedAt,
+        Instant createdAt,
+        Instant updatedAt) {}

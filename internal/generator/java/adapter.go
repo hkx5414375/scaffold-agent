@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"text/template"
@@ -44,6 +45,8 @@ const (
 	observabilityVersion    = "0.1.0"
 	csvTransferOwner        = "csv-import-export"
 	csvTransferVersion      = "0.1.0"
+	approvalsOwner          = "approval-workflows"
+	approvalsVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -76,6 +79,7 @@ type databaseData struct {
 	CacheMigrationTemplate            string
 	JobAdminMigrationTemplate         string
 	CSVTransferMigrationTemplate      string
+	ApprovalsMigrationTemplate        string
 }
 
 var databases = map[string]databaseData{
@@ -96,6 +100,7 @@ var databases = map[string]databaseData{
 		CacheMigrationTemplate:            "templates/cache_postgresql.sql.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_postgresql.sql.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_postgresql.sql.tmpl",
+		ApprovalsMigrationTemplate:        "templates/approvals_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -114,10 +119,21 @@ var databases = map[string]databaseData{
 		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
 		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_mysql.sql.tmpl",
+		ApprovalsMigrationTemplate:        "templates/approvals_mysql.sql.tmpl",
 	},
 }
 
 var javaCapabilityCatalog = capability.NewCatalog(
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: approvalsOwner, Version: approvalsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware single-stage approvals with separation of duties and immutable events.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 	spec.CapabilityPack{
 		APIVersion: spec.APIVersionV1Alpha1,
 		Kind:       spec.KindCapabilityPack,
@@ -341,6 +357,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobAdminEnabled := false
 	observabilityEnabled := false
 	csvTransferEnabled := false
+	approvalsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -371,13 +388,19 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == csvTransferOwner {
 			csvTransferEnabled = true
 		}
+		if pack.Metadata.Name == approvalsOwner {
+			approvalsEnabled = true
+		}
 	}
-	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
+	business, err := buildBusinessData(project.Spec.Modules, database.Engine, approvalsEnabled)
 	if err != nil {
 		return generator.Result{}, err
 	}
 	if csvTransferEnabled && business == nil {
 		return generator.Result{}, fmt.Errorf("csv-import-export requires one generated business entity")
+	}
+	if approvalsEnabled && business == nil {
+		return generator.Result{}, fmt.Errorf("approval-workflows requires one generated business entity")
 	}
 
 	migrationCount := 1
@@ -408,6 +431,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if csvTransferEnabled {
 		migrationCount++
 	}
+	if approvalsEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -427,6 +453,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		JobAdmin:         jobAdminEnabled,
 		Observability:    observabilityEnabled,
 		CSVTransfer:      csvTransferEnabled,
+		Approvals:        approvalsEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -443,6 +470,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobAdminPaths := make(map[string]struct{}, 11)
 	observabilityPaths := make(map[string]struct{}, 7)
 	csvTransferPaths := make(map[string]struct{}, 9)
+	approvalsPaths := make(map[string]struct{}, 11)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -497,6 +525,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addCSVTransferTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		csvTransferPaths[path] = struct{}{}
+	}
+	addApprovalsTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		approvalsPaths[path] = struct{}{}
+	}
+	addApprovalsUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		approvalsPaths[path] = struct{}{}
+		adminPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -756,6 +793,29 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		)
 		capabilityLock[csvTransferOwner] = csvTransferVersion
 	}
+	if approvalsEnabled {
+		for path, templatePath := range map[string]string{
+			mainRoot + "/approvals/ApprovalRequest.java":                      "templates/ApprovalRequest.java.tmpl",
+			mainRoot + "/approvals/ApprovalEvent.java":                        "templates/ApprovalEvent.java.tmpl",
+			mainRoot + "/approvals/ApprovalException.java":                    "templates/ApprovalException.java.tmpl",
+			mainRoot + "/approvals/ApprovalRepository.java":                   "templates/ApprovalRepository.java.tmpl",
+			mainRoot + "/approvals/JdbcApprovalRepository.java":               "templates/JdbcApprovalRepository.java.tmpl",
+			mainRoot + "/approvals/ApprovalService.java":                      "templates/ApprovalService.java.tmpl",
+			mainRoot + "/approvals/ApprovalController.java":                   "templates/ApprovalController.java.tmpl",
+			testRoot + "/approvals/ApprovalServiceTest.java":                  "templates/ApprovalServiceTest.java.tmpl",
+			testRoot + "/approvals/ApprovalDatabaseIntegrationTest.java":      "templates/ApprovalDatabaseIntegrationTest.java.tmpl",
+			"src/main/resources/db/migration/V000250__approval_workflows.sql": database.ApprovalsMigrationTemplate,
+		} {
+			addApprovalsTarget(path, templatePath)
+		}
+		if adminEnabled {
+			addApprovalsUI(
+				"web/admin/src/views/ApprovalsView.vue",
+				"templates/src/views/ApprovalsView.vue.tmpl",
+			)
+		}
+		capabilityLock[approvalsOwner] = approvalsVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -831,6 +891,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if _, isCSVTransferPath := csvTransferPaths[path]; isCSVTransferPath {
 			owner = csvTransferOwner
 		}
+		if _, isApprovalsPath := approvalsPaths[path]; isApprovalsPath {
+			owner = approvalsOwner
+		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}
 	return generator.Result{
@@ -845,7 +908,8 @@ func render(path string, data templateData) ([]byte, error) {
 		return nil, err
 	}
 	functions := template.FuncMap{
-		"sql": func(value string) string { return quoteSQLIdentifier(data.Database.Engine, value) },
+		"list": func(values ...string) []string { return values },
+		"sql":  func(value string) string { return quoteSQLIdentifier(data.Database.Engine, value) },
 		"javaSQL": func(value string) string {
 			quoted := quoteSQLIdentifier(data.Database.Engine, value)
 			return strings.ReplaceAll(strings.ReplaceAll(quoted, `\`, `\\`), `"`, `\"`)
@@ -862,7 +926,7 @@ func render(path string, data templateData) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
-func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessData, error) {
+func buildBusinessData(modules []spec.Module, databaseEngine string, approvalsEnabled bool) (*businessData, error) {
 	if len(modules) == 0 {
 		return nil, nil
 	}
@@ -879,8 +943,16 @@ func buildBusinessData(modules []spec.Module, databaseEngine string) (*businessD
 	if len(module.Entities) != 1 {
 		return nil, fmt.Errorf("the first Java CRUD slice supports exactly one entity")
 	}
-	if len(module.Pages) > 0 || len(module.Workflows) > 0 {
-		return nil, fmt.Errorf("Java generated pages and workflows require a selected capability")
+	if len(module.Pages) > 0 {
+		return nil, fmt.Errorf("Java generated pages require a selected capability")
+	}
+	if approvalsEnabled {
+		if len(module.Workflows) != 1 || module.Workflows[0].Name != "approval" ||
+			!slices.Equal(module.Workflows[0].States, []string{"pending", "approved", "rejected", "cancelled"}) {
+			return nil, fmt.Errorf("approval-workflows requires workflow approval with states pending, approved, rejected, cancelled in that order")
+		}
+	} else if len(module.Workflows) > 0 {
+		return nil, fmt.Errorf("Java workflows require a selected workflow capability")
 	}
 	entity := module.Entities[0]
 	if _, reserved := javaKeywords[entity.Name]; reserved {

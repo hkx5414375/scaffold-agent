@@ -1,0 +1,219 @@
+package {{.PackageName}}.approvals;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.{{.Business.PackageName}}.Jdbc{{.Business.EntityClass}}Repository;
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}};
+import {{.PackageName}}.{{.Business.PackageName}}.{{.Business.EntityClass}}Service;
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class ApprovalDatabaseIntegrationTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    @Timeout(45)
+    void scopesRequestsAndAtomicallyPersistsTransitionsAndEvidence() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_approvals_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("requester@example.com", "correct horse battery staple");
+            Principal loginActor =
+                    identity.login(
+                                    "requester@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+            jdbc.update(
+                    "insert into identity_users "
+                            + "(id, email, password_hash, role, disabled, created_at, updated_at) "
+                            + "values (?, ?, ?, 'admin', false, ?, ?)",
+                    "reviewer-1",
+                    "reviewer@example.com",
+                    "unused",
+                    Timestamp.from(NOW),
+                    Timestamp.from(NOW));
+            Principal requester = loginActor;
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Acme", loginActor);
+            String organizationId = organization.id();
+            requester = scoped(loginActor, organizationId);
+{{- end}}
+            Principal requestActor = requester;
+            Principal reviewer =
+                    new Principal(
+                            "reviewer-1",
+                            "reviewer@example.com",
+                            "admin",
+                            "session"{{if .Tenancy}},
+                            organizationId{{end}});
+
+            {{.Business.EntityClass}}Service business =
+                    new {{.Business.EntityClass}}Service(
+                            new Jdbc{{.Business.EntityClass}}Repository(jdbc, transactions));
+            {{.Business.EntityClass}} subject =
+                    business.create(
+                            new {{.Business.EntityClass}}Service.WriteInput(
+{{- range $index, $field := .Business.Fields}}
+{{- if $index}},{{end}}
+                                    {{$field.SampleOne}}
+{{- end}}),
+                            requestActor);
+            ApprovalService approvals =
+                    new ApprovalService(
+                            new JdbcApprovalRepository(jdbc, transactions),
+                            Clock.fixed(NOW, ZoneOffset.UTC));
+            ApprovalRequest submitted =
+                    approvals.submit(
+                            new ApprovalService.SubmitInput(
+                                    subject.id(), "Review generated subject", "details"),
+                            requestActor);
+
+            assertThatThrownBy(
+                            () ->
+                                    approvals.submit(
+                                            new ApprovalService.SubmitInput(
+                                                    subject.id(), "Duplicate pending", ""),
+                                            requestActor))
+                    .isInstanceOf(ApprovalException.class)
+                    .hasFieldOrPropertyWithValue("kind", ApprovalException.Kind.CONFLICT);
+            assertThat(approvals.listMine("pending", "", 20, requestActor).items())
+                    .containsExactly(submitted);
+{{- if .Tenancy}}
+            Principal wrongScope = scoped(loginActor, "missing-organization");
+            assertThatThrownBy(() -> approvals.get(submitted.id(), wrongScope))
+                    .isInstanceOf(ApprovalException.class)
+                    .hasFieldOrPropertyWithValue("kind", ApprovalException.Kind.NOT_FOUND);
+{{- end}}
+            Principal missingReviewer =
+                    new Principal(
+                            "missing-user",
+                            "missing@example.com",
+                            "admin",
+                            "session"{{if .Tenancy}},
+                            organizationId{{end}});
+            assertThatThrownBy(
+                            () ->
+                                    approvals.approve(
+                                            submitted.id(),
+                                            new ApprovalService.DecisionInput(1L, "invalid actor"),
+                                            missingReviewer))
+                    .isInstanceOf(RuntimeException.class);
+            assertThat(approvals.get(submitted.id(), reviewer).status())
+                    .isEqualTo(ApprovalService.PENDING);
+            assertThat(approvals.history(submitted.id(), reviewer).items()).hasSize(1);
+
+            ApprovalRequest rejected =
+                    approvals.reject(
+                            submitted.id(),
+                            new ApprovalService.DecisionInput(1L, "missing evidence"),
+                            reviewer);
+            assertThat(rejected.status()).isEqualTo(ApprovalService.REJECTED);
+            assertThat(rejected.version()).isEqualTo(2L);
+            assertThat(approvals.history(rejected.id(), reviewer).items())
+                    .extracting(ApprovalEvent::status)
+                    .containsExactly(ApprovalService.PENDING, ApprovalService.REJECTED);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from audit_events where target = ? "
+                                            + "and action like 'approvals:%'",
+                                    Integer.class,
+                                    rejected.id()))
+                    .isEqualTo(2);
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+{{- if .Tenancy}}
+    private static Principal scoped(Principal actor, String organizationId) {
+        return new Principal(
+                actor.userId(), actor.email(), actor.role(), actor.method(), organizationId);
+    }
+
+{{- end}}
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

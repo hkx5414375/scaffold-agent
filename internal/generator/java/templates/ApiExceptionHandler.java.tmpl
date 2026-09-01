@@ -1,6 +1,9 @@
 package {{.PackageName}}.http;
 
 import {{.PackageName}}.identity.IdentityException;
+{{- if .Approvals}}
+import {{.PackageName}}.approvals.ApprovalException;
+{{- end}}
 {{- if .Files}}
 import {{.PackageName}}.files.FileAssetException;
 {{- end}}
@@ -32,6 +35,32 @@ import org.springframework.web.multipart.MaxUploadSizeExceededException;
 public final class ApiExceptionHandler {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+{{- if .Approvals}}
+    @ExceptionHandler(ApprovalException.class)
+    public ResponseEntity<ApiError> approvals(ApprovalException exception) {
+        return switch (exception.kind()) {
+            case INVALID ->
+                    response(HttpStatus.BAD_REQUEST, "approvals.invalid", exception.getMessage());
+            case NOT_FOUND ->
+                    response(HttpStatus.NOT_FOUND, "approvals.not_found", exception.getMessage());
+            case SUBJECT_NOT_FOUND ->
+                    response(
+                            HttpStatus.NOT_FOUND,
+                            "approvals.subject_not_found",
+                            exception.getMessage());
+            case CONFLICT ->
+                    response(HttpStatus.CONFLICT, "approvals.conflict", exception.getMessage());
+            case SELF_DECISION ->
+                    response(
+                            HttpStatus.CONFLICT,
+                            "approvals.self_decision",
+                            exception.getMessage());
+            case FORBIDDEN ->
+                    response(HttpStatus.FORBIDDEN, "identity.forbidden", exception.getMessage());
+        };
+    }
+{{- end}}
 
     @ExceptionHandler(IdentityException.class)
     public ResponseEntity<ApiError> identity(IdentityException exception) {

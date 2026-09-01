@@ -1,0 +1,13 @@
+package {{.PackageName}}.approvals;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record ApprovalEvent(
+        String id,
+        String requestId,
+        String actorUserId,
+        String status,
+        String comment,
+        Instant createdAt) {}
