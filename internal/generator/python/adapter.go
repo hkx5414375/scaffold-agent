@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/hkx5414375/scaffold-agent/internal/capability"
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
@@ -21,11 +22,13 @@ import (
 )
 
 const (
-	backend     = "python"
-	baseOwner   = "python-service"
-	baseVersion = "0.1.0"
-	crudOwner   = "python-crud"
-	crudVersion = "0.1.0"
+	backend        = "python"
+	baseOwner      = "python-service"
+	baseVersion    = "0.1.0"
+	crudOwner      = "python-crud"
+	crudVersion    = "0.1.0"
+	tenancyOwner   = "organization-tenancy"
+	tenancyVersion = "0.1.0"
 )
 
 //go:embed all:templates
@@ -56,6 +59,19 @@ var databases = map[string]databaseData{
 	},
 }
 
+var pythonCapabilityCatalog = capability.NewCatalog(
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+)
+
 var pythonKeywords = map[string]struct{}{
 	"and": {}, "as": {}, "assert": {}, "async": {}, "await": {}, "break": {},
 	"class": {}, "continue": {}, "def": {}, "del": {}, "elif": {}, "else": {},
@@ -66,38 +82,40 @@ var pythonKeywords = map[string]struct{}{
 }
 
 type templateData struct {
-	ProjectName      string
-	PackageName      string
-	Database         databaseData
-	Business         *businessData
-	Admin            bool
-	Tenancy          bool
-	TenancyMembers   bool
-	TenancyLifecycle bool
-	Files            bool
-	JobAdmin         bool
-	Approvals        bool
-	CSVTransfer      bool
+	ProjectName           string
+	PackageName           string
+	Database              databaseData
+	Business              *businessData
+	BusinessBeforeTenancy bool
+	Admin                 bool
+	Tenancy               bool
+	TenancyMembers        bool
+	TenancyLifecycle      bool
+	Files                 bool
+	JobAdmin              bool
+	Approvals             bool
+	CSVTransfer           bool
 }
 
 type businessData struct {
-	ModuleName       string
-	EntityName       string
-	EntityClass      string
-	EntityType       string
-	PackageName      string
-	TableName        string
-	IndexName        string
-	VersionCheckName string
-	PrimaryKeyName   string
-	RoutePath        string
-	PermissionPrefix string
-	Fields           []businessField
-	HasDateTime      bool
-	HasInt64         bool
-	HasUnique        bool
-	HasInputChecks   bool
-	DateTimeFields   []string
+	ModuleName           string
+	EntityName           string
+	EntityClass          string
+	EntityType           string
+	PackageName          string
+	TableName            string
+	IndexName            string
+	VersionCheckName     string
+	PrimaryKeyName       string
+	TenantForeignKeyName string
+	RoutePath            string
+	PermissionPrefix     string
+	Fields               []businessField
+	HasDateTime          bool
+	HasInt64             bool
+	HasUnique            bool
+	HasInputChecks       bool
+	DateTimeFields       []string
 }
 
 type businessField struct {
@@ -171,6 +189,17 @@ var businessTemplates = map[string]string{
 	"tests/test_business_database.py":                   "templates/test_business_database.py.tmpl",
 }
 
+var tenancyTemplates = map[string]string{
+	"src/package/tenancy/__init__.py":                  "templates/tenancy_init.py.tmpl",
+	"src/package/tenancy/http.py":                      "templates/tenancy_http.py.tmpl",
+	"src/package/tenancy/models.py":                    "templates/tenancy_models.py.tmpl",
+	"src/package/tenancy/repository.py":                "templates/tenancy_repository.py.tmpl",
+	"src/package/tenancy/service.py":                   "templates/tenancy_service.py.tmpl",
+	"src/package/migration/versions/000050_tenancy.py": "templates/tenancy_migration.py.tmpl",
+	"tests/test_tenancy.py":                            "templates/test_tenancy.py.tmpl",
+	"tests/test_tenancy_database.py":                   "templates/test_tenancy_database.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -206,8 +235,27 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Python adapter requires both session and token authentication")
 	}
-	if len(project.Spec.Capabilities) > 0 {
-		return generator.Result{}, fmt.Errorf("the Python foundation does not support capability selections yet")
+	resolvedCapabilities, diagnostics := capability.Resolve(
+		pythonCapabilityCatalog, project.Spec.Capabilities,
+	)
+	if len(diagnostics) > 0 {
+		return generator.Result{}, fmt.Errorf(
+			"resolve Python capabilities: %s", diagnostics[0].Message,
+		)
+	}
+	for _, selection := range project.Spec.Capabilities {
+		if len(selection.Config) > 0 {
+			return generator.Result{}, fmt.Errorf(
+				"Python capability %q does not accept configuration in this version",
+				selection.Name,
+			)
+		}
+	}
+	tenancyEnabled := false
+	for _, pack := range resolvedCapabilities {
+		if pack.Metadata.Name == tenancyOwner {
+			tenancyEnabled = true
+		}
 	}
 	if len(project.Spec.Modules) > 1 {
 		return generator.Result{}, fmt.Errorf("the Python CRUD slice supports at most one business module")
@@ -222,13 +270,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 
 	data := templateData{
-		ProjectName: project.Metadata.Name,
-		PackageName: pythonIdentifier(project.Metadata.Name),
-		Database:    database,
-		Business:    business,
-		Admin:       adminEnabled,
+		ProjectName:           project.Metadata.Name,
+		PackageName:           pythonIdentifier(project.Metadata.Name),
+		Database:              database,
+		Business:              business,
+		BusinessBeforeTenancy: business != nil && business.PackageName < "tenancy",
+		Admin:                 adminEnabled,
+		Tenancy:               tenancyEnabled,
 	}
-	targets := make(map[string]renderTarget, len(baseTemplates)+len(businessTemplates)+1)
+	targets := make(map[string]renderTarget, len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+2)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
 	}
@@ -242,6 +292,28 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			path = replacePackage(path, data.PackageName)
 			path = strings.Replace(path, "business", business.PackageName, 1)
 			targets[path] = renderTarget{Template: templatePath, Owner: crudOwner}
+		}
+	}
+	if tenancyEnabled {
+		mainTemplate := "templates/main_tenancy_foundation.py.tmpl"
+		if business != nil {
+			mainTemplate = "templates/main_tenancy.py.tmpl"
+		}
+		targets[replacePackage("src/package/main.py", data.PackageName)] = renderTarget{
+			Template: mainTemplate,
+			Owner:    baseOwner,
+		}
+		for path, templatePath := range tenancyTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    tenancyOwner,
+			}
+		}
+		if business != nil {
+			targets[replacePackage("src/package/migration/versions/000051_tenant_business.py", data.PackageName)] = renderTarget{
+				Template: "templates/tenant_business_migration.py.tmpl",
+				Owner:    tenancyOwner,
+			}
 		}
 	}
 	if adminEnabled {
@@ -286,6 +358,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if adminEnabled {
 		capabilityLock[adminui.Owner] = adminui.Version
+	}
+	if tenancyEnabled {
+		capabilityLock[tenancyOwner] = tenancyVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
@@ -369,10 +444,11 @@ func buildBusiness(module spec.Module, databaseEngine string) (*businessData, er
 		ModuleName: module.Name, EntityName: entity.Name, EntityClass: upperCamel(entity.Name),
 		EntityType:  upperCamel(entity.Name),
 		PackageName: module.Name, TableName: tableName,
-		IndexName:        compactIdentifier("ix", tableName, "created_at_id"),
-		VersionCheckName: compactIdentifier("ck", tableName, "version_positive"),
-		PrimaryKeyName:   compactIdentifier("pk", tableName, "id"),
-		RoutePath:        "/api/v1/" + module.Name, PermissionPrefix: prefix, Fields: fields,
+		IndexName:            compactIdentifier("ix", tableName, "created_at_id"),
+		VersionCheckName:     compactIdentifier("ck", tableName, "version_positive"),
+		PrimaryKeyName:       compactIdentifier("pk", tableName, "id"),
+		TenantForeignKeyName: compactIdentifier("fk", tableName, "organization_id"),
+		RoutePath:            "/api/v1/" + module.Name, PermissionPrefix: prefix, Fields: fields,
 		HasDateTime: hasDateTime, HasInt64: hasInt64, HasUnique: hasUnique,
 		HasInputChecks: hasInputChecks, DateTimeFields: dateTimeFields,
 	}, nil

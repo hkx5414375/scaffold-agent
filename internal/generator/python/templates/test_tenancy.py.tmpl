@@ -1,0 +1,116 @@
+"""Organization tenancy use-case and HTTP contract tests."""
+
+from datetime import UTC, datetime
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind, install_error_handlers
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.tenancy.http import router
+from {{.PackageName}}.tenancy.models import Organization
+from {{.PackageName}}.tenancy.service import TenancyService
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+ACTOR = Principal(user_id="admin-1", email="admin@example.com", role="admin", method="token")
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.organizations: dict[str, Organization] = {}
+        self.memberships: dict[tuple[str, str], str] = {}
+        self.permissions: set[tuple[str, str]] = {("admin", "tasks:task:read")}
+        self.audits: list[AuditEvent] = []
+
+    def create_organization(
+        self,
+        organization: Organization,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> None:
+        self.organizations[organization.id] = organization
+        self.memberships[(organization.id, user_id)] = role
+        self.audits.append(audit)
+
+    def list_organizations(self, user_id: str) -> list[Organization]:
+        return [
+            organization.model_copy(update={"role": role})
+            for organization in self.organizations.values()
+            if (role := self.memberships.get((organization.id, user_id))) is not None
+        ]
+
+    def membership_role(self, organization_id: str, user_id: str) -> str | None:
+        return self.memberships.get((organization_id, user_id))
+
+    def has_permission(self, role: str, permission: str) -> bool:
+        return (role, permission) in self.permissions
+
+    def append_audit(self, audit: AuditEvent) -> None:
+        self.audits.append(audit)
+
+
+def test_create_list_authorize_and_audit_denial() -> None:
+    repository = MemoryRepository()
+    service = TenancyService(repository, lambda: NOW)
+
+    organization = service.create(" Acme ", ACTOR)
+    page = service.list(ACTOR)
+    scoped = service.authorize(
+        ACTOR,
+        organization.id,
+        "tasks:task:read",
+        "127.0.0.1",
+        "test",
+    )
+    with pytest.raises(IdentityError) as denied:
+        service.authorize(ACTOR, "missing", "tasks:task:read", "127.0.0.1", "test")
+
+    assert organization.name == "Acme"
+    assert page.items == [organization]
+    assert scoped.organization_id == organization.id
+    assert scoped.role == "admin"
+    assert denied.value.kind == IdentityErrorKind.FORBIDDEN
+    assert [event.action for event in repository.audits] == [
+        "tenancy.organization:create",
+        "tenancy.authorization",
+    ]
+    assert repository.audits[-1].outcome == "denied"
+
+
+def test_invalid_inputs_and_actor_are_rejected() -> None:
+    service = TenancyService(MemoryRepository(), lambda: NOW)
+    with pytest.raises(IdentityError) as bad_name:
+        service.create("bad\nname", ACTOR)
+    with pytest.raises(IdentityError) as bad_actor:
+        service.list(ACTOR.model_copy(update={"user_id": ""}))
+    assert bad_name.value.kind == IdentityErrorKind.INVALID_INPUT
+    assert bad_actor.value.kind == IdentityErrorKind.INVALID_CREDENTIALS
+
+
+class HttpIdentityService:
+    def authenticate(self, session_token: str, bearer_token: str) -> Principal:
+        del session_token
+        if bearer_token != "api-secret":
+            raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+        return ACTOR
+
+
+def test_http_create_and_list_contract() -> None:
+    application = FastAPI()
+    application.state.identity_service = HttpIdentityService()
+    application.state.tenancy_service = TenancyService(MemoryRepository(), lambda: NOW)
+    install_error_handlers(application)
+    application.include_router(router)
+    client = TestClient(application, headers={"Authorization": "Bearer api-secret"})
+
+    created = client.post("/api/v1/organizations", json={"name": "Acme"})
+    page = client.get("/api/v1/organizations")
+    invalid = client.post("/api/v1/organizations", json={"name": "bad\nname"})
+
+    assert created.status_code == 201
+    assert created.json()["role"] == "admin"
+    assert page.json()["items"][0]["id"] == created.json()["id"]
+    assert invalid.status_code == 400
+    assert invalid.json()["code"] == "request.invalid"

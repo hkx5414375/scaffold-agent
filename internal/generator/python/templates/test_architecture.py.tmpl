@@ -19,6 +19,10 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/auth/logout", "post"),
         ("/api/v1/auth/me", "get"),
         ("/api/v1/auth/tokens", "post"),
+{{- if .Tenancy}}
+        ("/api/v1/organizations", "post"),
+        ("/api/v1/organizations", "get"),
+{{- end}}
 {{- if .Business}}
         ("{{.Business.RoutePath}}", "post"),
         ("{{.Business.RoutePath}}", "get"),
@@ -53,6 +57,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
     )
 
     assert imported_roots.isdisjoint({"fastapi", "sqlalchemy"})
+{{- if .Tenancy}}
+
+    tenancy_tree = ast.parse((PACKAGE / "tenancy" / "service.py").read_text(encoding="utf-8"))
+    tenancy_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(tenancy_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert tenancy_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
 {{- if .Business}}
 
     business_tree = ast.parse((PACKAGE / "{{.Business.PackageName}}" / "service.py").read_text(encoding="utf-8"))

@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, the shared Vue/Element Plus administration project, and locked quality gates. Python capability selections return explicit stable generation errors until those complete slices are implemented. Unsupported selections never produce partial output.
+The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, organization tenancy 0.1, the shared Vue/Element Plus administration project, and locked quality gates. Unsupported Python capability selections return explicit stable generation errors and never produce partial output.
 
 See `examples/task-service/scaffold.yaml` for the Go business-module contract and
 `examples/task-service-java/scaffold.yaml` for the Java-equivalent contract.
@@ -36,7 +36,7 @@ silently rounds database identifiers or counters. Before accepting a generated
 administration change, run its locked install, lint, unit tests, type check,
 production build, and format check as documented in the generated README.
 
-Selecting `organization-tenancy` version `0.1.0` on Go or Java adds organization creation and
+Selecting `organization-tenancy` version `0.1.0` on Go, Java, or Python adds organization creation and
 discovery, membership-scoped permission checks, dialect-specific persistence,
 tenant-aware administration state, and organization predicates on every generated
 business mutation and query. Agents should select an organization once and send

@@ -5,12 +5,16 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+{{- if .Tenancy}}
+from sqlalchemy import create_engine, delete, insert, select
+{{- else}}
 from sqlalchemy import create_engine, select
+{{- end}}
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
 from {{.PackageName}}.database import create_database_engine
-from {{.PackageName}}.identity.models import AuditEvent, audit_events, metadata
+from {{.PackageName}}.identity.models import AuditEvent, audit_events, metadata{{if .Tenancy}}, roles, users{{end}}
 from {{.PackageName}}.migrations import upgrade_database
 from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record
 from {{.PackageName}}.{{.Business.PackageName}}.repository import (
@@ -18,11 +22,25 @@ from {{.PackageName}}.{{.Business.PackageName}}.repository import (
     BusinessNotFound,
     SQLAlchemy{{.Business.EntityClass}}Repository,
 )
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+{{- end}}
 
 
-def record(record_id: str, *, second: bool = False, version: str = "1") -> {{.Business.EntityClass}}Record:
+def record(
+    record_id: str,
+    *,
+{{- if .Tenancy}}
+    organization_id: str,
+{{- end}}
+    second: bool = False,
+    version: str = "1",
+) -> {{.Business.EntityClass}}Record:
     return {{.Business.EntityClass}}Record(
         id=record_id,
+{{- if .Tenancy}}
+        organization_id=organization_id,
+{{- end}}
 {{- range .Business.Fields}}
         {{.Name}}={{if $.Business.HasUnique}}{{if .Unique}}({{.SampleTwo}} if second else {{.SampleOne}}){{else}}{{if .Required}}{{.SampleOne}}{{else}}None{{end}}{{end}}{{else}}({{.SampleTwo}} if second else {{.SampleOne}}){{end}},
 {{- end}}
@@ -39,28 +57,124 @@ def audit(event_id: str, action: str) -> AuditEvent:
 def repository_contract(engine: Engine) -> None:
     repository = SQLAlchemy{{.Business.EntityClass}}Repository(engine)
     record_id = str(uuid4())
-    value = record(record_id)
+{{- if .Tenancy}}
+    suffix = uuid4().hex
+    user_id = "business-user-" + suffix
+    organization_id = "business-organization-" + suffix
+    other_organization_id = "business-other-" + suffix
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        if connection.execute(select(roles.c.code).where(roles.c.code == "admin")).first() is None:
+            connection.execute(insert(roles).values(code="admin", display_name="Administrator"))
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=suffix + "@example.com",
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            insert(organizations),
+            [
+                {
+                    "id": organization_id,
+                    "name": "Business",
+                    "created_by": user_id,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": other_organization_id,
+                    "name": "Other",
+                    "created_by": user_id,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+        connection.execute(
+            insert(organization_memberships),
+            [
+                {
+                    "organization_id": organization_id,
+                    "user_id": user_id,
+                    "role_code": "admin",
+                    "created_at": now,
+                },
+                {
+                    "organization_id": other_organization_id,
+                    "user_id": user_id,
+                    "role_code": "admin",
+                    "created_at": now,
+                },
+            ],
+        )
+{{- end}}
+    value = record(record_id{{if .Tenancy}}, organization_id=organization_id{{end}})
     repository.create(value, audit(str(uuid4()), "create"))
 
-    fetched = repository.get(record_id)
-    page = repository.list("", 20)
-    updated = repository.update(record(record_id, second=True), audit(str(uuid4()), "update"))
+    fetched = repository.get({{if .Tenancy}}organization_id, {{end}}record_id)
+    page = repository.list({{if .Tenancy}}organization_id, {{end}}"", 20)
+    updated = repository.update(
+        record(record_id, {{if .Tenancy}}organization_id=organization_id, {{end}}second=True),
+        audit(str(uuid4()), "update"),
+    )
 
     assert fetched is not None
     assert fetched.id == record_id
     assert any(item.id == record_id for item in page.items)
     assert updated.version == "2"
+{{- if .Tenancy}}
+    assert repository.get(other_organization_id, record_id) is None
+    assert repository.list(other_organization_id, "", 20).items == []
+    other_record_id = str(uuid4())
+    repository.create(
+        record(other_record_id, organization_id=other_organization_id),
+        audit(str(uuid4()), "other-create"),
+    )
+    with pytest.raises(BusinessNotFound):
+        repository.update(
+            record(record_id, organization_id=other_organization_id),
+            audit(str(uuid4()), "cross-update"),
+        )
+    with pytest.raises(BusinessNotFound):
+        repository.delete(
+            other_organization_id,
+            record_id,
+            1,
+            audit(str(uuid4()), "cross-delete"),
+        )
+{{- end}}
     with pytest.raises(BusinessConflict):
         repository.create(updated, audit(str(uuid4()), "duplicate"))
     with pytest.raises(BusinessConflict):
-        repository.update(record(record_id, version="1"), audit(str(uuid4()), "stale"))
+        repository.update(
+            record(record_id, {{if .Tenancy}}organization_id=organization_id, {{end}}version="1"),
+            audit(str(uuid4()), "stale"),
+        )
     with pytest.raises(BusinessNotFound):
-        repository.delete("missing", 1, audit(str(uuid4()), "missing"))
+        repository.delete({{if .Tenancy}}organization_id, {{end}}"missing", 1, audit(str(uuid4()), "missing"))
 
-    repository.delete(record_id, 2, audit(str(uuid4()), "delete"))
-    assert repository.get(record_id) is None
+    repository.delete({{if .Tenancy}}organization_id, {{end}}record_id, 2, audit(str(uuid4()), "delete"))
+    assert repository.get({{if .Tenancy}}organization_id, {{end}}record_id) is None
+{{- if .Tenancy}}
+    repository.delete(
+        other_organization_id,
+        other_record_id,
+        1,
+        audit(str(uuid4()), "other-delete"),
+    )
+{{- end}}
     with engine.connect() as connection:
         assert len(connection.execute(select(audit_events)).all()) >= 3
+{{- if .Tenancy}}
+    with engine.begin() as connection:
+        connection.execute(delete(users).where(users.c.id == user_id))
+{{- end}}
 
 
 def test_repository_contract_without_external_services() -> None:

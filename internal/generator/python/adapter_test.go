@@ -72,8 +72,13 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }, want: "storefront"},
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
-			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "organization-tenancy", Version: "0.1.0"}}
-		}, want: "does not support capability"},
+			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "unsupported", Version: "0.1.0"}}
+		}, want: "not present in the catalog"},
+		{name: "capability configuration", mutate: func(project *spec.Project) {
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyVersion, Config: map[string]any{"mode": "custom"},
+			}}
+		}, want: "does not accept configuration"},
 		{name: "multiple modules", mutate: func(project *spec.Project) {
 			project.Spec.Modules = []spec.Module{{Name: "tasks"}, {Name: "notes"}}
 		}, want: "at most one business module"},
@@ -89,6 +94,114 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 				t.Fatalf("Generate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestGenerateOrganizationTenancyForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validBusinessProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 66 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/tenancy/service.py",
+				"src/demo_service/tenancy/repository.py",
+				"src/demo_service/migration/versions/000050_tenancy.py",
+				"src/demo_service/migration/versions/000051_tenant_business.py",
+				"tests/test_tenancy.py",
+				"tests/test_tenancy_database.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != tenancyOwner {
+					t.Errorf("Generate(%s) did not produce tenancy-owned %s", database, path)
+				}
+			}
+			assertContains := map[string][]string{
+				"api/openapi.yaml":                     {"X-Organization-ID", "/api/v1/organizations"},
+				"src/demo_service/tasks/repository.py": {"organization_id"},
+				"src/demo_service/tasks/service.py":    {"actor.organization_id"},
+				"web/admin/src/api/client.ts":          {"X-Organization-ID"},
+				"web/admin/src/stores/session.ts":      {"loadOrganizations"},
+			}
+			for path, fragments := range assertContains {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateOrganizationTenancyWithoutBusiness(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyOwner, Version: tenancyVersion,
+	}}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 37 {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	if outputContent(generated, "src/demo_service/migration/versions/000051_tenant_business.py") != nil {
+		t.Fatal("Generate() produced a tenant business migration without a business entity")
+	}
+}
+
+func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
+	t.Parallel()
+
+	for _, moduleName := range []string{"accounts", "users"} {
+		project := validBusinessProject()
+		project.Spec.Modules[0].Name = moduleName
+		for index := range project.Spec.Modules[0].Permissions {
+			suffix := strings.TrimPrefix(project.Spec.Modules[0].Permissions[index].Code, "tasks")
+			project.Spec.Modules[0].Permissions[index].Code = moduleName + suffix
+		}
+		project.Spec.Capabilities = []spec.CapabilitySelection{{
+			Name: tenancyOwner, Version: tenancyVersion,
+		}}
+		generated, err := New().Generate(context.Background(), project)
+		if err != nil {
+			t.Fatalf("Generate(%s) error = %v", moduleName, err)
+		}
+		mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+		businessImport := "from demo_service." + moduleName + ".http import"
+		tenancyImport := "from demo_service.tenancy.http import"
+		businessIndex := strings.Index(mainSource, businessImport)
+		tenancyIndex := strings.Index(mainSource, tenancyImport)
+		if businessIndex < 0 || tenancyIndex < 0 {
+			t.Fatalf("generated imports are incomplete:\n%s", mainSource)
+		}
+		if (moduleName < "tenancy") != (businessIndex < tenancyIndex) {
+			t.Fatalf("generated imports are not sorted for %s:\n%s", moduleName, mainSource)
+		}
+		firstIndex, secondIndex := businessIndex, tenancyIndex
+		if firstIndex > secondIndex {
+			firstIndex, secondIndex = secondIndex, firstIndex
+		}
+		if strings.Contains(mainSource[firstIndex:secondIndex], "\n\n") {
+			t.Fatalf("generated imports contain an empty group for %s:\n%s", moduleName, mainSource)
+		}
 	}
 }
 
@@ -246,4 +359,13 @@ func outputContent(result generator.Result, path string) []byte {
 		}
 	}
 	return nil
+}
+
+func outputOwner(result generator.Result, path string) string {
+	for _, output := range result.Outputs {
+		if output.Path == path {
+			return output.Owner
+		}
+	}
+	return ""
 }

@@ -1,0 +1,124 @@
+"""Transactional SQLAlchemy organization tenancy persistence."""
+
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import func, insert, select
+from sqlalchemy.engine import Engine, RowMapping
+
+from {{.PackageName}}.identity.models import AuditEvent, role_permissions
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.tenancy.models import (
+    Organization,
+    organization_memberships,
+    organizations,
+)
+
+
+class TenancyRepository(Protocol):
+    """Persistence seam for organization and scoped authorization use cases."""
+
+    def create_organization(
+        self,
+        organization: Organization,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> None: ...
+
+    def list_organizations(self, user_id: str) -> list[Organization]: ...
+
+    def membership_role(self, organization_id: str, user_id: str) -> str | None: ...
+
+    def has_permission(self, role: str, permission: str) -> bool: ...
+
+    def append_audit(self, audit: AuditEvent) -> None: ...
+
+
+class SQLAlchemyTenancyRepository:
+    """SQLAlchemy Core adapter with explicit transaction boundaries."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create_organization(
+        self,
+        organization: Organization,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> None:
+        with self._engine.begin() as connection:
+            connection.execute(
+                insert(organizations).values(
+                    id=organization.id,
+                    name=organization.name,
+                    created_by=user_id,
+                    created_at=organization.created_at,
+                    updated_at=organization.created_at,
+                )
+            )
+            connection.execute(
+                insert(organization_memberships).values(
+                    organization_id=organization.id,
+                    user_id=user_id,
+                    role_code=role,
+                    created_at=organization.created_at,
+                )
+            )
+            append_audit(connection, audit)
+
+    def list_organizations(self, user_id: str) -> list[Organization]:
+        statement = (
+            select(
+                organizations.c.id,
+                organizations.c.name,
+                organization_memberships.c.role_code,
+                organizations.c.created_at,
+            )
+            .select_from(
+                organization_memberships.join(
+                    organizations,
+                    organizations.c.id == organization_memberships.c.organization_id,
+                )
+            )
+            .where(organization_memberships.c.user_id == user_id)
+            .order_by(organizations.c.name, organizations.c.id)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return [_map_organization(row) for row in rows]
+
+    def membership_role(self, organization_id: str, user_id: str) -> str | None:
+        statement = select(organization_memberships.c.role_code).where(
+            organization_memberships.c.organization_id == organization_id,
+            organization_memberships.c.user_id == user_id,
+        )
+        with self._engine.connect() as connection:
+            value = connection.execute(statement).scalar_one_or_none()
+        return str(value) if value is not None else None
+
+    def has_permission(self, role: str, permission: str) -> bool:
+        statement = (
+            select(func.count())
+            .select_from(role_permissions)
+            .where(
+                role_permissions.c.role_code == role,
+                role_permissions.c.permission_code == permission,
+            )
+        )
+        with self._engine.connect() as connection:
+            return connection.execute(statement).scalar_one() == 1
+
+    def append_audit(self, audit: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            append_audit(connection, audit)
+
+
+def _map_organization(row: RowMapping) -> Organization:
+    return Organization(
+        id=str(row["id"]),
+        name=str(row["name"]),
+        role=str(row["role_code"]),
+        created_at=cast(datetime, row["created_at"]),
+    )

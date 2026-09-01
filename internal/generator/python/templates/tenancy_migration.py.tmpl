@@ -1,0 +1,52 @@
+"""Create organization tenancy storage."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000050_tenancy"
+down_revision: str | None = "000001_identity"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create organizations and their identity memberships."""
+    op.create_table(
+        "organizations",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("name", sa.String(length=120), nullable=False),
+        sa.Column("created_by", sa.String(length=191), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["created_by"], ["identity_users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    op.create_table(
+        "organization_memberships",
+        sa.Column("organization_id", sa.String(length=191), nullable=False),
+        sa.Column("user_id", sa.String(length=191), nullable=False),
+        sa.Column("role_code", sa.String(length=32), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["user_id"], ["identity_users.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["role_code"], ["identity_roles.code"]),
+        sa.PrimaryKeyConstraint("organization_id", "user_id"),
+    )
+    op.create_index(
+        "ix_organization_memberships_user_organization",
+        "organization_memberships",
+        ["user_id", "organization_id"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    """Remove organization tenancy storage."""
+    op.drop_index(
+        "ix_organization_memberships_user_organization",
+        table_name="organization_memberships",
+    )
+    op.drop_table("organization_memberships")
+    op.drop_table("organizations")

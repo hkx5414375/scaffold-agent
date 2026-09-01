@@ -51,7 +51,7 @@ def create(
     payload: {{.Business.EntityClass}}Write,
     principal: Annotated[
         Principal,
-        Depends(require_permission("{{.Business.PermissionPrefix}}:create")),
+        Depends(require_permission("{{.Business.PermissionPrefix}}:create"{{if .Tenancy}}, tenant_scoped=True{{end}})),
     ],
     service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
 ) -> {{.Business.EntityClass}}Record:
@@ -64,7 +64,7 @@ def get(
     record_id: str,
     principal: Annotated[
         Principal,
-        Depends(require_permission("{{.Business.PermissionPrefix}}:read")),
+        Depends(require_permission("{{.Business.PermissionPrefix}}:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
     ],
     service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
 ) -> {{.Business.EntityClass}}Record:
@@ -76,7 +76,7 @@ def get(
 def list_records(
     principal: Annotated[
         Principal,
-        Depends(require_permission("{{.Business.PermissionPrefix}}:read")),
+        Depends(require_permission("{{.Business.PermissionPrefix}}:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
     ],
     service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
     cursor: Annotated[str, Query(max_length=191)] = "",
@@ -92,7 +92,7 @@ def update(
     payload: {{.Business.EntityClass}}Update,
     principal: Annotated[
         Principal,
-        Depends(require_permission("{{.Business.PermissionPrefix}}:update")),
+        Depends(require_permission("{{.Business.PermissionPrefix}}:update"{{if .Tenancy}}, tenant_scoped=True{{end}})),
     ],
     service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
 ) -> {{.Business.EntityClass}}Record:
@@ -109,7 +109,7 @@ def delete(
     ],
     principal: Annotated[
         Principal,
-        Depends(require_permission("{{.Business.PermissionPrefix}}:delete")),
+        Depends(require_permission("{{.Business.PermissionPrefix}}:delete"{{if .Tenancy}}, tenant_scoped=True{{end}})),
     ],
     service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
 ) -> None:

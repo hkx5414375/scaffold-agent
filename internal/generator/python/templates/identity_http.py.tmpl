@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
 from {{.PackageName}}.identity.models import Principal
 from {{.PackageName}}.identity.service import IdentityService
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
 
 SESSION_COOKIE = "scaffold_session"
 MAXIMUM_CREDENTIAL_LENGTH = 512
@@ -48,6 +51,14 @@ def identity_service(request: Request) -> IdentityService:
     """Resolve the process-scoped identity service."""
     service: IdentityService = request.app.state.identity_service
     return service
+{{- if .Tenancy}}
+
+
+def tenancy_service(request: Request) -> TenancyService:
+    """Resolve the process-scoped organization tenancy service."""
+    service: TenancyService = request.app.state.tenancy_service
+    return service
+{{- end}}
 
 
 def client_context(request: Request) -> tuple[str, str]:
@@ -79,8 +90,29 @@ def current_principal(
     return service.authenticate(bounded_session, _bearer_token(authorization))
 
 
-def require_permission(permission: str) -> Callable[..., Principal]:
+def require_permission(permission: str{{if .Tenancy}}, *, tenant_scoped: bool = False{{end}}) -> Callable[..., Principal]:
     """Build an explicit permission dependency for one route."""
+{{- if .Tenancy}}
+
+    if tenant_scoped:
+
+        def tenant_dependency(
+            request: Request,
+            principal: Annotated[Principal, Depends(current_principal)],
+            tenancy: Annotated[TenancyService, Depends(tenancy_service)],
+            organization_id: Annotated[str | None, Header(alias="X-Organization-ID")] = None,
+        ) -> Principal:
+            ip_address, user_agent = client_context(request)
+            return tenancy.authorize(
+                principal,
+                organization_id or "",
+                permission,
+                ip_address,
+                user_agent,
+            )
+
+        return tenant_dependency
+{{- end}}
 
     def dependency(
         request: Request,

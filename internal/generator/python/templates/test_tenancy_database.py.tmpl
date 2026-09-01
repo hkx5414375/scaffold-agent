@@ -1,0 +1,139 @@
+"""Organization tenancy persistence and isolation contracts."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.errors import IdentityError
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    metadata,
+    permissions,
+    role_permissions,
+    roles,
+    users,
+)
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+
+
+def repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    first_id = "user-" + uuid4().hex
+    second_id = "user-" + uuid4().hex
+    now = datetime.now(UTC)
+    with engine.begin() as connection:
+        for code, display_name in (("admin", "Administrator"), ("user", "User")):
+            if connection.execute(select(roles.c.code).where(roles.c.code == code)).first() is None:
+                connection.execute(insert(roles).values(code=code, display_name=display_name))
+        permission = "contract:" + suffix + ":read"
+        connection.execute(
+            insert(permissions).values(code=permission, description="Contract permission")
+        )
+        connection.execute(
+            insert(role_permissions).values(role_code="admin", permission_code=permission)
+        )
+        connection.execute(
+            insert(users),
+            [
+                {
+                    "id": first_id,
+                    "email": suffix + "-first@example.com",
+                    "password_hash": "unused",
+                    "role": "admin",
+                    "disabled": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": second_id,
+                    "email": suffix + "-second@example.com",
+                    "password_hash": "unused",
+                    "role": "admin",
+                    "disabled": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+    repository = SQLAlchemyTenancyRepository(engine)
+    service = TenancyService(repository, lambda: now)
+    first_actor = Principal(
+        user_id=first_id,
+        email=suffix + "-first@example.com",
+        role="admin",
+        method="token",
+    )
+    second_actor = Principal(
+        user_id=second_id,
+        email=suffix + "-second@example.com",
+        role="admin",
+        method="token",
+    )
+    first = service.create("First " + suffix, first_actor)
+    second = service.create("Second " + suffix, second_actor)
+
+    scoped = service.authorize(first_actor, first.id, permission, "", "")
+    with pytest.raises(IdentityError):
+        service.authorize(first_actor, second.id, permission, "", "")
+
+    assert scoped.organization_id == first.id
+    assert [item.id for item in service.list(first_actor).items] == [first.id]
+    with engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(organization_memberships).where(
+                    organization_memberships.c.organization_id == first.id
+                )
+            ).first()
+            is not None
+        )
+        assert (
+            connection.execute(
+                select(audit_events).where(audit_events.c.user_id == first_id)
+            ).first()
+            is not None
+        )
+    with engine.begin() as connection:
+        connection.execute(
+            delete(organizations).where(organizations.c.id.in_([first.id, second.id]))
+        )
+        connection.execute(delete(users).where(users.c.id.in_([first_id, second_id])))
+        connection.execute(
+            delete(role_permissions).where(role_permissions.c.permission_code == permission)
+        )
+        connection.execute(delete(permissions).where(permissions.c.code == permission))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    try:
+        repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        repository_contract(engine)
+    finally:
+        engine.dispose()

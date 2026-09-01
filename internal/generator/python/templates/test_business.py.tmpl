@@ -26,7 +26,15 @@ from {{.PackageName}}.{{.Business.PackageName}}.service import (
 )
 
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
-ACTOR = Principal(user_id="admin-1", email="admin@example.com", role="admin", method="token")
+ACTOR = Principal(
+    user_id="admin-1",
+    email="admin@example.com",
+    role="admin",
+    method="token",
+{{- if .Tenancy}}
+    organization_id="organization-1",
+{{- end}}
+)
 
 
 def write_one() -> {{.Business.EntityClass}}Write:
@@ -56,6 +64,10 @@ class MemoryRepository:
             raise BusinessConflict("a unique value already exists")
 {{- if .Business.HasUnique}}
         for existing in self.values.values():
+{{- if .Tenancy}}
+            if existing.organization_id != value.organization_id:
+                continue
+{{- end}}
             unique_pairs: list[tuple[object, object]] = []
 {{- range .Business.Fields}}
 {{- if .Unique}}
@@ -68,11 +80,26 @@ class MemoryRepository:
         self.values[value.id] = value
         self.audits.append(audit)
 
-    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None:
+    def get(self, {{if .Tenancy}}organization_id: str, {{end}}record_id: str) -> {{.Business.EntityClass}}Record | None:
+{{- if .Tenancy}}
+        value = self.values.get(record_id)
+        if value is None or value.organization_id != organization_id:
+            return None
+        return value
+{{- else}}
         return self.values.get(record_id)
+{{- end}}
 
-    def list(self, cursor: str, limit: int) -> PageResult:
+    def list(self, {{if .Tenancy}}organization_id: str, {{end}}cursor: str, limit: int) -> PageResult:
+{{- if .Tenancy}}
+        values = [
+            value
+            for key, value in sorted(self.values.items())
+            if key > cursor and value.organization_id == organization_id
+        ]
+{{- else}}
         values = [value for key, value in sorted(self.values.items()) if key > cursor]
+{{- end}}
         next_cursor = values[limit - 1].id if len(values) > limit else ""
         return PageResult(values[:limit], next_cursor)
 
@@ -89,9 +116,9 @@ class MemoryRepository:
         self.audits.append(audit)
         return updated
 
-    def delete(self, record_id: str, version: int, audit: AuditEvent) -> None:
+    def delete(self, {{if .Tenancy}}organization_id: str, {{end}}record_id: str, version: int, audit: AuditEvent) -> None:
         existing = self.values.get(record_id)
-        if existing is None:
+        if existing is None{{if .Tenancy}} or existing.organization_id != organization_id{{end}}:
             raise BusinessNotFound(record_id)
         if int(existing.version) != version:
             raise BusinessConflict("version is stale")
@@ -175,16 +202,44 @@ class SecurityService:
     ) -> None:
         del actor, ip_address, user_agent
         assert permission.startswith("{{.Business.PermissionPrefix}}:")
+{{- if .Tenancy}}
+
+
+class TenantSecurityService:
+    def authorize(
+        self,
+        actor: Principal,
+        organization_id: str,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> Principal:
+        del ip_address, user_agent
+        assert organization_id == "organization-1"
+        assert permission.startswith("{{.Business.PermissionPrefix}}:")
+        return actor.model_copy(update={"organization_id": organization_id, "role": "admin"})
+{{- end}}
 
 
 def test_http_crud_contract_and_error_mapping() -> None:
     application = FastAPI()
     application.state.identity_service = SecurityService()
+{{- if .Tenancy}}
+    application.state.tenancy_service = TenantSecurityService()
+{{- end}}
     application.state.business_service = {{.Business.EntityClass}}Service(MemoryRepository(), lambda: NOW)
     install_identity_errors(application)
     install_error_handlers(application)
     application.include_router(router)
-    client = TestClient(application, headers={"Authorization": "Bearer api-secret"})
+    client = TestClient(
+        application,
+        headers={
+            "Authorization": "Bearer api-secret",
+{{- if .Tenancy}}
+            "X-Organization-ID": "organization-1",
+{{- end}}
+        },
+    )
     first = write_one().model_dump(mode="json")
     second = write_two().model_dump(mode="json")
 

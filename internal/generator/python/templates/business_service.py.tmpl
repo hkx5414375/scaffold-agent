@@ -57,6 +57,9 @@ class {{.Business.EntityClass}}Service:
         now = self._clock()
         value = {{.Business.EntityClass}}Record(
             id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=_organization_id(actor),
+{{- end}}
 {{- range .Business.Fields}}
             {{.Name}}=input_value.{{.Name}},
 {{- end}}
@@ -74,7 +77,7 @@ class {{.Business.EntityClass}}Service:
         """Read one record or return a stable missing error."""
         _require_actor(actor)
         normalized_id = _require_id(record_id)
-        value = self._repository.get(normalized_id)
+        value = self._repository.get({{if .Tenancy}}_organization_id(actor), {{end}}normalized_id)
         if value is None:
             raise _not_found(normalized_id)
         return value
@@ -87,7 +90,7 @@ class {{.Business.EntityClass}}Service:
         normalized_cursor = cursor.strip()
         if len(normalized_cursor) > 191 or _has_control(normalized_cursor):
             raise BusinessError(BusinessErrorKind.INVALID_INPUT, "cursor is invalid")
-        result = self._repository.list(normalized_cursor, limit)
+        result = self._repository.list({{if .Tenancy}}_organization_id(actor), {{end}}normalized_cursor, limit)
         return {{.Business.EntityClass}}Page(items=result.items, next_cursor=result.next_cursor)
 
     def update(
@@ -104,6 +107,9 @@ class {{.Business.EntityClass}}Service:
         now = self._clock()
         value = {{.Business.EntityClass}}Record(
             id=normalized_id,
+{{- if .Tenancy}}
+            organization_id=_organization_id(actor),
+{{- end}}
 {{- range .Business.Fields}}
             {{.Name}}=input_value.{{.Name}},
 {{- end}}
@@ -127,6 +133,9 @@ class {{.Business.EntityClass}}Service:
         version = _positive_version(version_value)
         try:
             self._repository.delete(
+{{- if .Tenancy}}
+                _organization_id(actor),
+{{- end}}
                 normalized_id,
                 version,
                 _audit(
@@ -162,8 +171,27 @@ def _validate_input(value: {{.Business.EntityClass}}Write) -> None:
 
 
 def _require_actor(actor: Principal) -> None:
+{{- if .Tenancy}}
+    if (
+        not actor.user_id
+        or _has_control(actor.user_id)
+        or not actor.organization_id
+        or _has_control(actor.organization_id)
+    ):
+{{- else}}
     if not actor.user_id or _has_control(actor.user_id):
+{{- end}}
         raise BusinessError(BusinessErrorKind.INVALID_INPUT, "authenticated actor is required")
+{{- if .Tenancy}}
+
+
+def _organization_id(actor: Principal) -> str:
+    _require_actor(actor)
+    organization_id = actor.organization_id
+    if organization_id is None:
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "authenticated actor is required")
+    return organization_id
+{{- end}}
 
 
 def _require_id(record_id: str) -> str:

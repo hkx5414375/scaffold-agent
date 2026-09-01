@@ -1,0 +1,37 @@
+"""FastAPI transport for organization tenancy use cases."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+
+from {{.PackageName}}.identity.http import current_principal
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.tenancy.models import Organization, OrganizationPage, OrganizationWrite
+from {{.PackageName}}.tenancy.service import TenancyService
+
+router = APIRouter(prefix="/api/v1/organizations", tags=["organizations"])
+
+
+def tenancy_service(request: Request) -> TenancyService:
+    """Resolve the process-scoped tenancy service."""
+    service: TenancyService = request.app.state.tenancy_service
+    return service
+
+
+@router.post("", response_model=Organization, status_code=201)
+def create(
+    payload: OrganizationWrite,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyService, Depends(tenancy_service)],
+) -> Organization:
+    """Create one organization and administrator membership."""
+    return service.create(payload.name, principal)
+
+
+@router.get("", response_model=OrganizationPage)
+def list_organizations(
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyService, Depends(tenancy_service)],
+) -> OrganizationPage:
+    """List organizations visible to the current identity."""
+    return service.list(principal)

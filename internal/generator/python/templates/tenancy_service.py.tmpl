@@ -1,0 +1,146 @@
+"""Organization creation, discovery, and scoped authorization use cases."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.tenancy.models import Organization, OrganizationPage
+from {{.PackageName}}.tenancy.repository import TenancyRepository
+
+MAXIMUM_AUDIT_VALUE_LENGTH = 512
+
+
+class TenancyService:
+    """Organization use cases independent from FastAPI and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: TenancyRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def create(self, name: str, actor: Principal) -> Organization:
+        """Atomically create an organization, administrator membership, and audit."""
+        _require_actor(actor)
+        normalized_name = name.strip()
+        if not normalized_name or len(normalized_name) > 120 or _has_control(normalized_name):
+            raise IdentityError(
+                IdentityErrorKind.INVALID_INPUT,
+                "organization name must contain 1 to 120 safe characters",
+            )
+        now = self._clock()
+        organization = Organization(
+            id=str(uuid4()),
+            name=normalized_name,
+            role="admin",
+            created_at=now,
+        )
+        self._repository.create_organization(
+            organization,
+            actor.user_id,
+            "admin",
+            _audit(
+                actor.user_id,
+                "tenancy.organization:create",
+                "succeeded",
+                organization.id,
+                None,
+                None,
+                now,
+            ),
+        )
+        return organization
+
+    def list(self, actor: Principal) -> OrganizationPage:
+        """List organizations visible through the actor's memberships."""
+        _require_actor(actor)
+        return OrganizationPage(items=self._repository.list_organizations(actor.user_id))
+
+    def authorize(
+        self,
+        actor: Principal,
+        organization_id: str,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> Principal:
+        """Resolve one membership and require its role permission."""
+        _require_actor(actor)
+        normalized_id = organization_id.strip()
+        if (
+            not normalized_id
+            or len(normalized_id) > 191
+            or _has_control(normalized_id)
+            or not permission
+        ):
+            self._deny(actor, normalized_id, permission, ip_address, user_agent)
+        role = self._repository.membership_role(normalized_id, actor.user_id)
+        if role is None or not self._repository.has_permission(role, permission):
+            self._deny(actor, normalized_id, permission, ip_address, user_agent)
+        return actor.model_copy(update={"role": role, "organization_id": normalized_id})
+
+    def _deny(
+        self,
+        actor: Principal,
+        organization_id: str,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> None:
+        self._repository.append_audit(
+            _audit(
+                actor.user_id,
+                "tenancy.authorization",
+                "denied",
+                organization_id + ":" + permission,
+                ip_address,
+                user_agent,
+                self._clock(),
+            )
+        )
+        raise IdentityError(
+            IdentityErrorKind.FORBIDDEN,
+            "organization membership and permission are required",
+        )
+
+
+def _require_actor(actor: Principal) -> None:
+    if not actor.user_id or _has_control(actor.user_id):
+        raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+
+
+def _audit(
+    user_id: str,
+    action: str,
+    outcome: str,
+    target: str,
+    ip_address: str | None,
+    user_agent: str | None,
+    now: datetime,
+) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=_safe(user_id),
+        action=action,
+        outcome=outcome,
+        target=_safe(target),
+        ip_address=_safe(ip_address),
+        user_agent=_safe(user_agent),
+        created_at=now,
+    )
+
+
+def _safe(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return "".join(character for character in value if character.isprintable())[
+        :MAXIMUM_AUDIT_VALUE_LENGTH
+    ]
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)

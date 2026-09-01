@@ -129,6 +129,9 @@ class Principal(BaseModel):
     email: str
     role: str
     method: str
+{{- if .Tenancy}}
+    organization_id: str | None = None
+{{- end}}
     model_config = ConfigDict(extra="forbid")
 
 

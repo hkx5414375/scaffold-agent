@@ -14,6 +14,14 @@ table = sa.Table(
     "{{.Business.TableName}}",
     metadata,
     sa.Column("id", sa.String(191), primary_key=True),
+{{- if .Tenancy}}
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+{{- end}}
 {{- range .Business.Fields}}
     sa.Column("{{.Name}}", {{.SQLAlchemyType}}, nullable={{if .Required}}False{{else}}True{{end}}),
 {{- end}}
@@ -22,12 +30,16 @@ table = sa.Table(
     sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
 {{- range .Business.Fields}}
 {{- if .Unique}}
+{{- if $.Tenancy}}
+    sa.UniqueConstraint("organization_id", "{{.Name}}", name="{{.UniqueName}}"),
+{{- else}}
     sa.UniqueConstraint("{{.Name}}", name="{{.UniqueName}}"),
+{{- end}}
 {{- end}}
 {{- end}}
     sa.CheckConstraint("version > 0", name="{{.Business.VersionCheckName}}"),
 )
-sa.Index("{{.Business.IndexName}}", table.c.created_at.desc(), table.c.id)
+sa.Index("{{.Business.IndexName}}", {{if .Tenancy}}table.c.organization_id, {{end}}table.c.created_at.desc(), table.c.id)
 
 
 class StrictModel(BaseModel):
@@ -40,6 +52,9 @@ class {{.Business.EntityClass}}Record(StrictModel):
     """Persisted {{.Business.EntityName}} returned by the API."""
 
     id: str
+{{- if .Tenancy}}
+    organization_id: str
+{{- end}}
 {{- range .Business.Fields}}
 {{- if .StringLike}}
     {{.Name}}: {{.PythonType}}{{if not .Required}} | None{{end}} = Field({{if .Required}}min_length=1{{else}}default=None, min_length=1{{end}}, max_length={{.MaximumLength}})

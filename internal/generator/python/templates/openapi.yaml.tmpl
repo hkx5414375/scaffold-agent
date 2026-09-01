@@ -112,8 +112,55 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           $ref: "#/components/responses/ValidationError"
+{{if .Tenancy}}
+  /api/v1/organizations:
+    post:
+      operationId: createOrganization
+      summary: Create an organization and administrator membership
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationWrite"
+      responses:
+        "201":
+          description: Organization created atomically with its administrator membership.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      operationId: listOrganizations
+      summary: List organizations visible to the authenticated identity
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Organizations visible through current memberships.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationPage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+{{end}}
 {{if .Business}}
   {{.Business.RoutePath}}:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
     post:
       operationId: create{{.Business.EntityClass}}
       summary: Create one {{.Business.EntityName}}
@@ -177,6 +224,9 @@ paths:
           $ref: "#/components/responses/Forbidden"
   {{.Business.RoutePath}}/{record_id}:
     parameters:
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
       - name: record_id
         in: path
         required: true
@@ -262,6 +312,18 @@ paths:
           $ref: "#/components/responses/Conflict"
 {{end}}
 components:
+{{- if .Tenancy}}
+  parameters:
+    OrganizationHeader:
+      name: X-Organization-ID
+      in: header
+      required: true
+      description: Organization selected for tenant-scoped authorization and persistence.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 191
+{{- end}}
   securitySchemes:
     bearerAuth:
       type: http
@@ -350,6 +412,10 @@ components:
         method:
           type: string
           enum: [session, token]
+{{- if .Tenancy}}
+        organization_id:
+          type: [string, "null"]
+{{- end}}
     ApiTokenRequest:
       type: object
       additionalProperties: false
@@ -375,12 +441,52 @@ components:
           type: string
         message:
           type: string
+{{if .Tenancy}}
+    OrganizationWrite:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    Organization:
+      type: object
+      additionalProperties: false
+      required: [id, name, role, created_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        role:
+          type: string
+          enum: [admin, user]
+        created_at:
+          type: string
+          format: date-time
+    OrganizationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Organization"
+{{end}}
 {{if .Business}}
     {{.Business.EntityClass}}Record:
       type: object
       additionalProperties: false
       required:
         - id
+{{- if .Tenancy}}
+        - organization_id
+{{- end}}
 {{- range .Business.Fields}}
 {{- if .Required}}
         - {{.Name}}
@@ -392,6 +498,10 @@ components:
       properties:
         id:
           type: string
+{{- if .Tenancy}}
+        organization_id:
+          type: string
+{{- end}}
 {{- range .Business.Fields}}
         {{.Name}}:
 {{- if .Required}}

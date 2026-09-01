@@ -34,13 +34,19 @@ class {{.Business.EntityClass}}Repository(Protocol):
 
     def create(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> None: ...
 
-    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None: ...
+    def get(self, {{if .Tenancy}}organization_id: str, {{end}}record_id: str) -> {{.Business.EntityClass}}Record | None: ...
 
-    def list(self, cursor: str, limit: int) -> PageResult: ...
+    def list(self, {{if .Tenancy}}organization_id: str, {{end}}cursor: str, limit: int) -> PageResult: ...
 
     def update(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> {{.Business.EntityClass}}Record: ...
 
+{{- if .Tenancy}}
+    def delete(
+        self, organization_id: str, record_id: str, version: int, audit: AuditEvent
+    ) -> None: ...
+{{- else}}
     def delete(self, record_id: str, version: int, audit: AuditEvent) -> None: ...
+{{- end}}
 
 
 class SQLAlchemy{{.Business.EntityClass}}Repository:
@@ -59,15 +65,20 @@ class SQLAlchemy{{.Business.EntityClass}}Repository:
         except IntegrityError as error:
             raise BusinessConflict("a unique value already exists") from error
 
-    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None:
+    def get(self, {{if .Tenancy}}organization_id: str, {{end}}record_id: str) -> {{.Business.EntityClass}}Record | None:
+        conditions = [table.c.id == record_id]
+{{- if .Tenancy}}
+        conditions.append(table.c.organization_id == organization_id)
+{{- end}}
         with self._engine.connect() as connection:
-            row = (
-                connection.execute(select(table).where(table.c.id == record_id)).mappings().first()
-            )
+            row = connection.execute(select(table).where(*conditions)).mappings().first()
         return _map_record(row) if row is not None else None
 
-    def list(self, cursor: str, limit: int) -> PageResult:
+    def list(self, {{if .Tenancy}}organization_id: str, {{end}}cursor: str, limit: int) -> PageResult:
         statement = select(table).order_by(table.c.id).limit(limit + 1)
+{{- if .Tenancy}}
+        statement = statement.where(table.c.organization_id == organization_id)
+{{- end}}
         if cursor:
             statement = statement.where(table.c.id > cursor)
         with self._engine.connect() as connection:
@@ -81,7 +92,13 @@ class SQLAlchemy{{.Business.EntityClass}}Repository:
             with self._engine.begin() as connection:
                 statement = (
                     update(table)
-                    .where(table.c.id == value.id, table.c.version == int(value.version))
+                    .where(
+                        table.c.id == value.id,
+{{- if .Tenancy}}
+                        table.c.organization_id == value.organization_id,
+{{- end}}
+                        table.c.version == int(value.version),
+                    )
                     .values(
                         **_database_values(value, include_created=False),
                         version=int(value.version) + 1,
@@ -89,27 +106,51 @@ class SQLAlchemy{{.Business.EntityClass}}Repository:
                 )
                 changed = connection.execute(statement).rowcount
                 if changed != 1:
-                    _raise_missing_or_conflict(connection, value.id)
+                    _raise_missing_or_conflict(connection, {{if .Tenancy}}value.organization_id, {{end}}value.id)
                 append_audit(connection, audit)
                 row = (
-                    connection.execute(select(table).where(table.c.id == value.id)).mappings().one()
+                    connection.execute(
+                        select(table).where(
+                            table.c.id == value.id,
+{{- if .Tenancy}}
+                            table.c.organization_id == value.organization_id,
+{{- end}}
+                        )
+                    )
+                    .mappings()
+                    .one()
                 )
                 return _map_record(row)
         except IntegrityError as error:
             raise BusinessConflict("a unique value already exists") from error
 
-    def delete(self, record_id: str, version: int, audit: AuditEvent) -> None:
+    def delete(self, {{if .Tenancy}}organization_id: str, {{end}}record_id: str, version: int, audit: AuditEvent) -> None:
         with self._engine.begin() as connection:
             changed = connection.execute(
-                delete(table).where(table.c.id == record_id, table.c.version == version)
+                delete(table).where(
+                    table.c.id == record_id,
+{{- if .Tenancy}}
+                    table.c.organization_id == organization_id,
+{{- end}}
+                    table.c.version == version,
+                )
             ).rowcount
             if changed != 1:
-                _raise_missing_or_conflict(connection, record_id)
+                _raise_missing_or_conflict(connection, {{if .Tenancy}}organization_id, {{end}}record_id)
             append_audit(connection, audit)
 
-
+{{if .Tenancy}}
+def _raise_missing_or_conflict(
+    connection: Connection, organization_id: str, record_id: str
+) -> None:
+{{- else}}
 def _raise_missing_or_conflict(connection: Connection, record_id: str) -> None:
-    exists = connection.execute(select(table.c.id).where(table.c.id == record_id)).first()
+{{- end}}
+    conditions = [table.c.id == record_id]
+{{- if .Tenancy}}
+    conditions.append(table.c.organization_id == organization_id)
+{{- end}}
+    exists = connection.execute(select(table.c.id).where(*conditions)).first()
     if exists is None:
         raise BusinessNotFound(record_id)
     raise BusinessConflict("version is stale")
@@ -118,6 +159,9 @@ def _raise_missing_or_conflict(connection: Connection, record_id: str) -> None:
 def _database_values(value: {{.Business.EntityClass}}Record, *, include_created: bool) -> dict[str, object]:
     result: dict[str, object] = {
         "id": value.id,
+{{- if .Tenancy}}
+        "organization_id": value.organization_id,
+{{- end}}
 {{- range .Business.Fields}}
         "{{.Name}}": {{if .Int64}}None if value.{{.Name}} is None else int(value.{{.Name}}){{else}}value.{{.Name}}{{end}},
 {{- end}}
@@ -132,6 +176,9 @@ def _database_values(value: {{.Business.EntityClass}}Record, *, include_created:
 def _map_record(row: RowMapping) -> {{.Business.EntityClass}}Record:
     return {{.Business.EntityClass}}Record(
         id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
 {{- range .Business.Fields}}
 {{- if .Int64}}
         {{.Name}}=None if row["{{.Name}}"] is None else str(row["{{.Name}}"]),

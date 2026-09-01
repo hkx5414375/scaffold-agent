@@ -1,0 +1,76 @@
+"""Organization tenancy records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field
+
+from {{.PackageName}}.identity.models import metadata
+
+organizations = sa.Table(
+    "organizations",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column("name", sa.String(120), nullable=False),
+    sa.Column(
+        "created_by",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id"),
+        nullable=False,
+    ),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+)
+
+organization_memberships = sa.Table(
+    "organization_memberships",
+    metadata,
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column(
+        "user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    sa.Column(
+        "role_code",
+        sa.String(32),
+        sa.ForeignKey("identity_roles.code"),
+        nullable=False,
+    ),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+sa.Index(
+    "ix_organization_memberships_user_organization",
+    organization_memberships.c.user_id,
+    organization_memberships.c.organization_id,
+)
+
+
+class Organization(BaseModel):
+    """Organization visible through one authenticated membership."""
+
+    id: str
+    name: str
+    role: str
+    created_at: datetime
+    model_config = ConfigDict(extra="forbid")
+
+
+class OrganizationWrite(BaseModel):
+    """Bounded organization creation input."""
+
+    name: str = Field(min_length=1, max_length=120)
+    model_config = ConfigDict(extra="forbid")
+
+
+class OrganizationPage(BaseModel):
+    """Organizations visible to one identity."""
+
+    items: list[Organization]
+    model_config = ConfigDict(extra="forbid")

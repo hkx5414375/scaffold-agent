@@ -95,6 +95,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"python-session-token-identity",
 				"python-blueprint-crud",
 				"python-shared-vue-administration",
+				"python-organization-tenancy",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

@@ -1,0 +1,72 @@
+"""Apply organization isolation to the Blueprint-defined business table."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000051_tenant_business"
+down_revision: tuple[str, str] = ("000002_business", "000050_tenancy")
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Require an empty global table, then add mandatory organization scope."""
+    connection = op.get_bind()
+    existing = connection.execute(sa.text("select count(*) from {{.Business.TableName}}")).scalar_one()
+    if existing != 0:
+        raise RuntimeError(
+            "organization tenancy requires explicit migration of existing business records"
+        )
+    with op.batch_alter_table("{{.Business.TableName}}") as batch:
+        batch.drop_index("{{.Business.IndexName}}")
+{{- range .Business.Fields}}
+{{- if .Unique}}
+        batch.drop_constraint("{{.UniqueName}}", type_="unique")
+{{- end}}
+{{- end}}
+        batch.add_column(sa.Column("organization_id", sa.String(length=191), nullable=False))
+        batch.create_foreign_key(
+            "{{.Business.TenantForeignKeyName}}",
+            "organizations",
+            ["organization_id"],
+            ["id"],
+            ondelete="CASCADE",
+        )
+{{- range .Business.Fields}}
+{{- if .Unique}}
+        batch.create_unique_constraint(
+            "{{.UniqueName}}",
+            ["organization_id", "{{.Name}}"],
+        )
+{{- end}}
+{{- end}}
+        batch.create_index(
+            "{{.Business.IndexName}}",
+            ["organization_id", "created_at", "id"],
+            unique=False,
+        )
+
+
+def downgrade() -> None:
+    """Remove tenant scope only when cross-organization values remain globally unique."""
+    with op.batch_alter_table("{{.Business.TableName}}") as batch:
+        batch.drop_index("{{.Business.IndexName}}")
+{{- range .Business.Fields}}
+{{- if .Unique}}
+        batch.drop_constraint("{{.UniqueName}}", type_="unique")
+{{- end}}
+{{- end}}
+        batch.drop_constraint("{{.Business.TenantForeignKeyName}}", type_="foreignkey")
+        batch.drop_column("organization_id")
+{{- range .Business.Fields}}
+{{- if .Unique}}
+        batch.create_unique_constraint("{{.UniqueName}}", ["{{.Name}}"])
+{{- end}}
+{{- end}}
+        batch.create_index(
+            "{{.Business.IndexName}}",
+            ["created_at", "id"],
+            unique=False,
+        )

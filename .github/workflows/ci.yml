@@ -59,7 +59,7 @@ jobs:
       - name: Generate, lint, test, and build administration UI
         env:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
-        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd)$' -count=1
+        run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantAdminPlanApplyVerifyEndToEnd)$' -count=1
 
   generated-java:
     name: Generated Java identity and CRUD
@@ -81,7 +81,7 @@ jobs:
         run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs|TenantNotifications|TenantFiles|TenantCache|TenantJobAdministration|TenantCSVImportExport|TenantApprovalWorkflows|Observability)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQL(Jobs|Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLPlatformCapabilitiesCompose$' -count=1
 
   generated-python:
-    name: Generated Python identity and CRUD
+    name: Generated Python identity, CRUD, and tenancy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -99,7 +99,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Python projects
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
-        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD)PlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD)PlanApplyVerifyEndToEnd$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration
@@ -160,11 +160,11 @@ jobs:
           TEST_DATABASE_USER: postgres
           TEST_DATABASE_PASSWORD: postgres
         run: go test ./internal/engine -run '^TestJavaPostgreSQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
-      - name: Generate Python and test identity against PostgreSQL
+      - name: Generate Python and test tenant isolation against PostgreSQL
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5433/scaffold_agent_python
-        run: go test ./internal/engine -run '^TestPythonPostgreSQLCRUDPlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonPostgreSQLTenantCRUDPlanApplyVerifyEndToEnd$' -count=1
 
   generated-mysql:
     name: Generated MySQL integration
@@ -211,8 +211,8 @@ jobs:
           TEST_DATABASE_USER: root
           TEST_DATABASE_PASSWORD: mysql
         run: go test ./internal/engine -run '^TestJavaMySQLTenant(Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows)PlanApplyVerifyEndToEnd$|^TestJavaMySQLObservabilityPlanApplyVerifyEndToEnd$' -count=1
-      - name: Generate Python and test identity against MySQL
+      - name: Generate Python and test tenant isolation against MySQL
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
           TEST_DATABASE_URL: mysql+pymysql://root:mysql@127.0.0.1:3306/scaffold_agent_python?charset=utf8mb4
-        run: go test ./internal/engine -run '^TestPythonMySQLCRUDPlanApplyVerifyEndToEnd$' -count=1
+        run: go test ./internal/engine -run '^TestPythonMySQLTenantCRUDPlanApplyVerifyEndToEnd$' -count=1

@@ -66,7 +66,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Python session/token identity, permission RBAC, transactional audit, stable OpenAPI, SQLite repository contracts, and live PostgreSQL/MySQL CI gates.
 - [x] Python Blueprint CRUD with five portable field types, keyset pagination, optimistic concurrency, transactional audit, stable OpenAPI, and dual-database gates.
 - [x] Python shared Vue/Element Plus administration with the same identity and Blueprint CRUD transport contract as Go and Java.
-- [ ] Python organization tenancy and M5 platform capability parity.
+- [x] Python organization tenancy 0.1 with atomic organization creation, membership-scoped RBAC, tenant CRUD isolation, stable OpenAPI, and shared administration selection.
+- [ ] Python organization members/lifecycle and remaining M5 platform capability parity.
 
 ## M7 — General business suite and storefront
 
