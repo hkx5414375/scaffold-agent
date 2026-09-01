@@ -69,19 +69,35 @@ func TestPythonMySQLTenancyLifecyclePlanApplyVerifyEndToEnd(t *testing.T) {
 }
 
 func TestPythonPostgreSQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", true, false)
 }
 
 func TestPythonMySQLJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", true)
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", true, false)
 }
 
 func TestPythonPostgreSQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", true, false)
 }
 
 func TestPythonMySQLTenantJobsPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, false)
+}
+
+func TestPythonPostgreSQLNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, true)
+}
+
+func TestPythonMySQLNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, true)
+}
+
+func TestPythonPostgreSQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, true)
+}
+
+func TestPythonMySQLTenantNotificationsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, true)
 }
 
 func runGeneratedPythonReference(
@@ -99,6 +115,7 @@ func runGeneratedPythonReference(
 		admin,
 		organizationTenancyVersion,
 		false,
+		false,
 	)
 }
 
@@ -109,6 +126,7 @@ func runGeneratedPythonReferenceOptions(
 	admin bool,
 	organizationTenancyVersion string,
 	jobs bool,
+	notifications bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -143,7 +161,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs {
+	if organizationTenancyVersion != "" || jobs || notifications {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -158,6 +176,11 @@ CAPABILITIES
 	}
 	if jobs {
 		capabilities += `    - name: background-jobs
+      version: 0.1.0
+`
+	}
+	if notifications {
+		capabilities += `    - name: notifications
       version: 0.1.0
 `
 	}
@@ -218,7 +241,10 @@ CAPABILITIES
 			}
 		}
 	}
-	if jobs {
+	if jobs || notifications {
+		wantChanges += 9
+	}
+	if notifications {
 		wantChanges += 9
 	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
@@ -234,8 +260,11 @@ CAPABILITIES
 		plannedData.CapabilityLock["organization-tenancy"] != organizationTenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
-	if jobs && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
+	if (jobs || notifications) && plannedData.CapabilityLock["background-jobs"] != "0.1.0" {
 		t.Fatalf("Plan() jobs lock = %#v", plannedData.CapabilityLock)
+	}
+	if notifications && plannedData.CapabilityLock["notifications"] != "0.1.0" {
+		t.Fatalf("Plan() notifications lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

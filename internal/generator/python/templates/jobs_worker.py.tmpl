@@ -14,6 +14,11 @@ from {{.PackageName}}.jobs.models import Job
 from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
 from {{.PackageName}}.jobs.service import JobError, JobErrorKind, JobService
 from {{.PackageName}}.migrations import upgrade_database
+{{- if .Notifications}}
+from {{.PackageName}}.notifications.handler import EmailNotificationHandler
+from {{.PackageName}}.notifications.service import EMAIL_JOB_TYPE
+from {{.PackageName}}.notifications.smtp import SmtpEmailSender
+{{- end}}
 
 Handler = Callable[[Job, threading.Event], None]
 DEFAULT_LEASE_DURATION = timedelta(seconds=30)
@@ -104,9 +109,18 @@ def worker_identifier() -> str:
     return value[:128]
 
 
+def configured_handlers() -> list[tuple[str, Handler]]:
+    """Initialize runtime-backed handlers once before worker polling."""
+    handlers: list[tuple[str, Handler]] = [("system.noop", noop_handler)]
+{{- if .Notifications}}
+    handlers.append((EMAIL_JOB_TYPE, EmailNotificationHandler(SmtpEmailSender.from_environment())))
+{{- end}}
+    return handlers
+
+
 def run_forever(service: JobService) -> None:
     """Poll until process interruption without logging job payloads."""
-    worker = JobWorker(service, worker_identifier(), [("system.noop", noop_handler)])
+    worker = JobWorker(service, worker_identifier(), configured_handlers())
     LOGGER.info("background worker started worker_id=%s", worker_identifier())
     while True:
         try:

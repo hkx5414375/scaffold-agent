@@ -1,0 +1,156 @@
+"""TLS-only SMTP configuration and composition contracts."""
+
+import smtplib
+import ssl
+import threading
+from email.message import EmailMessage
+from types import TracebackType
+from typing import Self
+
+import pytest
+
+from {{.PackageName}}.notifications.service import (
+    NotificationEmail,
+    NotificationError,
+    NotificationErrorKind,
+)
+from {{.PackageName}}.notifications.smtp import SmtpEmailSender
+
+
+class FakeSMTP:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.message: EmailMessage | None = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exception_type, exception, traceback
+
+    def ehlo(self) -> None:
+        self.calls.append("ehlo")
+
+    def starttls(self, *, context: ssl.SSLContext) -> None:
+        assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+        self.calls.append("starttls")
+
+    def login(self, username: str, password: str) -> None:
+        assert (username, password) == ("mailer", "secret")
+        self.calls.append("login")
+
+    def send_message(self, message: EmailMessage) -> None:
+        self.message = message
+        self.calls.append("send")
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+
+def test_starttls_sender_composes_utf8_multipart_and_delivers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSMTP()
+
+    def factory(*_args: object, **_kwargs: object) -> FakeSMTP:
+        return fake
+
+    monkeypatch.setattr(smtplib, "SMTP", factory)
+    sender = SmtpEmailSender.from_environment(
+        {
+            "SMTP_ADDRESS": "smtp.example.com:587",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "starttls",
+            "SMTP_USERNAME": "mailer",
+            "SMTP_PASSWORD": "secret",
+        }
+    )
+    sender.send(
+        NotificationEmail("person@example.com", "欢迎", "Plain", "<p>HTML</p>"),
+        threading.Event(),
+    )
+
+    assert fake.calls == ["ehlo", "starttls", "ehlo", "login", "send"]
+    assert fake.message is not None
+    assert fake.message["Subject"] == "欢迎"
+    assert fake.message.is_multipart()
+    assert "secret" not in repr(sender._config)
+
+
+def test_implicit_tls_html_composition_and_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSMTP()
+
+    def factory(*_args: object, **_kwargs: object) -> FakeSMTP:
+        return fake
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", factory)
+    sender = SmtpEmailSender.from_environment(
+        {
+            "SMTP_ADDRESS": "[2001:db8::1]:465",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "tls",
+        }
+    )
+    message = sender.compose(
+        NotificationEmail("person@example.com", "Welcome", html_body="<p>Hello</p>")
+    )
+    assert message.get_content_type() == "text/html"
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(InterruptedError):
+        sender.send(NotificationEmail("person@example.com", "Welcome", "Hello"), cancelled)
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {},
+        {
+            "SMTP_ADDRESS": "smtp.example.com:25",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "plain",
+        },
+        {
+            "SMTP_ADDRESS": "smtp.example.com:587",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "starttls",
+            "SMTP_USERNAME": "mailer",
+        },
+        {
+            "SMTP_ADDRESS": "smtp.example.com:not-a-port",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "starttls",
+        },
+    ],
+)
+def test_invalid_or_plaintext_configuration_fails_startup(
+    environment: dict[str, str],
+) -> None:
+    with pytest.raises(NotificationError) as failure:
+        SmtpEmailSender.from_environment(environment)
+    assert failure.value.kind == NotificationErrorKind.INVALID
+
+
+def test_delivery_errors_are_generic(monkeypatch: pytest.MonkeyPatch) -> None:
+    def factory(*_args: object, **_kwargs: object) -> FakeSMTP:
+        raise OSError("credential secret")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", factory)
+    sender = SmtpEmailSender.from_environment(
+        {
+            "SMTP_ADDRESS": "smtp.example.com:465",
+            "SMTP_FROM": "app@example.com",
+            "SMTP_TLS_MODE": "tls",
+        }
+    )
+    with pytest.raises(NotificationError) as failure:
+        sender.send(NotificationEmail("person@example.com", "Welcome", "Hello"), threading.Event())
+    assert failure.value.kind == NotificationErrorKind.DELIVERY
+    assert failure.value.message == "email notification delivery failed"

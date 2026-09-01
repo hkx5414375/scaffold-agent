@@ -33,6 +33,8 @@ const (
 	tenancyLifecycleVersion = "0.3.0"
 	jobsOwner               = "background-jobs"
 	jobsVersion             = "0.1.0"
+	notificationsOwner      = "notifications"
+	notificationsVersion    = "0.1.0"
 )
 
 //go:embed all:templates
@@ -104,6 +106,17 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: notificationsOwner, Version: notificationsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Idempotent email notifications delivered by reliable background jobs.",
+			Requires:    []spec.PackDependency{{Name: jobsOwner, Constraint: "^0.1.0"}},
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var pythonKeywords = map[string]struct{}{
@@ -126,6 +139,7 @@ type templateData struct {
 	TenancyMembers        bool
 	TenancyLifecycle      bool
 	Jobs                  bool
+	Notifications         bool
 	Files                 bool
 	JobAdmin              bool
 	Approvals             bool
@@ -266,6 +280,18 @@ var jobsTemplates = map[string]string{
 	"tests/test_jobs_worker.py":                                "templates/test_jobs_worker.py.tmpl",
 }
 
+var notificationTemplates = map[string]string{
+	"src/package/notifications/__init__.py":            "templates/notifications_init.py.tmpl",
+	"src/package/notifications/handler.py":             "templates/notifications_handler.py.tmpl",
+	"src/package/notifications/service.py":             "templates/notifications_service.py.tmpl",
+	"src/package/notifications/smtp.py":                "templates/notifications_smtp.py.tmpl",
+	"tests/test_notification_handler.py":               "templates/test_notification_handler.py.tmpl",
+	"tests/test_notification_smtp.py":                  "templates/test_notification_smtp.py.tmpl",
+	"tests/test_notifications.py":                      "templates/test_notifications.py.tmpl",
+	"tests/test_notifications_database.py":             "templates/test_notifications_database.py.tmpl",
+	"tests/test_notifications_worker_configuration.py": "templates/test_notifications_worker_configuration.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -321,6 +347,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	tenancyMembersEnabled := false
 	tenancyLifecycleEnabled := false
 	jobsEnabled := false
+	notificationsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -332,6 +359,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == jobsOwner {
 			jobsEnabled = true
+		}
+		if pack.Metadata.Name == notificationsOwner {
+			notificationsEnabled = true
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -357,10 +387,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		TenancyMembers:        tenancyMembersEnabled,
 		TenancyLifecycle:      tenancyLifecycleEnabled,
 		Jobs:                  jobsEnabled,
+		Notifications:         notificationsEnabled,
 	}
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+2,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+2,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -420,6 +451,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[replacePackage(path, data.PackageName)] = renderTarget{
 				Template: templatePath,
 				Owner:    jobsOwner,
+			}
+		}
+	}
+	if notificationsEnabled {
+		for path, templatePath := range notificationTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    notificationsOwner,
 			}
 		}
 	}
@@ -485,6 +524,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if jobsEnabled {
 		capabilityLock[jobsOwner] = jobsVersion
+	}
+	if notificationsEnabled {
+		capabilityLock[notificationsOwner] = notificationsVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

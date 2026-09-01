@@ -1,0 +1,63 @@
+"""Strict durable-job decoder for queued email notifications."""
+
+import json
+import threading
+from typing import Protocol
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.notifications.service import (
+    EMAIL_JOB_TYPE,
+    PAYLOAD_VERSION,
+    NotificationEmail,
+    NotificationError,
+    NotificationErrorKind,
+    validate_email,
+)
+
+
+class EmailSender(Protocol):
+    """Worker-only email transport seam."""
+
+    def send(self, email: NotificationEmail, cancelled: threading.Event) -> None: ...
+
+
+class EmailNotificationHandler:
+    """Decode one versioned payload and delegate to the configured sender."""
+
+    def __init__(self, sender: EmailSender) -> None:
+        self._sender = sender
+
+    def __call__(self, job: Job, cancelled: threading.Event) -> None:
+        if job.type != EMAIL_JOB_TYPE:
+            raise _invalid_payload()
+        if cancelled.is_set():
+            raise InterruptedError("email notification delivery was cancelled")
+        email = _decode(job.payload_json)
+        self._sender.send(email, cancelled)
+
+
+def _decode(payload_json: str) -> NotificationEmail:
+    try:
+        payload = json.loads(payload_json)
+        if not isinstance(payload, dict) or set(payload) != {"version", "email"}:
+            raise _invalid_payload()
+        if type(payload["version"]) is not int or payload["version"] != PAYLOAD_VERSION:
+            raise _invalid_payload()
+        email = payload["email"]
+        if not isinstance(email, dict) or set(email) != {
+            "to",
+            "subject",
+            "text_body",
+            "html_body",
+        }:
+            raise _invalid_payload()
+        values = (email["to"], email["subject"], email["text_body"], email["html_body"])
+        if not all(isinstance(value, str) for value in values):
+            raise _invalid_payload()
+        return validate_email(NotificationEmail(*values))
+    except (json.JSONDecodeError, KeyError, TypeError, NotificationError) as error:
+        raise _invalid_payload() from error
+
+
+def _invalid_payload() -> NotificationError:
+    return NotificationError(NotificationErrorKind.INVALID, "queued email notification is invalid")

@@ -70,6 +70,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Python organization tenancy 0.2 with digest-only email invitations, member administration, concurrent last-administrator protection, and shared administration UI.
 - [x] Python organization tenancy 0.3 with explicit ownership, ownership transfer, reversible deactivation, inactive authorization blocking, and owner-safe administration.
 - [x] Python background-jobs 0.1 with scoped idempotency, skip-locked leasing, cancellation-aware heartbeat renewal, bounded retry, dead state, and an independent worker process.
+- [x] Python notifications 0.1 with normalized idempotent enqueue, worker-only SMTP initialization, mandatory TLS, bounded delivery, and generic secret-free failures.
 - [ ] Remaining Python M5 platform capability parity.
 
 ## M7 — General business suite and storefront

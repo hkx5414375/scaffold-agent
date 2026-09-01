@@ -29,6 +29,19 @@ uv run python -m {{.PackageName}}.jobs.worker
 
 业务代码通过 `JobService.enqueue` 提交最大 1 MiB 的 JSON 载荷和稳定幂等键。Worker 会处理抢占、续租、指数退避、死信和过期租约回收；Handler 必须响应传入的取消事件，不得记录载荷。
 {{end}}
+{{if .Notifications}}
+启动 Worker 前必须提供 TLS-only SMTP 运行时配置：
+
+```powershell
+$env:SMTP_ADDRESS = "smtp.example.com:587"
+$env:SMTP_FROM = "app@example.com"
+$env:SMTP_TLS_MODE = "starttls" # 或 tls
+$env:SMTP_USERNAME = "mailer"  # 可选，但必须与密码同时提供
+$env:SMTP_PASSWORD = "replace-me"
+```
+
+业务能力在完成自身授权后调用 `NotificationService.enqueue_email`，必须提供稳定幂等键。单封邮件的文本与 HTML 正文合计最多 512 KiB；项目不生成“任意发邮件”HTTP 接口。正文会保存在可靠任务载荷中，部署方必须为数据库、备份和保留策略提供相应的数据保护。
+{{end}}
 {{if .Admin}}
 另开一个终端启动共享管理端：
 
@@ -85,6 +98,9 @@ uv run pytest
 {{end}}
 {{if .Jobs}}
 - `src/{{.PackageName}}/jobs`：可靠任务领域、事务仓储、服务和独立 Worker。
+{{end}}
+{{if .Notifications}}
+- `src/{{.PackageName}}/notifications`：内部通知服务、严格任务解码和 TLS-only SMTP 适配器。
 {{end}}
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。

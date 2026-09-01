@@ -1,0 +1,121 @@
+"""Validated email notification enqueue use cases."""
+
+import re
+from dataclasses import dataclass
+from enum import StrEnum
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.jobs.service import JobService
+
+EMAIL_JOB_TYPE = "notifications.email.deliver"
+PAYLOAD_VERSION = 1
+MAXIMUM_BODY_BYTES = 512 << 10
+EMAIL_PATTERN = re.compile(
+    r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+    r"(?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+class NotificationErrorKind(StrEnum):
+    """Stable email notification failure categories."""
+
+    INVALID = "invalid"
+    DELIVERY = "delivery"
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationError(Exception):
+    """Expected notification failure without message-content disclosure."""
+
+    kind: NotificationErrorKind
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationEmail:
+    """One normalized single-recipient email."""
+
+    to: str
+    subject: str
+    text_body: str = ""
+    html_body: str = ""
+
+
+class NotificationService:
+    """Queue notifications after feature-specific authorization."""
+
+    def __init__(self, jobs: JobService) -> None:
+        self._jobs = jobs
+
+    def enqueue_email(
+        self,
+        organization_id: str | None,
+        idempotency_key: str,
+        email: NotificationEmail,
+    ) -> Job:
+        """Validate and idempotently queue one email without exposing HTTP."""
+        normalized_key = idempotency_key.strip()
+        if not normalized_key or len(normalized_key) > 128 or _has_control(normalized_key):
+            raise _invalid()
+        validated = validate_email(email)
+        return self._jobs.enqueue(
+            organization_id,
+            EMAIL_JOB_TYPE,
+            {
+                "version": PAYLOAD_VERSION,
+                "email": {
+                    "to": validated.to,
+                    "subject": validated.subject,
+                    "text_body": validated.text_body,
+                    "html_body": validated.html_body,
+                },
+            },
+            normalized_key,
+        )
+
+
+def validate_email(email: NotificationEmail) -> NotificationEmail:
+    """Return a normalized email or a stable input error."""
+    if not isinstance(email, NotificationEmail):
+        raise _invalid()
+    if not all(
+        isinstance(value, str)
+        for value in (email.to, email.subject, email.text_body, email.html_body)
+    ):
+        raise _invalid()
+    recipient = normalize_mailbox(email.to)
+    subject = email.subject.strip()
+    if (
+        not subject
+        or len(subject) > 200
+        or _has_control(subject)
+        or (not email.text_body and not email.html_body)
+        or _body_bytes(email.text_body, email.html_body) > MAXIMUM_BODY_BYTES
+    ):
+        raise _invalid()
+    return NotificationEmail(recipient, subject, email.text_body, email.html_body)
+
+
+def normalize_mailbox(value: str) -> str:
+    """Normalize one bare mailbox and reject display names or header injection."""
+    normalized = value.strip().lower()
+    if (
+        len(normalized) > 254
+        or EMAIL_PATTERN.fullmatch(normalized) is None
+        or _has_control(normalized)
+    ):
+        raise _invalid()
+    return normalized
+
+
+def _body_bytes(text_body: str, html_body: str) -> int:
+    return len(text_body.encode("utf-8")) + len(html_body.encode("utf-8"))
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)
+
+
+def _invalid() -> NotificationError:
+    return NotificationError(NotificationErrorKind.INVALID, "email notification input is invalid")

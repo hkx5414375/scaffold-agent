@@ -8,7 +8,12 @@ from test_jobs import MemoryRepository
 
 from {{.PackageName}}.jobs.models import Job
 from {{.PackageName}}.jobs.service import JobService
-from {{.PackageName}}.jobs.worker import JobWorker, noop_handler, worker_identifier
+from {{.PackageName}}.jobs.worker import (
+    JobWorker,
+    configured_handlers,
+    noop_handler,
+    worker_identifier,
+)
 
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -83,3 +88,14 @@ def test_worker_rejects_duplicate_handlers_and_fails_unknown_type(
     )
     monkeypatch.setenv("WORKER_ID", " configured-worker ")
     assert worker_identifier() == "configured-worker"
+{{- if .Notifications}}
+    monkeypatch.setenv("SMTP_ADDRESS", "smtp.example.com:587")
+    monkeypatch.setenv("SMTP_FROM", "app@example.com")
+    monkeypatch.setenv("SMTP_TLS_MODE", "starttls")
+    assert [job_type for job_type, _handler in configured_handlers()] == [
+        "system.noop",
+        "notifications.email.deliver",
+    ]
+{{- else}}
+    assert configured_handlers() == [("system.noop", noop_handler)]
+{{- end}}

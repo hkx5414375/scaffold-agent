@@ -1,0 +1,80 @@
+"""Email notification enqueue contracts."""
+
+import json
+from datetime import UTC, datetime
+
+import pytest
+from test_jobs import MemoryRepository
+
+from {{.PackageName}}.jobs.service import JobService
+from {{.PackageName}}.notifications.service import (
+    EMAIL_JOB_TYPE,
+    NotificationEmail,
+    NotificationError,
+    NotificationErrorKind,
+    NotificationService,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+def test_enqueue_normalizes_and_reuses_job_idempotency() -> None:
+    service = NotificationService(JobService(MemoryRepository(), lambda: NOW))
+    first = service.enqueue_email(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        " welcome:user-1 ",
+        NotificationEmail(
+            " Person@Example.com ",
+            " Welcome ",
+            "Hello",
+            "<p>Hello</p>",
+        ),
+    )
+    duplicate = service.enqueue_email(
+        {{if .Tenancy}}"organization-1"{{else}}None{{end}},
+        "welcome:user-1",
+        NotificationEmail("person@example.com", "Welcome", "Hello", "<p>Hello</p>"),
+    )
+
+    assert duplicate.id == first.id
+    assert first.type == EMAIL_JOB_TYPE
+    payload = json.loads(first.payload_json)
+    assert payload == {
+        "email": {
+            "html_body": "<p>Hello</p>",
+            "subject": "Welcome",
+            "text_body": "Hello",
+            "to": "person@example.com",
+        },
+        "version": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "email"),
+    [
+        ("", NotificationEmail("person@example.com", "Welcome", "Hello")),
+        ("request", NotificationEmail("invalid", "Welcome", "Hello")),
+        (
+            "request",
+            NotificationEmail(
+                "person@example.com",
+                "Welcome\r\nBcc: attacker@example.com",
+                "Hello",
+            ),
+        ),
+        ("request", NotificationEmail("person@example.com", "Welcome")),
+        (
+            "request",
+            NotificationEmail("person@example.com", "Welcome", "界" * 200_000),
+        ),
+    ],
+)
+def test_invalid_notification_inputs_are_rejected(
+    key: str,
+    email: NotificationEmail,
+) -> None:
+    service = NotificationService(JobService(MemoryRepository(), lambda: NOW))
+    with pytest.raises(NotificationError) as failure:
+        service.enqueue_email({{if .Tenancy}}"organization-1"{{else}}None{{end}}, key, email)
+    assert failure.value.kind == NotificationErrorKind.INVALID

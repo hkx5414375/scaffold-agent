@@ -100,6 +100,18 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
     }
     assert jobs_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
+{{- if .Notifications}}
+
+    notifications_tree = ast.parse(
+        (PACKAGE / "notifications" / "service.py").read_text(encoding="utf-8")
+    )
+    notifications_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(notifications_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert notifications_imports.isdisjoint({"fastapi", "sqlalchemy", "smtplib"})
+{{- end}}
 
 
 def test_production_code_contains_no_print_calls() -> None:

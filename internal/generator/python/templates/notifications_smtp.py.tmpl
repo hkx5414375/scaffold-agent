@@ -1,0 +1,149 @@
+"""TLS-only SMTP transport initialized exclusively by the worker process."""
+
+import os
+import smtplib
+import ssl
+import threading
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from email.message import EmailMessage
+
+from {{.PackageName}}.notifications.service import (
+    NotificationEmail,
+    NotificationError,
+    NotificationErrorKind,
+    normalize_mailbox,
+    validate_email,
+)
+
+DEFAULT_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class SMTPConfig:
+    """Validated runtime-only SMTP configuration with a redacted secret."""
+
+    host: str
+    port: int
+    from_address: str
+    tls_mode: str
+    username: str
+    password: str = field(repr=False)
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+
+
+class SmtpEmailSender:
+    """Deliver UTF-8 email through implicit TLS or mandatory STARTTLS."""
+
+    def __init__(self, config: SMTPConfig) -> None:
+        self._config = config
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+    ) -> "SmtpEmailSender":
+        """Fail worker startup when runtime SMTP configuration is incomplete."""
+        source = os.environ if environment is None else environment
+        address = source.get("SMTP_ADDRESS", "").strip()
+        from_address = normalize_mailbox(source.get("SMTP_FROM", ""))
+        tls_mode = source.get("SMTP_TLS_MODE", "").strip().lower()
+        username = source.get("SMTP_USERNAME", "")
+        password = source.get("SMTP_PASSWORD", "")
+        host, port = _endpoint(address)
+        if tls_mode not in {"tls", "starttls"}:
+            raise _invalid_configuration("SMTP_TLS_MODE must be tls or starttls")
+        if bool(username) != bool(password):
+            raise _invalid_configuration("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+        return cls(SMTPConfig(host, port, from_address, tls_mode, username, password))
+
+    def compose(self, email: NotificationEmail) -> EmailMessage:
+        """Compose one safe UTF-8 message without opening the network."""
+        validated = validate_email(email)
+        message = EmailMessage()
+        message["From"] = self._config.from_address
+        message["To"] = validated.to
+        message["Subject"] = validated.subject
+        if validated.text_body and validated.html_body:
+            message.set_content(validated.text_body)
+            message.add_alternative(validated.html_body, subtype="html")
+        elif validated.html_body:
+            message.set_content(validated.html_body, subtype="html")
+        else:
+            message.set_content(validated.text_body)
+        return message
+
+    def send(self, email: NotificationEmail, cancelled: threading.Event) -> None:
+        """Deliver one message with bounded operations and cancellation checks."""
+        _require_active(cancelled)
+        message = self.compose(email)
+        try:
+            with self._connect() as client:
+                _require_active(cancelled)
+                if self._config.username:
+                    client.login(self._config.username, self._config.password)
+                _require_active(cancelled)
+                client.send_message(message)
+        except InterruptedError:
+            raise
+        except (OSError, smtplib.SMTPException) as error:
+            raise NotificationError(
+                NotificationErrorKind.DELIVERY,
+                "email notification delivery failed",
+            ) from error
+
+    def _connect(self) -> smtplib.SMTP:
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if self._config.tls_mode == "tls":
+            return smtplib.SMTP_SSL(
+                self._config.host,
+                self._config.port,
+                timeout=self._config.timeout_seconds,
+                context=context,
+            )
+        client = smtplib.SMTP(
+            self._config.host,
+            self._config.port,
+            timeout=self._config.timeout_seconds,
+        )
+        try:
+            client.ehlo()
+            client.starttls(context=context)
+            client.ehlo()
+        except Exception:
+            client.close()
+            raise
+        return client
+
+
+def _endpoint(address: str) -> tuple[str, int]:
+    host_part, separator, port_part = address.rpartition(":")
+    host = host_part.strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    elif ":" in host:
+        raise _invalid_configuration("SMTP_ADDRESS IPv6 hosts must use brackets")
+    if (
+        separator != ":"
+        or not host
+        or any(not character.isprintable() or character.isspace() for character in host)
+        or any(character in "/@?#" for character in host)
+    ):
+        raise _invalid_configuration("SMTP_ADDRESS must contain a valid host and port")
+    try:
+        port = int(port_part)
+    except ValueError as error:
+        raise _invalid_configuration("SMTP_ADDRESS port is invalid") from error
+    if port < 1 or port > 65535:
+        raise _invalid_configuration("SMTP_ADDRESS port is invalid")
+    return host, port
+
+
+def _require_active(cancelled: threading.Event) -> None:
+    if cancelled.is_set():
+        raise InterruptedError("email notification delivery was cancelled")
+
+
+def _invalid_configuration(message: str) -> NotificationError:
+    return NotificationError(NotificationErrorKind.INVALID, message)

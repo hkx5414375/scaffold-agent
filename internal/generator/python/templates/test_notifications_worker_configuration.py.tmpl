@@ -1,0 +1,26 @@
+"""Worker-only SMTP initialization contracts."""
+
+import pytest
+
+from {{.PackageName}}.jobs.worker import configured_handlers
+from {{.PackageName}}.notifications.service import NotificationError
+
+
+def test_worker_initializes_notification_handler_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SMTP_ADDRESS", "smtp.example.com:587")
+    monkeypatch.setenv("SMTP_FROM", "app@example.com")
+    monkeypatch.setenv("SMTP_TLS_MODE", "starttls")
+    assert [job_type for job_type, _handler in configured_handlers()] == [
+        "system.noop",
+        "notifications.email.deliver",
+    ]
+
+
+def test_worker_fails_startup_for_invalid_smtp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SMTP_ADDRESS", raising=False)
+    monkeypatch.delenv("SMTP_FROM", raising=False)
+    monkeypatch.delenv("SMTP_TLS_MODE", raising=False)
+    with pytest.raises(NotificationError):
+        configured_handlers()

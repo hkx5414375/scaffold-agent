@@ -1,0 +1,123 @@
+"""Persisted notification idempotency contracts for SQLite and the selected database."""
+
+import json
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete{{if .Tenancy}}, insert{{end}}, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+{{- if .Tenancy}}
+from {{.PackageName}}.identity.models import Principal, audit_events, roles, users
+{{- end}}
+from {{.PackageName}}.jobs.models import background_jobs
+from {{.PackageName}}.jobs.repository import SQLAlchemyJobRepository
+from {{.PackageName}}.jobs.service import JobService
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.notifications.service import NotificationEmail, NotificationService
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    organization_id: str | None = None
+{{- if .Tenancy}}
+    user_id = "notifications-user-" + suffix
+    with engine.begin() as connection:
+        if connection.execute(select(roles.c.code).where(roles.c.code == "admin")).first() is None:
+            connection.execute(insert(roles).values(code="admin", display_name="Administrator"))
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=suffix + "-notifications@example.com",
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    actor = Principal(
+        user_id=user_id,
+        email=suffix + "-notifications@example.com",
+        role="admin",
+        method="token",
+    )
+    organization_id = (
+        TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+        .create("Notifications " + suffix, actor)
+        .id
+    )
+{{- end}}
+    service = NotificationService(JobService(SQLAlchemyJobRepository(engine), lambda: now))
+    first = service.enqueue_email(
+        organization_id,
+        "welcome:user-1:" + suffix,
+        NotificationEmail(
+            " Person@Example.com ",
+            " Welcome ",
+            "Hello",
+            "<p>Hello</p>",
+        ),
+    )
+    duplicate = service.enqueue_email(
+        organization_id,
+        "welcome:user-1:" + suffix,
+        NotificationEmail("person@example.com", "Welcome", "Changed"),
+    )
+    assert duplicate.id == first.id
+
+    with engine.connect() as connection:
+        payload_json = connection.execute(
+            select(background_jobs.c.payload_json).where(background_jobs.c.id == first.id)
+        ).scalar_one()
+    payload = json.loads(str(payload_json))
+    assert payload["email"]["to"] == "person@example.com"
+    assert "Person@Example.com" not in str(payload_json)
+
+    with engine.begin() as connection:
+        connection.execute(delete(background_jobs).where(background_jobs.c.id == first.id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization_id
+            )
+        )
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+        connection.execute(delete(organizations).where(organizations.c.id == organization_id))
+        connection.execute(delete(users).where(users.c.id == user_id))
+{{- end}}
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

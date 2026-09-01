@@ -1,0 +1,95 @@
+"""Queued email decoding and transport isolation contracts."""
+
+import threading
+from dataclasses import replace
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.jobs.models import Job
+from {{.PackageName}}.notifications.handler import EmailNotificationHandler
+from {{.PackageName}}.notifications.service import (
+    EMAIL_JOB_TYPE,
+    NotificationEmail,
+    NotificationError,
+    NotificationErrorKind,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class RecordingSender:
+    def __init__(self) -> None:
+        self.email: NotificationEmail | None = None
+
+    def send(self, email: NotificationEmail, cancelled: threading.Event) -> None:
+        assert not cancelled.is_set()
+        self.email = email
+
+
+def _job(payload_json: str) -> Job:
+    return Job(
+        id="job-1",
+        organization_id=None,
+        type=EMAIL_JOB_TYPE,
+        payload_json=payload_json,
+        status="running",
+        priority=0,
+        attempts=1,
+        max_attempts=8,
+        available_at=NOW,
+        lease_owner="worker-1",
+        lease_until=NOW,
+        last_error=None,
+        created_at=NOW,
+        updated_at=NOW,
+        completed_at=None,
+        scope_key="global",
+        dedupe_key="key:request-1",
+    )
+
+
+def test_handler_strictly_decodes_and_sends() -> None:
+    sender = RecordingSender()
+    handler = EmailNotificationHandler(sender)
+    handler(
+        _job(
+            '{"email":{"html_body":"<p>Hello</p>","subject":"Welcome",'
+            '"text_body":"Hello","to":"Person@Example.com"},"version":1}'
+        ),
+        threading.Event(),
+    )
+    assert sender.email == NotificationEmail(
+        "person@example.com",
+        "Welcome",
+        "Hello",
+        "<p>Hello</p>",
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not-json",
+        '{"email":{},"version":2}',
+        '{"email":{},"extra":true,"version":1}',
+        '{"email":{"html_body":"","subject":"Welcome","text_body":"Hello",'
+        '"to":"person@example.com","unknown":true},"version":1}',
+    ],
+)
+def test_handler_rejects_invalid_versioned_payloads(payload: str) -> None:
+    sender = RecordingSender()
+    with pytest.raises(NotificationError) as failure:
+        EmailNotificationHandler(sender)(_job(payload), threading.Event())
+    assert failure.value.kind == NotificationErrorKind.INVALID
+    assert sender.email is None
+
+
+def test_handler_honors_cancellation_and_job_type() -> None:
+    sender = RecordingSender()
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(InterruptedError):
+        EmailNotificationHandler(sender)(_job("{}"), cancelled)
+    with pytest.raises(NotificationError):
+        EmailNotificationHandler(sender)(replace(_job("{}"), type="other"), threading.Event())

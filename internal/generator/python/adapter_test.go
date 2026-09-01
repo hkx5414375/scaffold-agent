@@ -373,6 +373,80 @@ func TestGenerateDurableJobsComposesWithTenantLifecycle(t *testing.T) {
 	}
 }
 
+func TestGenerateNotificationsResolveJobsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: notificationsOwner, Version: notificationsVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[jobsOwner] != jobsVersion ||
+				generated.CapabilityLock[notificationsOwner] != notificationsVersion ||
+				len(generated.Outputs) != 47 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/notifications/handler.py",
+				"src/demo_service/notifications/service.py",
+				"src/demo_service/notifications/smtp.py",
+				"tests/test_notification_handler.py",
+				"tests/test_notification_smtp.py",
+				"tests/test_notifications.py",
+				"tests/test_notifications_database.py",
+				"tests/test_notifications_worker_configuration.py",
+			} {
+				if outputContent(generated, path) == nil ||
+					outputOwner(generated, path) != notificationsOwner {
+					t.Errorf("Generate(%s) did not produce notification-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			if !strings.Contains(mainSource, "NotificationService(job_service)") ||
+				strings.Contains(mainSource, "SmtpEmailSender") {
+				t.Fatalf("Generate(%s) web composition initialized SMTP:\n%s", database, mainSource)
+			}
+			workerSource := string(outputContent(generated, "src/demo_service/jobs/worker.py"))
+			if !strings.Contains(workerSource, "SmtpEmailSender.from_environment()") {
+				t.Fatalf("Generate(%s) worker does not initialize SMTP:\n%s", database, workerSource)
+			}
+			readme := string(outputContent(generated, "README.md"))
+			if !strings.Contains(readme, "SMTP_TLS_MODE") ||
+				!strings.Contains(readme, "NotificationService.enqueue_email") {
+				t.Fatalf("Generate(%s) README does not document notifications:\n%s", database, readme)
+			}
+		})
+	}
+}
+
+func TestGenerateNotificationsComposeWithTenantLifecycle(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: notificationsOwner, Version: notificationsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 99 ||
+		generated.CapabilityLock[jobsOwner] != jobsVersion ||
+		generated.CapabilityLock[notificationsOwner] != notificationsVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 
