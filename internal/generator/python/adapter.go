@@ -43,6 +43,8 @@ const (
 	jobAdminVersion         = "0.1.0"
 	observabilityOwner      = "observability"
 	observabilityVersion    = "0.1.0"
+	csvTransferOwner        = "csv-import-export"
+	csvTransferVersion      = "0.1.0"
 )
 
 //go:embed all:templates
@@ -162,6 +164,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: observabilityOwner, Version: observabilityVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Request correlation, safe access logs, metrics, and bounded readiness.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: csvTransferOwner, Version: csvTransferVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Atomic bounded CSV import and audited tenant-scoped export.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -389,6 +401,18 @@ var observabilityTemplates = map[string]string{
 	"tests/test_observability_database.py":    "templates/test_observability_database.py.tmpl",
 }
 
+var csvTransferTemplates = map[string]string{
+	"src/package/business/transfer/__init__.py":                  "templates/csv_init.py.tmpl",
+	"src/package/business/transfer/http.py":                      "templates/csv_http.py.tmpl",
+	"src/package/business/transfer/models.py":                    "templates/csv_models.py.tmpl",
+	"src/package/business/transfer/repository.py":                "templates/csv_repository.py.tmpl",
+	"src/package/business/transfer/service.py":                   "templates/csv_service.py.tmpl",
+	"src/package/migration/versions/000240_csv_import_export.py": "templates/csv_migration.py.tmpl",
+	"tests/test_csv_transfer.py":                                 "templates/test_csv_transfer.py.tmpl",
+	"tests/test_csv_transfer_database.py":                        "templates/test_csv_transfer_database.py.tmpl",
+	"tests/test_csv_transfer_http.py":                            "templates/test_csv_transfer_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -449,6 +473,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	cacheEnabled := false
 	jobAdminEnabled := false
 	observabilityEnabled := false
+	csvTransferEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -476,6 +501,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == observabilityOwner {
 			observabilityEnabled = true
 		}
+		if pack.Metadata.Name == csvTransferOwner {
+			csvTransferEnabled = true
+		}
 	}
 	if len(project.Spec.Modules) > 1 {
 		return generator.Result{}, fmt.Errorf("the Python CRUD slice supports at most one business module")
@@ -487,6 +515,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if err != nil {
 			return generator.Result{}, err
 		}
+	}
+	if csvTransferEnabled && business == nil {
+		return generator.Result{}, fmt.Errorf(
+			"csv-import-export requires exactly one generated business entity",
+		)
 	}
 
 	data := templateData{
@@ -505,11 +538,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Cache:                 cacheEnabled,
 		JobAdmin:              jobAdminEnabled,
 		Observability:         observabilityEnabled,
+		CSVTransfer:           csvTransferEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+4,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+4,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -612,6 +646,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if csvTransferEnabled {
+		for path, templatePath := range csvTransferTemplates {
+			path = replacePackage(path, data.PackageName)
+			path = strings.Replace(path, "business", business.PackageName, 1)
+			targets[path] = renderTarget{
+				Template: templatePath,
+				Owner:    csvTransferOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -703,6 +747,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if observabilityEnabled {
 		capabilityLock[observabilityOwner] = observabilityVersion
+	}
+	if csvTransferEnabled {
+		capabilityLock[csvTransferOwner] = csvTransferVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

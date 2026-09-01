@@ -45,6 +45,11 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("{{.Business.RoutePath}}/{record_id}", "get"),
         ("{{.Business.RoutePath}}/{record_id}", "put"),
         ("{{.Business.RoutePath}}/{record_id}", "delete"),
+{{- if .CSVTransfer}}
+        ("{{.Business.RoutePath}}/import", "post"),
+        ("{{.Business.RoutePath}}/import-template", "get"),
+        ("{{.Business.RoutePath}}/export", "get"),
+{{- end}}
 {{- end}}
 {{- if .Files}}
         ("/api/v1/files", "post"),
@@ -103,6 +108,18 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert business_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- if .CSVTransfer}}
+
+    csv_transfer_tree = ast.parse(
+        (PACKAGE / "{{.Business.PackageName}}" / "transfer" / "service.py").read_text(encoding="utf-8")
+    )
+    csv_transfer_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(csv_transfer_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert csv_transfer_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
 {{- end}}
 {{- if .Jobs}}
 

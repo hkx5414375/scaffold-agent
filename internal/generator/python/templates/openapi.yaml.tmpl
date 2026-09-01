@@ -788,6 +788,119 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+{{if .CSVTransfer}}
+  {{.Business.RoutePath}}/import:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: import{{.Business.EntityClass}}CSV
+      summary: Atomically create records from one bounded Blueprint CSV document
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Every validated row was created in one transaction.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CSVImportResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: The CSV exceeds 5 MiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "415":
+          description: Content-Type is not text/csv.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  {{.Business.RoutePath}}/import-template:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: download{{.Business.EntityClass}}CSVImportTemplate
+      summary: Download the exact Blueprint field-order CSV header
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Header-only UTF-8 CSV import template.
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  {{.Business.RoutePath}}/export:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: export{{.Business.EntityClass}}CSV
+      summary: Export at most 1000 identifier-ordered scoped records
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Complete UTF-8 CSV document no larger than 5 MiB.
+          headers:
+            X-Exported-Count:
+              schema:
+                type: integer
+                minimum: 0
+                maximum: 1000
+          content:
+            text/csv:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          description: The encoded export exceeds 5 MiB.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: More than 1000 records are in scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+{{end}}
   {{.Business.RoutePath}}/{record_id}:
     parameters:
 {{- if .Tenancy}}
@@ -1282,6 +1395,17 @@ components:
           maxLength: 191
 {{end}}
 {{if .Business}}
+{{if .CSVTransfer}}
+    CSVImportResult:
+      type: object
+      additionalProperties: false
+      required: [imported]
+      properties:
+        imported:
+          type: integer
+          minimum: 1
+          maximum: 1000
+{{end}}
     {{.Business.EntityClass}}Record:
       type: object
       additionalProperties: false

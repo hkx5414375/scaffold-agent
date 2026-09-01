@@ -21,7 +21,7 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、原子 CSV 导入导出 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
 
 Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
@@ -42,7 +42,7 @@ Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会
 
 选择 `observability` `0.1.0` 后，生成项目会加入经过校验或自动生成的请求 ID、不记录查询字符串与正文的结构化访问日志、低基数 Prometheus 计数器，以及最多等待两秒的数据库就绪检查。`GET /metrics` 只暴露进程聚合值；`GET /readyz` 在数据库不可用时只返回通用 503，不会泄露数据库错误。AI 应在已有 `X-Request-ID` 时继续传递，但不得把用户输入放进指标标签，也不得把请求正文、凭据、查询字符串或 Panic 内容写入日志。
 
-选择 `csv-import-export` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体。生成项目会按字段顺序提供 CSV 表头、类型解析、空模板、原子且只新增的导入，以及带审计的导出；导入和导出使用独立的管理员权限。单个文档最多 5 MiB、1000 行，任意一行无效或冲突都会回滚整个导入，超出上限的导出不会返回半份文件。字符串导出会用可逆方式转义电子表格公式。AI 必须沿用生成的字段顺序和 RFC3339 时间，不得擅自改成无审计 Upsert，也不得绕过组织范围或大小限制。
+Go、Java 或 Python 选择 `csv-import-export` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体。生成项目会按字段顺序提供 CSV 表头、类型解析、空模板、原子且只新增的导入，以及带审计的导出；导入和导出使用独立的管理员权限。单个文档最多 5 MiB、1000 行，任意一行无效或冲突都会回滚整个导入，超出上限的导出不会返回半份文件。字符串导出会用可逆方式转义电子表格公式。AI 必须沿用生成的字段顺序和 RFC3339 时间，不得擅自改成无审计 Upsert，也不得绕过组织范围或大小限制。
 
 Go 或 Java 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体，并在同一模块中显式声明名为 `approval` 的工作流，状态顺序固定为 `pending`、`approved`、`rejected`、`cancelled`。生成服务会在提交时验证当前组织范围内的业务对象，同一对象同时最多有一个待审批请求；发起人不能批准或拒绝自己的请求，只有发起人能撤回待审批请求，所有终态变更都必须携带当前版本。发起和审批使用分离的权限，每次成功提交或变更都会在同一事务中写入审批请求、不可变事件和安全审计。AI 不得让审批隐式修改业务对象、绕过职责分离、覆盖事件历史，或自行增加 Blueprint 没有声明的流程状态。
 

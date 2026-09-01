@@ -1,0 +1,174 @@
+"""CSV transaction, tenant, audit, and permission contracts for real storage."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    role_permissions,
+    users,
+)
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.{{.Business.PackageName}}.models import table
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.models import (
+    CSVTransferError,
+    CSVTransferErrorKind,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.repository import (
+    SQLAlchemyCSVTransferRepository,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import CSVTransferService
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+HEADER = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{$field.Name}}{{end}}\n"
+ROW_ONE = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if $field.StringLike}}'=formula{{else if eq $field.PythonType "bool"}}true{{else if $field.Int64}}1{{else}}2026-09-01T00:00:00Z{{end}}{{end}}\n"
+ROW_TWO = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if $field.StringLike}}second-{{$field.Name}}{{else if eq $field.PythonType "bool"}}false{{else if $field.Int64}}2{{else}}2026-09-02T00:00:00Z{{end}}{{end}}\n"
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    user_id = "csv-user-" + suffix
+    email = suffix + "-csv@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    login_actor = Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+    actor = login_actor
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization = tenancy.create("CSV Transfer " + suffix, login_actor)
+    other = tenancy.create("Other CSV Transfer " + suffix, login_actor)
+    actor = login_actor.model_copy(update={"organization_id": organization.id})
+{{- end}}
+    service = CSVTransferService(SQLAlchemyCSVTransferRepository(engine), lambda: now)
+
+    assert service.import_csv((HEADER + ROW_ONE).encode(), actor) == 1
+    with engine.connect() as connection:
+        before_failed_audit = connection.scalar(select(func.count()).select_from(table))
+    missing_actor = actor.model_copy(update={"user_id": "missing-" + suffix})
+    with pytest.raises(CSVTransferError) as failed_audit:
+        service.import_csv((HEADER + ROW_TWO).encode(), missing_actor)
+    assert failed_audit.value.kind == CSVTransferErrorKind.CONFLICT
+    with engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(table)) == before_failed_audit
+
+{{- if .Tenancy}}
+    other_actor = login_actor.model_copy(update={"organization_id": other.id})
+    assert service.import_csv((HEADER + ROW_TWO).encode(), other_actor) == 1
+{{- end}}
+    exported = service.export_csv(actor)
+    assert exported.count == 1
+    assert exported.document.startswith(HEADER.encode())
+{{- range .Business.Fields}}
+{{- if .StringLike}}
+    assert b"'=formula" in exported.document
+    assert b"second-{{.Name}}" not in exported.document
+{{- end}}
+{{- end}}
+
+    with engine.connect() as connection:
+        audit_count = connection.scalar(
+            select(func.count())
+            .select_from(audit_events)
+            .where(
+                audit_events.c.user_id == user_id,
+                audit_events.c.action.in_(
+                    [
+                        "{{.Business.PermissionPrefix}}:import",
+                        "{{.Business.PermissionPrefix}}:export",
+                    ]
+                ),
+            )
+        )
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(
+                        [
+                            "{{.Business.PermissionPrefix}}:import",
+                            "{{.Business.PermissionPrefix}}:export",
+                        ]
+                    )
+                )
+            ).all()
+        )
+    assert audit_count == {{if .Tenancy}}3{{else}}2{{end}}
+    assert grants == {
+        ("admin", "{{.Business.PermissionPrefix}}:import"),
+        ("admin", "{{.Business.PermissionPrefix}}:export"),
+    }
+
+    with engine.begin() as connection:
+{{- if .Tenancy}}
+        organization_ids = [organization.id, other.id]
+        connection.execute(delete(table).where(table.c.organization_id.in_(organization_ids)))
+{{- else}}
+        connection.execute(delete(table))
+{{- end}}
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id.in_(organization_ids)
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id.in_(organization_ids)))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

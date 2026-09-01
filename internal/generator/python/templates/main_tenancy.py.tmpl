@@ -53,6 +53,16 @@ from {{.PackageName}}.{{.Business.PackageName}}.http import (
 from {{.PackageName}}.{{.Business.PackageName}}.http import router as business_router
 from {{.PackageName}}.{{.Business.PackageName}}.repository import SQLAlchemy{{.Business.EntityClass}}Repository
 from {{.PackageName}}.{{.Business.PackageName}}.service import {{.Business.EntityClass}}Service
+{{- if .CSVTransfer}}
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.http import (
+    install_error_handlers as install_csv_transfer_error_handlers,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.http import router as csv_transfer_router
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.repository import (
+    SQLAlchemyCSVTransferRepository,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import CSVTransferService
+{{- end}}
 {{- end}}
 from {{.PackageName}}.tenancy.http import router as tenancy_router
 {{- if .TenancyLifecycle}}
@@ -80,6 +90,16 @@ from {{.PackageName}}.{{.Business.PackageName}}.http import (
 from {{.PackageName}}.{{.Business.PackageName}}.http import router as business_router
 from {{.PackageName}}.{{.Business.PackageName}}.repository import SQLAlchemy{{.Business.EntityClass}}Repository
 from {{.PackageName}}.{{.Business.PackageName}}.service import {{.Business.EntityClass}}Service
+{{- if .CSVTransfer}}
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.http import (
+    install_error_handlers as install_csv_transfer_error_handlers,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.http import router as csv_transfer_router
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.repository import (
+    SQLAlchemyCSVTransferRepository,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import CSVTransferService
+{{- end}}
 {{end}}
 
 @asynccontextmanager
@@ -131,6 +151,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 {{if .Business}}
         business_repository = SQLAlchemy{{.Business.EntityClass}}Repository(engine)
         app.state.business_service = {{.Business.EntityClass}}Service(business_repository)
+{{- if .CSVTransfer}}
+        app.state.csv_transfer_service = CSVTransferService(SQLAlchemyCSVTransferRepository(engine))
+{{- end}}
 {{end}}
         app.state.database_probe = {{if .Observability}}probe{{else}}DatabaseProbe(engine){{end}}
         app.state.cookie_secure = settings.cookie_secure
@@ -165,6 +188,9 @@ def create_app() -> FastAPI:
 {{- end}}
 {{if .Business}}
     install_business_error_handlers(application)
+{{- if .CSVTransfer}}
+    install_csv_transfer_error_handlers(application)
+{{- end}}
 {{end}}
     application.include_router(health_router)
 {{- if .Observability}}
@@ -185,6 +211,9 @@ def create_app() -> FastAPI:
     application.include_router(member_router)
 {{- end}}
 {{if .Business}}
+{{- if .CSVTransfer}}
+    application.include_router(csv_transfer_router)
+{{- end}}
     application.include_router(business_router)
 {{end}}
     return application

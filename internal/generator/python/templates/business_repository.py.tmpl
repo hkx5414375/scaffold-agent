@@ -1,8 +1,8 @@
 """Transactional SQLAlchemy persistence for {{.Business.EntityName}}."""
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Protocol, cast
+from datetime import UTC, datetime
+from typing import Protocol, cast, overload
 
 from sqlalchemy import delete, insert, select, update
 from sqlalchemy.engine import Connection, Engine, RowMapping
@@ -182,11 +182,29 @@ def _map_record(row: RowMapping) -> {{.Business.EntityClass}}Record:
 {{- range .Business.Fields}}
 {{- if .Int64}}
         {{.Name}}=None if row["{{.Name}}"] is None else str(row["{{.Name}}"]),
+{{- else if .DateTime}}
+        {{.Name}}=_database_datetime(cast(datetime{{if not .Required}} | None{{end}}, row["{{.Name}}"])),
 {{- else}}
         {{.Name}}=cast({{.PythonType}}{{if not .Required}} | None{{end}}, row["{{.Name}}"]),
 {{- end}}
 {{- end}}
         version=str(row["version"]),
-        created_at=cast(datetime, row["created_at"]),
-        updated_at=cast(datetime, row["updated_at"]),
+        created_at=_database_datetime(cast(datetime, row["created_at"])),
+        updated_at=_database_datetime(cast(datetime, row["updated_at"])),
     )
+
+
+@overload
+def _database_datetime(value: datetime) -> datetime: ...
+
+
+@overload
+def _database_datetime(value: None) -> None: ...
+
+
+def _database_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

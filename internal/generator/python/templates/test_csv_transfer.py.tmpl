@@ -1,0 +1,180 @@
+"""CSV parsing, bounds, type, formula, and failure contracts."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.models import (
+    CSVTransferError,
+    CSVTransferErrorKind,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.repository import (
+    CSVTransferConflict,
+    CSVTransferTooLarge,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import (
+    CSV_HEADER,
+    MAXIMUM_BYTES,
+    CSVTransferService,
+    _decode_spreadsheet_cell,
+    _optional_boolean,
+    _optional_datetime,
+    _optional_int64,
+    _required_boolean,
+    _required_datetime,
+    _required_int64,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+HEADER = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{$field.Name}}{{end}}\n"
+ROW = "{{range $index, $field := .Business.Fields}}{{if $index}},{{end}}{{if $field.StringLike}}'=formula{{else if eq $field.PythonType "bool"}}true{{else if $field.Int64}}1{{else}}2026-09-01T00:00:00Z{{end}}{{end}}\n"
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.values: list[{{.Business.EntityClass}}Record] = []
+        self.audits: list[AuditEvent] = []
+        self.failure: Exception | None = None
+
+    def import_batch(
+        self,
+        values: list[{{.Business.EntityClass}}Record],
+        audit: AuditEvent,
+    ) -> None:
+        self._fail()
+        self.values = list(values)
+        self.audits.append(audit)
+
+    def export(
+        self,
+        organization_id: str,
+        maximum_rows: int,
+        maximum_bytes: int,
+        header_bytes: int,
+        row_size: Callable[[{{.Business.EntityClass}}Record], int],
+        audit: AuditEvent,
+    ) -> list[{{.Business.EntityClass}}Record]:
+        self._fail()
+        assert organization_id == {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+        assert maximum_rows == 1000
+        assert maximum_bytes == MAXIMUM_BYTES
+        assert header_bytes == len(HEADER.encode())
+        assert callable(row_size)
+        self.audits.append(audit)
+        return list(self.values)
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+def _actor(user_id: str = "admin-1") -> Principal:
+    return Principal(
+        user_id=user_id,
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id="organization-1",
+{{- end}}
+    )
+
+
+def test_import_export_template_and_formula_round_trip() -> None:
+    repository = MemoryRepository()
+    service = CSVTransferService(repository, lambda: NOW)
+
+    imported = service.import_csv((HEADER + ROW).encode(), _actor())
+    exported = service.export_csv(_actor())
+
+    assert imported == 1
+    assert len(repository.values) == 1
+    assert repository.values[0].version == "1"
+{{- if .Tenancy}}
+    assert repository.values[0].organization_id == "organization-1"
+{{- end}}
+    assert exported.count == 1
+    assert exported.document.startswith(HEADER.encode())
+{{- range .Business.Fields}}
+{{- if .StringLike}}
+    assert b"'=formula" in exported.document
+{{- end}}
+{{- end}}
+    assert service.template_csv() == HEADER.encode()
+    assert [audit.action for audit in repository.audits] == [
+        "{{.Business.PermissionPrefix}}:import",
+        "{{.Business.PermissionPrefix}}:export",
+    ]
+    assert tuple(HEADER.strip().split(",")) == CSV_HEADER
+
+
+def test_invalid_and_unbounded_documents_never_reach_persistence() -> None:
+    repository = MemoryRepository()
+    service = CSVTransferService(repository, lambda: NOW)
+
+    invalid_documents = [
+        b"wrong\nvalue\n",
+        HEADER.encode(),
+        b"\xff",
+    ]
+    for document in invalid_documents:
+        with pytest.raises(CSVTransferError) as failure:
+            service.import_csv(document, _actor())
+        assert failure.value.kind == CSVTransferErrorKind.INVALID
+    with pytest.raises(CSVTransferError) as too_large:
+        service.import_csv(b"x" * (MAXIMUM_BYTES + 1), _actor())
+    assert too_large.value.kind == CSVTransferErrorKind.TOO_LARGE
+    with pytest.raises(CSVTransferError) as too_many:
+        service.import_csv((HEADER + ROW * 1001).encode(), _actor())
+    assert too_many.value.kind == CSVTransferErrorKind.TOO_MANY_ROWS
+    assert repository.values == []
+
+
+def test_strict_scalar_decoding_and_reversible_escape() -> None:
+    assert _required_boolean("true", "flag", 2)
+    assert _optional_boolean("", "flag", 2) is None
+    assert _required_int64("+01", "amount", 2) == "1"
+    assert _optional_int64("", "amount", 2) is None
+    assert _required_datetime("2026-09-01T08:00:00+08:00", "at", 2) == NOW
+    assert _optional_datetime("", "at", 2) is None
+    assert _decode_spreadsheet_cell("''literal") == "'literal"
+    assert _decode_spreadsheet_cell("'=formula") == "=formula"
+    for invalid in ["yes", " true"]:
+        with pytest.raises(CSVTransferError):
+            _required_boolean(invalid, "flag", 2)
+    for invalid in ["1.0", " 1", str(2**63)]:
+        with pytest.raises(CSVTransferError):
+            _required_int64(invalid, "amount", 2)
+    with pytest.raises(CSVTransferError):
+        _required_datetime("2026-09-01 00:00:00Z", "at", 2)
+
+
+def test_conflict_size_and_storage_failures_are_generic() -> None:
+    repository = MemoryRepository()
+    service = CSVTransferService(repository, lambda: NOW)
+    repository.failure = CSVTransferConflict()
+    with pytest.raises(CSVTransferError) as conflict:
+        service.import_csv((HEADER + ROW).encode(), _actor())
+    assert conflict.value.kind == CSVTransferErrorKind.CONFLICT
+
+    repository.failure = CSVTransferTooLarge()
+    with pytest.raises(CSVTransferError) as too_large:
+        service.export_csv(_actor())
+    assert too_large.value.kind == CSVTransferErrorKind.TOO_LARGE
+
+    repository.failure = RuntimeError("database password")
+    with pytest.raises(CSVTransferError) as storage:
+        service.export_csv(_actor())
+    assert storage.value.kind == CSVTransferErrorKind.STORAGE
+    assert "database password" not in storage.value.message
+
+
+def test_actor_and_clock_must_be_unambiguous() -> None:
+    service = CSVTransferService(MemoryRepository(), lambda: NOW.replace(tzinfo=None))
+    with pytest.raises(CSVTransferError):
+        service.import_csv((HEADER + ROW).encode(), _actor(""))
+    with pytest.raises(CSVTransferError):
+        service.import_csv((HEADER + ROW).encode(), _actor())

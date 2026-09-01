@@ -1,0 +1,41 @@
+"""Stable CSV transfer results and public failures."""
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CSVTransferErrorKind(StrEnum):
+    """Stable bounded transfer failure categories."""
+
+    INVALID = "invalid"
+    TOO_LARGE = "too_large"
+    TOO_MANY_ROWS = "too_many_rows"
+    CONFLICT = "conflict"
+    UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"
+    STORAGE = "storage"
+
+
+class CSVTransferError(Exception):
+    """Expected transfer failure without database or parser internals."""
+
+    def __init__(self, kind: CSVTransferErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class CSVImportResult(BaseModel):
+    """Successful create-only CSV import count."""
+
+    imported: int = Field(ge=1, le=1000)
+    model_config = ConfigDict(extra="forbid")
+
+
+@dataclass(frozen=True, slots=True)
+class CSVExport:
+    """Complete bounded export document and row count."""
+
+    document: bytes
+    count: int

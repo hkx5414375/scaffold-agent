@@ -164,6 +164,14 @@ func TestPythonPostgreSQLTenantObservabilityPlanApplyVerifyEndToEnd(t *testing.T
 	runGeneratedPythonReferenceOptions(t, "postgresql", true, false, "0.3.0", false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLTenantCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, false, false, false, false, true)
+}
+
 func runGeneratedPythonReference(
 	t *testing.T,
 	database string,
@@ -199,8 +207,10 @@ func runGeneratedPythonReferenceOptions(
 	cache bool,
 	jobAdmin bool,
 	observability bool,
+	csvTransferSelection ...bool,
 ) {
 	t.Helper()
+	csvTransfer := len(csvTransferSelection) > 0 && csvTransferSelection[0]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -233,7 +243,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -273,6 +283,11 @@ CAPABILITIES
 	}
 	if observability {
 		capabilities += `    - name: observability
+      version: 0.1.0
+`
+	}
+	if csvTransfer {
+		capabilities += `    - name: csv-import-export
       version: 0.1.0
 `
 	}
@@ -357,6 +372,9 @@ CAPABILITIES
 	if observability {
 		wantChanges += 5
 	}
+	if csvTransfer {
+		wantChanges += 9
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -387,6 +405,9 @@ CAPABILITIES
 	}
 	if observability && plannedData.CapabilityLock["observability"] != "0.1.0" {
 		t.Fatalf("Plan() observability lock = %#v", plannedData.CapabilityLock)
+	}
+	if csvTransfer && plannedData.CapabilityLock["csv-import-export"] != "0.1.0" {
+		t.Fatalf("Plan() CSV transfer lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

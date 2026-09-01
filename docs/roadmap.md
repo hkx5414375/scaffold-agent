@@ -75,6 +75,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Python application-cache 0.1 with tenant-scoped bounded JSON, dialect-native atomic upsert, strict TTL, idempotent invalidation, and bounded cleanup.
 - [x] Python job-administration 0.1 with payload-free metadata, tenant-scoped listing, dead-only retry, atomic audit, and shared administration UI.
 - [x] Python observability 0.1 with bounded request IDs, safe JSON access logs, label-free Prometheus metrics, generic recovery, and whole-probe deadlines.
+- [x] Python csv-import-export 0.1 with Blueprint field order, bounded parsing, atomic create-only import, spreadsheet-safe scoped export, audit, and shared administration UI.
 - [ ] Remaining Python M5 platform capability parity.
 
 ## M7 — General business suite and storefront

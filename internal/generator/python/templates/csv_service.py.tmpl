@@ -1,0 +1,329 @@
+"""Blueprint-derived bounded CSV parsing, validation, and encoding."""
+
+import csv
+import io
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.models import (
+    CSVExport,
+    CSVTransferError,
+    CSVTransferErrorKind,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.repository import (
+    CSVTransferConflict,
+    CSVTransferRepository,
+    CSVTransferTooLarge,
+    CSVTransferTooManyRows,
+)
+
+MAXIMUM_ROWS = 1000
+MAXIMUM_BYTES = 5 << 20
+MINIMUM_INT64 = -(2**63)
+MAXIMUM_INT64 = 2**63 - 1
+CSV_HEADER = (
+{{- range .Business.Fields}}
+    "{{.Name}}",
+{{- end}}
+)
+RFC3339_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+
+
+class CSVTransferService:
+    """Validate the complete stable CSV contract before persistence."""
+
+    def __init__(
+        self,
+        repository: CSVTransferRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def import_csv(self, document: bytes, actor: Principal) -> int:
+        """Parse every row before atomically creating records and one audit."""
+        organization_id = _scope(actor)
+        rows = _parse(document)
+        now = _now(self._clock)
+        values = []
+        for index, row in enumerate(rows):
+            values.append(_decode_record(row, organization_id, now, index + 2))
+        try:
+            self._repository.import_batch(
+                values,
+                _audit(actor, "{{.Business.PermissionPrefix}}:import", str(len(values)), now),
+            )
+        except CSVTransferConflict as error:
+            raise _error(
+                CSVTransferErrorKind.CONFLICT,
+                "one or more rows conflict with existing data",
+            ) from error
+        except CSVTransferError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return len(values)
+
+    def export_csv(self, actor: Principal) -> CSVExport:
+        """Return one complete safe spreadsheet document or no document."""
+        organization_id = _scope(actor)
+        now = _now(self._clock)
+        try:
+            values = self._repository.export(
+                organization_id,
+                MAXIMUM_ROWS,
+                MAXIMUM_BYTES,
+                len(self.template_csv()),
+                _record_size,
+                _audit(actor, "{{.Business.PermissionPrefix}}:export", "csv", now),
+            )
+        except CSVTransferTooManyRows as error:
+            raise _too_many_rows() from error
+        except CSVTransferTooLarge as error:
+            raise _too_large() from error
+        except CSVTransferError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        document = _encode_rows([CSV_HEADER, *(_record(value) for value in values)])
+        return CSVExport(document=document, count=len(values))
+
+    def template_csv(self) -> bytes:
+        """Return the exact header-only import template."""
+        return _encode_rows([CSV_HEADER])
+
+
+def _parse(document: bytes) -> list[list[str]]:
+    if not document:
+        raise _invalid("CSV body is required")
+    if len(document) > MAXIMUM_BYTES:
+        raise _too_large()
+    try:
+        text = document.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise _invalid("CSV must use valid UTF-8") from error
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+        records = list(reader)
+    except csv.Error as error:
+        raise _invalid("CSV data does not match the generated contract") from error
+    if len(records) < 2:
+        raise _invalid("at least one data row is required")
+    if tuple(records[0]) != CSV_HEADER:
+        raise _invalid("CSV header does not match the generated contract")
+    rows = records[1:]
+    if len(rows) > MAXIMUM_ROWS:
+        raise _too_many_rows()
+    if any(len(row) != len(CSV_HEADER) for row in rows):
+        raise _invalid("CSV row has an invalid field count")
+    return rows
+
+
+def _decode_record(
+    row: list[str],
+    organization_id: str,
+    now: datetime,
+    row_number: int,
+) -> {{.Business.EntityClass}}Record:
+    return {{.Business.EntityClass}}Record(
+        id=str(uuid4()),
+{{- if .Tenancy}}
+        organization_id=organization_id,
+{{- end}}
+{{- range $index, $field := .Business.Fields}}
+{{- if $field.StringLike}}
+        {{$field.Name}}={{if $field.Required}}_required_text{{else}}_optional_text{{end}}(row[{{$index}}], "{{$field.Name}}", {{$field.MaximumLength}}, row_number),
+{{- else if $field.Int64}}
+        {{$field.Name}}={{if $field.Required}}_required_int64{{else}}_optional_int64{{end}}(row[{{$index}}], "{{$field.Name}}", row_number),
+{{- else if eq $field.PythonType "bool"}}
+        {{$field.Name}}={{if $field.Required}}_required_boolean{{else}}_optional_boolean{{end}}(row[{{$index}}], "{{$field.Name}}", row_number),
+{{- else}}
+        {{$field.Name}}={{if $field.Required}}_required_datetime{{else}}_optional_datetime{{end}}(row[{{$index}}], "{{$field.Name}}", row_number),
+{{- end}}
+{{- end}}
+        version="1",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _required_text(raw: str, name: str, maximum: int, row: int) -> str:
+    value = _cell(raw, name, row)
+    if not value or not value.strip() or len(value) > maximum:
+        raise _field_invalid(name, row)
+    return value
+
+
+def _optional_text(raw: str, name: str, maximum: int, row: int) -> str | None:
+    value = _cell(raw, name, row)
+    if not value:
+        return None
+    if not value.strip() or len(value) > maximum:
+        raise _field_invalid(name, row)
+    return value
+
+
+def _required_boolean(raw: str, name: str, row: int) -> bool:
+    value = _cell(raw, name, row)
+    if value not in {"true", "false"}:
+        raise _field_invalid(name, row)
+    return value == "true"
+
+
+def _optional_boolean(raw: str, name: str, row: int) -> bool | None:
+    value = _cell(raw, name, row)
+    return None if not value else _required_boolean(value, name, row)
+
+
+def _required_int64(raw: str, name: str, row: int) -> str:
+    value = _cell(raw, name, row)
+    if re.fullmatch(r"[+-]?[0-9]+", value) is None:
+        raise _field_invalid(name, row)
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise _field_invalid(name, row) from error
+    if not value or parsed < MINIMUM_INT64 or parsed > MAXIMUM_INT64:
+        raise _field_invalid(name, row)
+    return str(parsed)
+
+
+def _optional_int64(raw: str, name: str, row: int) -> str | None:
+    value = _cell(raw, name, row)
+    return None if not value else _required_int64(value, name, row)
+
+
+def _required_datetime(raw: str, name: str, row: int) -> datetime:
+    value = _cell(raw, name, row)
+    if RFC3339_PATTERN.fullmatch(value) is None:
+        raise _field_invalid(name, row)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise _field_invalid(name, row) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise _field_invalid(name, row)
+    return parsed.astimezone(UTC)
+
+
+def _optional_datetime(raw: str, name: str, row: int) -> datetime | None:
+    value = _cell(raw, name, row)
+    return None if not value else _required_datetime(value, name, row)
+
+
+def _cell(raw: str, name: str, row: int) -> str:
+    value = _decode_spreadsheet_cell(raw)
+    if any(not character.isprintable() for character in value):
+        raise _field_invalid(name, row)
+    return value
+
+
+def _record(value: {{.Business.EntityClass}}Record) -> tuple[str, ...]:
+    return (
+{{- range .Business.Fields}}
+{{- if .StringLike}}
+        _encode_spreadsheet_cell(value.{{.Name}} or ""),
+{{- else if .Int64}}
+        value.{{.Name}} or "",
+{{- else if eq .PythonType "bool"}}
+        "" if value.{{.Name}} is None else str(value.{{.Name}}).lower(),
+{{- else}}
+        "" if value.{{.Name}} is None else _format_datetime(value.{{.Name}}),
+{{- end}}
+{{- end}}
+    )
+
+
+def _record_size(value: {{.Business.EntityClass}}Record) -> int:
+    return len(_encode_rows([_record(value)]))
+
+
+def _encode_rows(rows: list[tuple[str, ...]]) -> bytes:
+    destination = io.StringIO(newline="")
+    writer = csv.writer(destination, lineterminator="\n")
+    writer.writerows(rows)
+    document = destination.getvalue().encode("utf-8")
+    if len(document) > MAXIMUM_BYTES:
+        raise _too_large()
+    return document
+
+
+def _encode_spreadsheet_cell(value: str) -> str:
+    if value and value[0] in "'=+-@":
+        return "'" + value
+    return value
+
+
+def _decode_spreadsheet_cell(value: str) -> str:
+    if value.startswith("''"):
+        return value[1:]
+    if len(value) > 1 and value[0] == "'" and value[1] in "=+-@":
+        return value[1:]
+    return value
+
+
+def _format_datetime(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _scope(actor: Principal) -> str:
+    if not actor.user_id or any(not character.isprintable() for character in actor.user_id):
+        raise _invalid("authenticated actor is required")
+{{- if .Tenancy}}
+    organization_id = actor.organization_id or ""
+    if not organization_id or any(not character.isprintable() for character in organization_id):
+        raise _invalid("authenticated actor is required")
+    return organization_id
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid("CSV clock must include a UTC offset")
+    return value.astimezone(UTC)
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _field_invalid(name: str, row: int) -> CSVTransferError:
+    return _invalid(f"row {row}: {name} is invalid")
+
+
+def _invalid(message: str) -> CSVTransferError:
+    return _error(CSVTransferErrorKind.INVALID, message)
+
+
+def _too_large() -> CSVTransferError:
+    return _error(CSVTransferErrorKind.TOO_LARGE, "CSV exceeds the byte limit")
+
+
+def _too_many_rows() -> CSVTransferError:
+    return _error(CSVTransferErrorKind.TOO_MANY_ROWS, "CSV exceeds the row limit")
+
+
+def _storage() -> CSVTransferError:
+    return _error(CSVTransferErrorKind.STORAGE, "the CSV transfer could not be completed")
+
+
+def _error(kind: CSVTransferErrorKind, message: str) -> CSVTransferError:
+    return CSVTransferError(kind, message)

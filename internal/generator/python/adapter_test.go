@@ -774,6 +774,122 @@ func TestGenerateObservabilityForBothDatabases(t *testing.T) {
 	}
 }
 
+func TestGenerateCSVTransferRequiresBusinessEntity(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: csvTransferOwner, Version: csvTransferVersion,
+	}}
+	_, err := New().Generate(context.Background(), project)
+	if err == nil || !strings.Contains(err.Error(), "requires exactly one generated business entity") {
+		t.Fatalf("Generate() error = %v", err)
+	}
+}
+
+func TestGenerateCSVTransferForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validBusinessProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: csvTransferOwner, Version: csvTransferVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[csvTransferOwner] != csvTransferVersion ||
+				len(generated.Outputs) != 46 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/tasks/transfer/http.py",
+				"src/demo_service/tasks/transfer/models.py",
+				"src/demo_service/tasks/transfer/repository.py",
+				"src/demo_service/tasks/transfer/service.py",
+				"src/demo_service/migration/versions/000240_csv_import_export.py",
+				"tests/test_csv_transfer.py",
+				"tests/test_csv_transfer_database.py",
+				"tests/test_csv_transfer_http.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != csvTransferOwner {
+					t.Errorf("Generate(%s) did not produce CSV-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			csvRouter := strings.Index(mainSource, "application.include_router(csv_transfer_router)")
+			businessRouter := strings.Index(mainSource, "application.include_router(business_router)")
+			if csvRouter < 0 || businessRouter < 0 || csvRouter > businessRouter {
+				t.Errorf("Generate(%s) does not compose the CSV router before dynamic IDs", database)
+			}
+			migration := string(outputContent(
+				generated,
+				"src/demo_service/migration/versions/000240_csv_import_export.py",
+			))
+			for _, permission := range []string{"tasks:task:import", "tasks:task:export"} {
+				if !strings.Contains(migration, permission) {
+					t.Errorf("Generate(%s) does not grant %s", database, permission)
+				}
+			}
+			if strings.Contains(migration, `"role_code": "user"`) {
+				t.Errorf("Generate(%s) grants CSV transfer to non-administrators", database)
+			}
+			contract := outputContent(generated, "api/openapi.yaml")
+			var openAPI map[string]any
+			if err := yaml.Unmarshal(contract, &openAPI); err != nil {
+				t.Fatalf("generated CSV OpenAPI is invalid YAML: %v", err)
+			}
+			for _, fragment := range []string{
+				"/api/v1/tasks/import:",
+				"/api/v1/tasks/import-template:",
+				"/api/v1/tasks/export:",
+				"CSVImportResult:",
+			} {
+				if !strings.Contains(string(contract), fragment) {
+					t.Errorf("Generate(%s) OpenAPI does not contain %q", database, fragment)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateCSVTransferComposesWithTenantAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: csvTransferOwner, Version: csvTransferVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 90 ||
+		generated.CapabilityLock[csvTransferOwner] != csvTransferVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000240_csv_import_export.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000070_tenancy_lifecycle"`) {
+		t.Fatalf("generated CSV migration does not follow tenant lifecycle:\n%s", migration)
+	}
+	view := string(outputContent(generated, "web/admin/src/views/BusinessView.vue"))
+	for _, fragment := range []string{"Import CSV", "Export CSV", "import-template", "5 * 1024 * 1024"} {
+		if !strings.Contains(view, fragment) {
+			t.Errorf("generated administration view does not contain %q", fragment)
+		}
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

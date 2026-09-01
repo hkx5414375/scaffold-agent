@@ -1,0 +1,86 @@
+"""CSV transport media, body, response, and public error contracts."""
+
+import asyncio
+from collections.abc import AsyncIterator
+from typing import cast
+
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from test_csv_transfer import HEADER, ROW, MemoryRepository, _actor
+
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.http import (
+    _read_bounded,
+    export_csv,
+    import_csv,
+    import_template,
+    install_error_handlers,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.models import (
+    CSVTransferError,
+    CSVTransferErrorKind,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import (
+    MAXIMUM_BYTES,
+    CSVTransferService,
+)
+
+
+class IncomingRequest:
+    def __init__(self, document: bytes, content_type: str = "text/csv; charset=utf-8") -> None:
+        self.headers = {"content-type": content_type}
+        self._document = document
+
+    async def stream(self) -> AsyncIterator[bytes]:
+        yield self._document
+
+
+def test_direct_transport_import_template_and_export() -> None:
+    service = CSVTransferService(MemoryRepository())
+    incoming = cast(Request, IncomingRequest((HEADER + ROW).encode()))
+
+    result = asyncio.run(import_csv(incoming, _actor(), service))
+    template = import_template(_actor(), service)
+    exported = export_csv(_actor(), service)
+
+    assert result.imported == 1
+    assert template.body == HEADER.encode()
+    assert exported.headers["x-exported-count"] == "1"
+    assert exported.headers["cache-control"] == "no-store"
+    assert exported.headers["x-content-type-options"] == "nosniff"
+    assert exported.headers["content-disposition"].endswith('{{.Business.ModuleName}}-{{.Business.EntityName}}.csv"')
+
+
+def test_transport_rejects_media_type_and_oversized_stream() -> None:
+    service = CSVTransferService(MemoryRepository())
+    incoming = cast(Request, IncomingRequest((HEADER + ROW).encode(), "application/json"))
+    with pytest.raises(CSVTransferError) as media:
+        asyncio.run(import_csv(incoming, _actor(), service))
+    assert media.value.kind == CSVTransferErrorKind.UNSUPPORTED_MEDIA_TYPE
+
+    async def oversized() -> AsyncIterator[bytes]:
+        yield b"x" * MAXIMUM_BYTES
+        yield b"x"
+
+    with pytest.raises(CSVTransferError) as too_large:
+        asyncio.run(_read_bounded(oversized()))
+    assert too_large.value.kind == CSVTransferErrorKind.TOO_LARGE
+
+
+def test_csv_errors_use_stable_public_mapping() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise CSVTransferError(
+            CSVTransferErrorKind.TOO_MANY_ROWS,
+            "CSV exceeds the row limit",
+        )
+
+    response = TestClient(application).get("/failure")
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "csv.too_many_rows",
+        "message": "CSV exceeds the row limit",
+    }

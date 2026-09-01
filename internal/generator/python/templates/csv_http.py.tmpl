@@ -1,0 +1,136 @@
+"""Permission-protected bounded CSV transfer transport."""
+
+from collections.abc import AsyncIterator
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.models import (
+    CSVImportResult,
+    CSVTransferError,
+    CSVTransferErrorKind,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.transfer.service import (
+    MAXIMUM_BYTES,
+    CSVTransferService,
+)
+
+router = APIRouter(prefix="{{.Business.RoutePath}}", tags=["csv-transfer"])
+
+
+def csv_transfer_service(request: Request) -> CSVTransferService:
+    """Resolve the process-scoped CSV transfer service."""
+    service: CSVTransferService = request.app.state.csv_transfer_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable bounded transfer error responses."""
+
+    @app.exception_handler(CSVTransferError)
+    async def csv_transfer_error(
+        _request: Request,
+        error: CSVTransferError,
+    ) -> JSONResponse:
+        status, code = {
+            CSVTransferErrorKind.INVALID: (400, "csv.invalid"),
+            CSVTransferErrorKind.TOO_LARGE: (413, "csv.too_large"),
+            CSVTransferErrorKind.TOO_MANY_ROWS: (422, "csv.too_many_rows"),
+            CSVTransferErrorKind.CONFLICT: (409, "csv.conflict"),
+            CSVTransferErrorKind.UNSUPPORTED_MEDIA_TYPE: (
+                415,
+                "csv.unsupported_media_type",
+            ),
+            CSVTransferErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post("/import", response_model=CSVImportResult, status_code=201)
+async def import_csv(
+    request: Request,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:import"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CSVTransferService, Depends(csv_transfer_service)],
+) -> CSVImportResult:
+    """Read and atomically import one bounded UTF-8 CSV document."""
+    if _media_type(request) != "text/csv":
+        raise CSVTransferError(
+            CSVTransferErrorKind.UNSUPPORTED_MEDIA_TYPE,
+            "Content-Type must be text/csv",
+        )
+    document = await _read_bounded(request.stream())
+    return CSVImportResult(imported=service.import_csv(document, principal))
+
+
+@router.get("/import-template", response_class=Response)
+def import_template(
+    _principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:import"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CSVTransferService, Depends(csv_transfer_service)],
+) -> Response:
+    """Download the exact Blueprint-derived header template."""
+    return _csv_response(
+        service.template_csv(),
+        "{{.Business.ModuleName}}-{{.Business.EntityName}}-template.csv",
+    )
+
+
+@router.get("/export", response_class=Response)
+def export_csv(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:export"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CSVTransferService, Depends(csv_transfer_service)],
+) -> Response:
+    """Download one complete bounded tenant-scoped export."""
+    result = service.export_csv(principal)
+    return _csv_response(
+        result.document,
+        "{{.Business.ModuleName}}-{{.Business.EntityName}}.csv",
+        result.count,
+    )
+
+
+async def _read_bounded(chunks: AsyncIterator[bytes]) -> bytes:
+    document = bytearray()
+    async for chunk in chunks:
+        if len(chunk) > MAXIMUM_BYTES - len(document):
+            raise CSVTransferError(
+                CSVTransferErrorKind.TOO_LARGE,
+                "CSV exceeds the byte limit",
+            )
+        document.extend(chunk)
+    return bytes(document)
+
+
+def _media_type(request: Request) -> str:
+    value = request.headers.get("content-type", "")
+    return value.split(";", maxsplit=1)[0].strip().lower()
+
+
+def _csv_response(document: bytes, filename: str, count: int | None = None) -> Response:
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "X-Content-Type-Options": "nosniff",
+    }
+    if count is not None:
+        headers["X-Exported-Count"] = str(count)
+    return Response(
+        content=document,
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )

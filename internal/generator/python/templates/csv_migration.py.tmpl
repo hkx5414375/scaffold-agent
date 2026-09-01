@@ -1,0 +1,55 @@
+"""Grant administrator-only Blueprint CSV transfer permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000240_csv_import_export"
+down_revision: str | None = {{if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000051_tenant_business"{{else}}"000002_business"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create separate administrator-only import and export permissions."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {
+            "code": "{{.Business.PermissionPrefix}}:import",
+            "description": "Import {{.Business.EntityName}} records from CSV",
+        },
+        {
+            "code": "{{.Business.PermissionPrefix}}:export",
+            "description": "Export {{.Business.EntityName}} records to CSV",
+        },
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in rows],
+    )
+
+
+def downgrade() -> None:
+    """Remove the Blueprint CSV transfer permissions."""
+    codes = ["{{.Business.PermissionPrefix}}:import", "{{.Business.PermissionPrefix}}:export"]
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))
