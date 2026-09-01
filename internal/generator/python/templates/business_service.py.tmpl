@@ -1,0 +1,207 @@
+"""{{.Business.EntityClass}} application use cases."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from uuid import uuid4
+
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.{{.Business.PackageName}}.models import (
+    {{.Business.EntityClass}}Page,
+    {{.Business.EntityClass}}Record,
+    {{.Business.EntityClass}}Update,
+    {{.Business.EntityClass}}Write,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.repository import (
+    BusinessConflict,
+    BusinessNotFound,
+    {{.Business.EntityClass}}Repository,
+)
+
+MINIMUM_INT64 = -(2**63)
+MAXIMUM_INT64 = 2**63 - 1
+
+
+class BusinessErrorKind(StrEnum):
+    """Stable business failure categories."""
+
+    INVALID_INPUT = "invalid_input"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessError(Exception):
+    """Expected business failure safe for public mapping."""
+
+    kind: BusinessErrorKind
+    message: str
+
+
+class {{.Business.EntityClass}}Service:
+    """{{.Business.EntityName}} use cases independent from HTTP and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: {{.Business.EntityClass}}Repository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def create(self, input_value: {{.Business.EntityClass}}Write, actor: Principal) -> {{.Business.EntityClass}}Record:
+        """Create one record and audit atomically."""
+        _require_actor(actor)
+        _validate_input(input_value)
+        now = self._clock()
+        value = {{.Business.EntityClass}}Record(
+            id=str(uuid4()),
+{{- range .Business.Fields}}
+            {{.Name}}=input_value.{{.Name}},
+{{- end}}
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create(value, _audit(actor, "{{.Business.PermissionPrefix}}:create", value.id, now))
+        except BusinessConflict as error:
+            raise BusinessError(BusinessErrorKind.CONFLICT, str(error)) from error
+        return value
+
+    def get(self, record_id: str, actor: Principal) -> {{.Business.EntityClass}}Record:
+        """Read one record or return a stable missing error."""
+        _require_actor(actor)
+        normalized_id = _require_id(record_id)
+        value = self._repository.get(normalized_id)
+        if value is None:
+            raise _not_found(normalized_id)
+        return value
+
+    def list(self, cursor: str, limit: int, actor: Principal) -> {{.Business.EntityClass}}Page:
+        """Return one bounded keyset page."""
+        _require_actor(actor)
+        if limit < 1 or limit > 100:
+            raise BusinessError(BusinessErrorKind.INVALID_INPUT, "limit must be between 1 and 100")
+        normalized_cursor = cursor.strip()
+        if len(normalized_cursor) > 191 or _has_control(normalized_cursor):
+            raise BusinessError(BusinessErrorKind.INVALID_INPUT, "cursor is invalid")
+        result = self._repository.list(normalized_cursor, limit)
+        return {{.Business.EntityClass}}Page(items=result.items, next_cursor=result.next_cursor)
+
+    def update(
+        self,
+        record_id: str,
+        input_value: {{.Business.EntityClass}}Update,
+        actor: Principal,
+    ) -> {{.Business.EntityClass}}Record:
+        """Replace one record using optimistic concurrency."""
+        _require_actor(actor)
+        normalized_id = _require_id(record_id)
+        _validate_input(input_value)
+        version = _positive_version(input_value.version)
+        now = self._clock()
+        value = {{.Business.EntityClass}}Record(
+            id=normalized_id,
+{{- range .Business.Fields}}
+            {{.Name}}=input_value.{{.Name}},
+{{- end}}
+            version=str(version),
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            return self._repository.update(
+                value, _audit(actor, "{{.Business.PermissionPrefix}}:update", normalized_id, now)
+            )
+        except BusinessNotFound as error:
+            raise _not_found(normalized_id) from error
+        except BusinessConflict as error:
+            raise BusinessError(BusinessErrorKind.CONFLICT, str(error)) from error
+
+    def delete(self, record_id: str, version_value: str, actor: Principal) -> None:
+        """Delete one exact record version and audit atomically."""
+        _require_actor(actor)
+        normalized_id = _require_id(record_id)
+        version = _positive_version(version_value)
+        try:
+            self._repository.delete(
+                normalized_id,
+                version,
+                _audit(
+                    actor,
+                    "{{.Business.PermissionPrefix}}:delete",
+                    normalized_id,
+                    self._clock(),
+                ),
+            )
+        except BusinessNotFound as error:
+            raise _not_found(normalized_id) from error
+        except BusinessConflict as error:
+            raise BusinessError(BusinessErrorKind.CONFLICT, str(error)) from error
+
+
+def _validate_input(value: {{.Business.EntityClass}}Write) -> None:
+{{- if .Business.HasInputChecks}}
+{{- range .Business.Fields}}
+{{- if .StringLike}}
+    if value.{{.Name}} is not None and _has_control(value.{{.Name}}):
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "{{.Name}} is invalid")
+{{- end}}
+{{- if .Int64}}
+    if value.{{.Name}} is not None:
+        parsed_{{.Name}} = int(value.{{.Name}})
+        if parsed_{{.Name}} < MINIMUM_INT64 or parsed_{{.Name}} > MAXIMUM_INT64:
+            raise BusinessError(BusinessErrorKind.INVALID_INPUT, "{{.Name}} exceeds int64")
+{{- end}}
+{{- end}}
+{{- else}}
+    del value
+{{- end}}
+
+
+def _require_actor(actor: Principal) -> None:
+    if not actor.user_id or _has_control(actor.user_id):
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "authenticated actor is required")
+
+
+def _require_id(record_id: str) -> str:
+    normalized = record_id.strip()
+    if not normalized or len(normalized) > 191 or _has_control(normalized):
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "id is invalid")
+    return normalized
+
+
+def _positive_version(value: str) -> int:
+    try:
+        version = int(value)
+    except ValueError as error:
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "version must be positive") from error
+    if version < 1 or version > MAXIMUM_INT64:
+        raise BusinessError(BusinessErrorKind.INVALID_INPUT, "version must be positive")
+    return version
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _not_found(record_id: str) -> BusinessError:
+    return BusinessError(
+        BusinessErrorKind.NOT_FOUND,
+        "{{.Business.EntityName}} " + record_id + " was not found",
+    )
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)

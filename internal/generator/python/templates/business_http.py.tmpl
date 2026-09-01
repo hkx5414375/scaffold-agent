@@ -1,0 +1,117 @@
+"""FastAPI transport for {{.Business.EntityName}} CRUD."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.{{.Business.PackageName}}.models import (
+    POSITIVE_INTEGER_PATTERN,
+    {{.Business.EntityClass}}Page,
+    {{.Business.EntityClass}}Record,
+    {{.Business.EntityClass}}Update,
+    {{.Business.EntityClass}}Write,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.service import (
+    BusinessError,
+    BusinessErrorKind,
+    {{.Business.EntityClass}}Service,
+)
+
+router = APIRouter(prefix="{{.Business.RoutePath}}", tags=["{{.Business.ModuleName}}"])
+
+
+def business_service(request: Request) -> {{.Business.EntityClass}}Service:
+    """Resolve the process-scoped business service."""
+    service: {{.Business.EntityClass}}Service = request.app.state.business_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable business exception mappings."""
+
+    @app.exception_handler(BusinessError)
+    async def business_error(_request: Request, error: BusinessError) -> JSONResponse:
+        status, code = {
+            BusinessErrorKind.INVALID_INPUT: (400, "request.invalid"),
+            BusinessErrorKind.NOT_FOUND: (404, "{{.Business.PermissionPrefix}}.not_found"),
+            BusinessErrorKind.CONFLICT: (409, "{{.Business.PermissionPrefix}}.conflict"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post("", response_model={{.Business.EntityClass}}Record, status_code=201)
+def create(
+    payload: {{.Business.EntityClass}}Write,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:create")),
+    ],
+    service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
+) -> {{.Business.EntityClass}}Record:
+    """Create one {{.Business.EntityName}}."""
+    return service.create(payload, principal)
+
+
+@router.get("/{record_id}", response_model={{.Business.EntityClass}}Record)
+def get(
+    record_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:read")),
+    ],
+    service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
+) -> {{.Business.EntityClass}}Record:
+    """Read one {{.Business.EntityName}}."""
+    return service.get(record_id, principal)
+
+
+@router.get("", response_model={{.Business.EntityClass}}Page)
+def list_records(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:read")),
+    ],
+    service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> {{.Business.EntityClass}}Page:
+    """List one bounded keyset page."""
+    return service.list(cursor, limit, principal)
+
+
+@router.put("/{record_id}", response_model={{.Business.EntityClass}}Record)
+def update(
+    record_id: str,
+    payload: {{.Business.EntityClass}}Update,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:update")),
+    ],
+    service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
+) -> {{.Business.EntityClass}}Record:
+    """Replace one exact {{.Business.EntityName}} version."""
+    return service.update(record_id, payload, principal)
+
+
+@router.delete("/{record_id}", status_code=204)
+def delete(
+    record_id: str,
+    version: Annotated[
+        str,
+        Query(pattern=POSITIVE_INTEGER_PATTERN, max_length=19),
+    ],
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("{{.Business.PermissionPrefix}}:delete")),
+    ],
+    service: Annotated[{{.Business.EntityClass}}Service, Depends(business_service)],
+) -> None:
+    """Delete one exact {{.Business.EntityName}} version."""
+    service.delete(record_id, version, principal)

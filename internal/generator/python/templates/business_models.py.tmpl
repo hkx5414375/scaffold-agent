@@ -1,0 +1,100 @@
+"""{{.Business.EntityClass}} API records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field{{if .Business.HasDateTime}}, field_validator{{end}}
+
+from {{.PackageName}}.identity.models import metadata
+
+INT64_PATTERN = r"^-?[0-9]+$"
+POSITIVE_INTEGER_PATTERN = r"^[1-9][0-9]*$"
+
+table = sa.Table(
+    "{{.Business.TableName}}",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+{{- range .Business.Fields}}
+    sa.Column("{{.Name}}", {{.SQLAlchemyType}}, nullable={{if .Required}}False{{else}}True{{end}}),
+{{- end}}
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+{{- range .Business.Fields}}
+{{- if .Unique}}
+    sa.UniqueConstraint("{{.Name}}", name="{{.UniqueName}}"),
+{{- end}}
+{{- end}}
+    sa.CheckConstraint("version > 0", name="{{.Business.VersionCheckName}}"),
+)
+sa.Index("{{.Business.IndexName}}", table.c.created_at.desc(), table.c.id)
+
+
+class StrictModel(BaseModel):
+    """Reject fields that are absent from the Blueprint contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class {{.Business.EntityClass}}Record(StrictModel):
+    """Persisted {{.Business.EntityName}} returned by the API."""
+
+    id: str
+{{- range .Business.Fields}}
+{{- if .StringLike}}
+    {{.Name}}: {{.PythonType}}{{if not .Required}} | None{{end}} = Field({{if .Required}}min_length=1{{else}}default=None, min_length=1{{end}}, max_length={{.MaximumLength}})
+{{- else if .Int64}}
+    {{.Name}}: str{{if not .Required}} | None{{end}} = Field({{if .Required}}pattern=INT64_PATTERN, max_length=20{{else}}default=None, pattern=INT64_PATTERN, max_length=20{{end}})
+{{- else}}
+    {{.Name}}: {{.PythonType}}{{if not .Required}} | None = None{{end}}
+{{- end}}
+{{- end}}
+    version: str = Field(pattern=POSITIVE_INTEGER_PATTERN, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+{{- if .Business.HasDateTime}}
+
+    @field_validator({{range $index, $name := .Business.DateTimeFields}}{{if $index}}, {{end}}"{{$name}}"{{end}})
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        """Reject ambiguous local timestamps."""
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+{{- end}}
+
+
+class {{.Business.EntityClass}}Write(StrictModel):
+    """Complete create or replacement input."""
+{{range .Business.Fields -}}
+{{- if .StringLike}}
+    {{.Name}}: {{.PythonType}}{{if not .Required}} | None{{end}} = Field({{if .Required}}min_length=1{{else}}default=None, min_length=1{{end}}, max_length={{.MaximumLength}})
+{{- else if .Int64}}
+    {{.Name}}: str{{if not .Required}} | None{{end}} = Field({{if .Required}}pattern=INT64_PATTERN, max_length=20{{else}}default=None, pattern=INT64_PATTERN, max_length=20{{end}})
+{{- else}}
+    {{.Name}}: {{.PythonType}}{{if not .Required}} | None = None{{end}}
+{{- end}}
+{{- end}}
+{{- if .Business.HasDateTime}}
+
+    @field_validator({{range $index, $name := .Business.DateTimeFields}}{{if $index}}, {{end}}"{{$name}}"{{end}})
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        """Reject ambiguous local timestamps."""
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+{{- end}}
+
+
+class {{.Business.EntityClass}}Update({{.Business.EntityClass}}Write):
+    """Complete replacement input with optimistic version."""
+
+    version: str = Field(pattern=POSITIVE_INTEGER_PATTERN, max_length=19)
+
+
+class {{.Business.EntityClass}}Page(StrictModel):
+    """Bounded keyset page."""
+
+    items: list[{{.Business.EntityClass}}Record]
+    next_cursor: str

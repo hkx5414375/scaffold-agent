@@ -13,14 +13,22 @@ import (
 )
 
 func TestPythonPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql")
+	runGeneratedPythonReference(t, "postgresql", false)
 }
 
 func TestPythonMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql")
+	runGeneratedPythonReference(t, "mysql", false)
 }
 
-func runGeneratedPythonReference(t *testing.T, database string) {
+func TestPythonPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "postgresql", true)
+}
+
+func TestPythonMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "mysql", true)
+}
+
+func runGeneratedPythonReference(t *testing.T, database string, business bool) {
 	t.Helper()
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
@@ -44,8 +52,29 @@ spec:
     engine: DATABASE_ENGINE
   auth:
     modes: [session, token]
+MODULES
 `
-	writeBlueprint(t, root, strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database))
+	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	modules := ""
+	if business {
+		modules = `  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - {name: title, type: string, required: true, unique: true}
+            - {name: description, type: text}
+            - {name: done, type: bool, required: true}
+            - {name: priority, type: int64, required: true}
+            - {name: due_at, type: datetime}
+      permissions:
+        - {code: "tasks:task:create"}
+        - {code: "tasks:task:read"}
+        - {code: "tasks:task:update"}
+        - {code: "tasks:task:delete"}
+`
+	}
+	writeBlueprint(t, root, strings.ReplaceAll(blueprint, "MODULES", modules))
 	application := New("test")
 	planned := application.Plan(ctx, PlanInput{
 		ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate,
@@ -54,8 +83,15 @@ spec:
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	if plannedData.ChangeCount != 30 || plannedData.CapabilityLock["python-service"] != "0.1.0" {
+	wantChanges := 30
+	if business {
+		wantChanges = 38
+	}
+	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	if business && plannedData.CapabilityLock["python-crud"] != "0.1.0" {
+		t.Fatalf("Plan() CRUD lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

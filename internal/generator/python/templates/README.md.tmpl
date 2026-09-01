@@ -1,6 +1,6 @@
 # {{.ProjectName}}
 
-由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。
+由 Scaffold Agent 确定性生成的 FastAPI 服务，支持 {{.Database.DisplayName}}、浏览器会话、API Token、RBAC、审计日志和 Alembic 数据库迁移。{{if .Business}}项目还包含由 Blueprint 定义的 `{{.Business.ModuleName}}/{{.Business.EntityName}}` 完整 CRUD。{{end}}
 
 ## 环境要求
 
@@ -46,3 +46,6 @@ uv run pytest
 - `src/{{.PackageName}}/migration`：不可跳号的数据库迁移。
 - `tests`：单元、HTTP、架构和真实数据库契约测试。
 - `api/openapi.yaml`：供人和 AI 工具读取的稳定接口真相源。
+{{if .Business}}
+- `src/{{.PackageName}}/{{.Business.PackageName}}`：`{{.Business.EntityName}}` 的领域、仓储和 HTTP 垂直切片。
+{{end}}

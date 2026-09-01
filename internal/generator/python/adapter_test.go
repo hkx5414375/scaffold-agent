@@ -73,15 +73,90 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 		{name: "capability", mutate: func(project *spec.Project) {
 			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "organization-tenancy", Version: "0.1.0"}}
 		}, want: "does not support capability"},
-		{name: "module", mutate: func(project *spec.Project) {
-			project.Spec.Modules = []spec.Module{{Name: "tasks"}}
-		}, want: "does not generate business"},
+		{name: "multiple modules", mutate: func(project *spec.Project) {
+			project.Spec.Modules = []spec.Module{{Name: "tasks"}, {Name: "notes"}}
+		}, want: "at most one business module"},
 	}
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			project := validProject()
+			test.mutate(&project)
+			_, err := New().Generate(context.Background(), project)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Generate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestGenerateBlueprintCRUDForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		project := validBusinessProject()
+		project.Spec.Database.Engine = database
+		generated, err := New().Generate(context.Background(), project)
+		if err != nil {
+			t.Fatalf("Generate(%s) error = %v", database, err)
+		}
+		if generated.CapabilityLock[crudOwner] != crudVersion || len(generated.Outputs) != 37 {
+			t.Fatalf("Generate(%s) result = %#v", database, generated)
+		}
+		for _, path := range []string{
+			"src/demo_service/tasks/models.py",
+			"src/demo_service/tasks/repository.py",
+			"src/demo_service/tasks/service.py",
+			"src/demo_service/tasks/http.py",
+			"src/demo_service/migration/versions/000002_tasks.py",
+			"tests/test_tasks.py",
+			"tests/test_tasks_database.py",
+		} {
+			if outputContent(generated, path) == nil {
+				t.Errorf("Generate(%s) did not produce %s", database, path)
+			}
+		}
+		var contract map[string]any
+		if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+			t.Fatalf("generated CRUD OpenAPI is invalid YAML: %v", err)
+		}
+	}
+}
+
+func TestGenerateRejectsUnsafeBusinessShapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*spec.Project)
+		want   string
+	}{
+		{name: "missing entity", mutate: func(project *spec.Project) {
+			project.Spec.Modules[0].Entities = nil
+		}, want: "exactly one entity"},
+		{name: "workflow", mutate: func(project *spec.Project) {
+			project.Spec.Modules[0].Workflows = []spec.Workflow{{Name: "review"}}
+		}, want: "does not support workflows"},
+		{name: "keyword", mutate: func(project *spec.Project) {
+			project.Spec.Modules[0].Entities[0].Fields[0].Name = "class"
+		}, want: "language keyword"},
+		{name: "reserved", mutate: func(project *spec.Project) {
+			project.Spec.Modules[0].Entities[0].Fields[0].Name = "version"
+		}, want: "reserved"},
+		{name: "permission", mutate: func(project *spec.Project) {
+			project.Spec.Modules[0].Permissions = project.Spec.Modules[0].Permissions[:3]
+		}, want: "must declare"},
+		{name: "mysql unique text", mutate: func(project *spec.Project) {
+			project.Spec.Database.Engine = "mysql"
+			project.Spec.Modules[0].Entities[0].Fields[1].Unique = true
+		}, want: "cannot use"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			project := validBusinessProject()
 			test.mutate(&project)
 			_, err := New().Generate(context.Background(), project)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -116,6 +191,27 @@ func validProject() spec.Project {
 			Auth:     spec.AuthSpec{Modes: []string{"session", "token"}},
 		},
 	}
+}
+
+func validBusinessProject() spec.Project {
+	project := validProject()
+	project.Spec.Modules = []spec.Module{{
+		Name: "tasks",
+		Entities: []spec.Entity{{Name: "task", Fields: []spec.Field{
+			{Name: "title", Type: "string", Required: true, Unique: true},
+			{Name: "description", Type: "text"},
+			{Name: "done", Type: "bool", Required: true},
+			{Name: "priority", Type: "int64", Required: true},
+			{Name: "due_at", Type: "datetime"},
+		}}},
+		Permissions: []spec.Permission{
+			{Code: "tasks:task:create"},
+			{Code: "tasks:task:read"},
+			{Code: "tasks:task:update"},
+			{Code: "tasks:task:delete"},
+		},
+	}}
+	return project
 }
 
 func outputContent(result generator.Result, path string) []byte {

@@ -4,7 +4,9 @@ package python
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,6 +23,8 @@ const (
 	backend     = "python"
 	baseOwner   = "python-service"
 	baseVersion = "0.1.0"
+	crudOwner   = "python-crud"
+	crudVersion = "0.1.0"
 )
 
 //go:embed all:templates
@@ -64,6 +68,50 @@ type templateData struct {
 	ProjectName string
 	PackageName string
 	Database    databaseData
+	Business    *businessData
+}
+
+type businessData struct {
+	ModuleName       string
+	EntityName       string
+	EntityClass      string
+	PackageName      string
+	TableName        string
+	IndexName        string
+	VersionCheckName string
+	PrimaryKeyName   string
+	RoutePath        string
+	PermissionPrefix string
+	Fields           []businessField
+	HasDateTime      bool
+	HasInt64         bool
+	HasUnique        bool
+	HasInputChecks   bool
+	DateTimeFields   []string
+}
+
+type businessField struct {
+	Name           string
+	PythonType     string
+	SQLAlchemyType string
+	Required       bool
+	Unique         bool
+	UniqueName     string
+	StringLike     bool
+	MaximumLength  int
+	Int64          bool
+	DateTime       bool
+	SampleOne      string
+	SampleTwo      string
+	JSONSampleOne  string
+	OpenAPIType    string
+	OpenAPIFormat  string
+	OpenAPIPattern string
+}
+
+type renderTarget struct {
+	Template string
+	Owner    string
 }
 
 var baseTemplates = map[string]string{
@@ -95,6 +143,17 @@ var baseTemplates = map[string]string{
 	"tests/test_identity.py":                            "templates/test_identity.py.tmpl",
 	"tests/test_identity_database.py":                   "templates/test_identity_database.py.tmpl",
 	"tests/test_passwords.py":                           "templates/test_passwords.py.tmpl",
+}
+
+var businessTemplates = map[string]string{
+	"src/package/business/__init__.py":                  "templates/business_init.py.tmpl",
+	"src/package/business/http.py":                      "templates/business_http.py.tmpl",
+	"src/package/business/models.py":                    "templates/business_models.py.tmpl",
+	"src/package/business/repository.py":                "templates/business_repository.py.tmpl",
+	"src/package/business/service.py":                   "templates/business_service.py.tmpl",
+	"src/package/migration/versions/000002_business.py": "templates/business_migration.py.tmpl",
+	"tests/test_business.py":                            "templates/test_business.py.tmpl",
+	"tests/test_business_database.py":                   "templates/test_business_database.py.tmpl",
 }
 
 // Adapter generates the Python backend.
@@ -134,20 +193,40 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if len(project.Spec.Capabilities) > 0 {
 		return generator.Result{}, fmt.Errorf("the Python foundation does not support capability selections yet")
 	}
-	if len(project.Spec.Modules) > 0 {
-		return generator.Result{}, fmt.Errorf("the Python foundation does not generate business modules yet")
+	if len(project.Spec.Modules) > 1 {
+		return generator.Result{}, fmt.Errorf("the Python CRUD slice supports at most one business module")
+	}
+	var business *businessData
+	if len(project.Spec.Modules) == 1 {
+		var err error
+		business, err = buildBusiness(project.Spec.Modules[0], database.Engine)
+		if err != nil {
+			return generator.Result{}, err
+		}
 	}
 
 	data := templateData{
 		ProjectName: project.Metadata.Name,
 		PackageName: pythonIdentifier(project.Metadata.Name),
 		Database:    database,
+		Business:    business,
 	}
-	targets := make(map[string]string, len(baseTemplates)+1)
+	targets := make(map[string]renderTarget, len(baseTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range baseTemplates {
-		targets[replacePackage(path, data.PackageName)] = templatePath
+		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
 	}
-	targets["uv.lock"] = database.LockTemplate
+	targets["uv.lock"] = renderTarget{Template: database.LockTemplate, Owner: baseOwner}
+	if business != nil {
+		targets[replacePackage("src/package/migration/env.py", data.PackageName)] = renderTarget{
+			Template: "templates/migration_env_business.py.tmpl",
+			Owner:    baseOwner,
+		}
+		for path, templatePath := range businessTemplates {
+			path = replacePackage(path, data.PackageName)
+			path = strings.Replace(path, "business", business.PackageName, 1)
+			targets[path] = renderTarget{Template: templatePath, Owner: crudOwner}
+		}
+	}
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -159,16 +238,136 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if err := ctx.Err(); err != nil {
 			return generator.Result{}, err
 		}
-		content, err := render(targets[path], data)
+		target := targets[path]
+		content, err := render(target.Template, data)
 		if err != nil {
 			return generator.Result{}, fmt.Errorf("render %q: %w", path, err)
 		}
-		outputs = append(outputs, change.Output{Path: path, Owner: baseOwner, Content: content})
+		outputs = append(outputs, change.Output{Path: path, Owner: target.Owner, Content: content})
+	}
+	capabilityLock := map[string]string{baseOwner: baseVersion}
+	if business != nil {
+		capabilityLock[crudOwner] = crudVersion
 	}
 	return generator.Result{
-		CapabilityLock: map[string]string{baseOwner: baseVersion},
+		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
 	}, nil
+}
+
+func buildBusiness(module spec.Module, databaseEngine string) (*businessData, error) {
+	if _, reserved := pythonKeywords[module.Name]; reserved {
+		return nil, fmt.Errorf("Python business module name %q is a language keyword", module.Name)
+	}
+	if len(module.Entities) != 1 {
+		return nil, fmt.Errorf("the Python CRUD slice requires exactly one entity")
+	}
+	if len(module.Workflows) > 0 || len(module.Pages) > 0 {
+		return nil, fmt.Errorf("the Python CRUD slice does not support workflows or pages yet")
+	}
+	entity := module.Entities[0]
+	if _, reserved := pythonKeywords[entity.Name]; reserved {
+		return nil, fmt.Errorf("Python business entity name %q is a language keyword", entity.Name)
+	}
+	tableName := module.Name + "_" + entity.Name
+	maximumIdentifierLength := 63
+	if databaseEngine == "mysql" {
+		maximumIdentifierLength = 64
+	}
+	if len(tableName) > maximumIdentifierLength {
+		return nil, fmt.Errorf("business table name %q exceeds the %s identifier limit", tableName, databaseEngine)
+	}
+	prefix := module.Name + ":" + entity.Name
+	wantedPermissions := map[string]struct{}{
+		prefix + ":create": {}, prefix + ":read": {}, prefix + ":update": {}, prefix + ":delete": {},
+	}
+	if len(module.Permissions) != len(wantedPermissions) {
+		return nil, fmt.Errorf("business module permissions must declare create, read, update, and delete codes for its entity")
+	}
+	for _, permission := range module.Permissions {
+		if _, exists := wantedPermissions[permission.Code]; !exists {
+			return nil, fmt.Errorf("unsupported business permission %q", permission.Code)
+		}
+		delete(wantedPermissions, permission.Code)
+	}
+	reservedFields := map[string]struct{}{
+		"id": {}, "version": {}, "created_at": {}, "updated_at": {}, "model_config": {},
+	}
+	fields := make([]businessField, 0, len(entity.Fields))
+	hasDateTime := false
+	hasInt64 := false
+	hasUnique := false
+	hasInputChecks := false
+	dateTimeFields := make([]string, 0, len(entity.Fields))
+	for _, field := range entity.Fields {
+		if _, reserved := reservedFields[field.Name]; reserved {
+			return nil, fmt.Errorf("business field %q is reserved", field.Name)
+		}
+		if _, reserved := pythonKeywords[field.Name]; reserved {
+			return nil, fmt.Errorf("Python business field name %q is a language keyword", field.Name)
+		}
+		fieldData, supported := pythonBusinessField(field.Type)
+		if !supported {
+			return nil, fmt.Errorf("business field %q uses unsupported Python CRUD type %q", field.Name, field.Type)
+		}
+		if databaseEngine == "mysql" && field.Type == "text" && field.Unique {
+			return nil, fmt.Errorf("MySQL text field %q cannot use the portable unique constraint", field.Name)
+		}
+		fieldData.Name = field.Name
+		fieldData.Required = field.Required
+		fieldData.Unique = field.Unique
+		fieldData.UniqueName = compactIdentifier("uq", tableName, field.Name)
+		hasDateTime = hasDateTime || fieldData.DateTime
+		hasInt64 = hasInt64 || fieldData.Int64
+		hasUnique = hasUnique || fieldData.Unique
+		hasInputChecks = hasInputChecks || fieldData.StringLike || fieldData.Int64
+		if fieldData.DateTime {
+			dateTimeFields = append(dateTimeFields, field.Name)
+		}
+		fields = append(fields, fieldData)
+	}
+	return &businessData{
+		ModuleName: module.Name, EntityName: entity.Name, EntityClass: upperCamel(entity.Name),
+		PackageName: module.Name, TableName: tableName,
+		IndexName:        compactIdentifier("ix", tableName, "created_at_id"),
+		VersionCheckName: compactIdentifier("ck", tableName, "version_positive"),
+		PrimaryKeyName:   compactIdentifier("pk", tableName, "id"),
+		RoutePath:        "/api/v1/" + module.Name, PermissionPrefix: prefix, Fields: fields,
+		HasDateTime: hasDateTime, HasInt64: hasInt64, HasUnique: hasUnique,
+		HasInputChecks: hasInputChecks, DateTimeFields: dateTimeFields,
+	}, nil
+}
+
+func pythonBusinessField(fieldType string) (businessField, bool) {
+	switch fieldType {
+	case "string":
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.String(255)", StringLike: true, MaximumLength: 255, SampleOne: `"first"`, SampleTwo: `"second"`, JSONSampleOne: `"first"`, OpenAPIType: "string"}, true
+	case "text":
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.Text()", StringLike: true, MaximumLength: 4000, SampleOne: `"first text"`, SampleTwo: `"second text"`, JSONSampleOne: `"first text"`, OpenAPIType: "string"}, true
+	case "bool":
+		return businessField{PythonType: "bool", SQLAlchemyType: "sa.Boolean()", SampleOne: "True", SampleTwo: "False", JSONSampleOne: "true", OpenAPIType: "boolean"}, true
+	case "int64":
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.BigInteger()", Int64: true, SampleOne: `"1"`, SampleTwo: `"2"`, JSONSampleOne: `"1"`, OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`}, true
+	case "datetime":
+		return businessField{PythonType: "datetime", SQLAlchemyType: "sa.DateTime(timezone=True)", DateTime: true, SampleOne: `datetime(2026, 9, 1, tzinfo=UTC)`, SampleTwo: `datetime(2026, 9, 2, tzinfo=UTC)`, JSONSampleOne: `"2026-09-01T00:00:00Z"`, OpenAPIType: "string", OpenAPIFormat: "date-time"}, true
+	default:
+		return businessField{}, false
+	}
+}
+
+func compactIdentifier(kind, tableName, suffix string) string {
+	digest := sha256.Sum256([]byte(kind + ":" + tableName + ":" + suffix))
+	return kind + "_" + hex.EncodeToString(digest[:8])
+}
+
+func upperCamel(value string) string {
+	parts := strings.Split(value, "_")
+	for index, part := range parts {
+		if part != "" {
+			parts[index] = strings.ToUpper(part[:1]) + part[1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 func render(path string, data templateData) ([]byte, error) {

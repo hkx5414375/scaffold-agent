@@ -1,0 +1,29 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: task-service-python
+  display_name: Python Task Service
+spec:
+  stack:
+    backend: python
+    admin_ui: none
+    storefront: none
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  modules:
+    - name: tasks
+      entities:
+        - name: task
+          fields:
+            - {name: title, type: string, required: true, unique: true}
+            - {name: description, type: text}
+            - {name: done, type: bool, required: true}
+            - {name: priority, type: int64, required: true}
+            - {name: due_at, type: datetime}
+      permissions:
+        - {code: "tasks:task:create"}
+        - {code: "tasks:task:read"}
+        - {code: "tasks:task:update"}
+        - {code: "tasks:task:delete"}

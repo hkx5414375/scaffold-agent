@@ -1,0 +1,145 @@
+"""Transactional SQLAlchemy persistence for {{.Business.EntityName}}."""
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import delete, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record, table
+
+
+class BusinessConflict(Exception):
+    """Unique or optimistic concurrency conflict."""
+
+
+class BusinessNotFound(Exception):
+    """Requested business record does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class PageResult:
+    """Repository keyset page."""
+
+    items: list[{{.Business.EntityClass}}Record]
+    next_cursor: str
+
+
+class {{.Business.EntityClass}}Repository(Protocol):
+    """Persistence seam for {{.Business.EntityName}} use cases."""
+
+    def create(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> None: ...
+
+    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None: ...
+
+    def list(self, cursor: str, limit: int) -> PageResult: ...
+
+    def update(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> {{.Business.EntityClass}}Record: ...
+
+    def delete(self, record_id: str, version: int, audit: AuditEvent) -> None: ...
+
+
+class SQLAlchemy{{.Business.EntityClass}}Repository:
+    """SQLAlchemy Core adapter with explicit transaction boundaries."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> None:
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    insert(table).values(**_database_values(value, include_created=True))
+                )
+                append_audit(connection, audit)
+        except IntegrityError as error:
+            raise BusinessConflict("a unique value already exists") from error
+
+    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None:
+        with self._engine.connect() as connection:
+            row = (
+                connection.execute(select(table).where(table.c.id == record_id)).mappings().first()
+            )
+        return _map_record(row) if row is not None else None
+
+    def list(self, cursor: str, limit: int) -> PageResult:
+        statement = select(table).order_by(table.c.id).limit(limit + 1)
+        if cursor:
+            statement = statement.where(table.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        values = [_map_record(row) for row in rows]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return PageResult(values[:limit], next_cursor)
+
+    def update(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> {{.Business.EntityClass}}Record:
+        try:
+            with self._engine.begin() as connection:
+                statement = (
+                    update(table)
+                    .where(table.c.id == value.id, table.c.version == int(value.version))
+                    .values(
+                        **_database_values(value, include_created=False),
+                        version=int(value.version) + 1,
+                    )
+                )
+                changed = connection.execute(statement).rowcount
+                if changed != 1:
+                    _raise_missing_or_conflict(connection, value.id)
+                append_audit(connection, audit)
+                row = (
+                    connection.execute(select(table).where(table.c.id == value.id)).mappings().one()
+                )
+                return _map_record(row)
+        except IntegrityError as error:
+            raise BusinessConflict("a unique value already exists") from error
+
+    def delete(self, record_id: str, version: int, audit: AuditEvent) -> None:
+        with self._engine.begin() as connection:
+            changed = connection.execute(
+                delete(table).where(table.c.id == record_id, table.c.version == version)
+            ).rowcount
+            if changed != 1:
+                _raise_missing_or_conflict(connection, record_id)
+            append_audit(connection, audit)
+
+
+def _raise_missing_or_conflict(connection: Connection, record_id: str) -> None:
+    exists = connection.execute(select(table.c.id).where(table.c.id == record_id)).first()
+    if exists is None:
+        raise BusinessNotFound(record_id)
+    raise BusinessConflict("version is stale")
+
+
+def _database_values(value: {{.Business.EntityClass}}Record, *, include_created: bool) -> dict[str, object]:
+    result: dict[str, object] = {
+        "id": value.id,
+{{- range .Business.Fields}}
+        "{{.Name}}": {{if .Int64}}None if value.{{.Name}} is None else int(value.{{.Name}}){{else}}value.{{.Name}}{{end}},
+{{- end}}
+        "updated_at": value.updated_at,
+    }
+    if include_created:
+        result["version"] = int(value.version)
+        result["created_at"] = value.created_at
+    return result
+
+
+def _map_record(row: RowMapping) -> {{.Business.EntityClass}}Record:
+    return {{.Business.EntityClass}}Record(
+        id=str(row["id"]),
+{{- range .Business.Fields}}
+{{- if .Int64}}
+        {{.Name}}=None if row["{{.Name}}"] is None else str(row["{{.Name}}"]),
+{{- else}}
+        {{.Name}}=cast({{.PythonType}}{{if not .Required}} | None{{end}}, row["{{.Name}}"]),
+{{- end}}
+{{- end}}
+        version=str(row["version"]),
+        created_at=cast(datetime, row["created_at"]),
+        updated_at=cast(datetime, row["updated_at"]),
+    )

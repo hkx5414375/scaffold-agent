@@ -13,7 +13,14 @@ from {{.PackageName}}.identity.http import router as identity_router
 from {{.PackageName}}.identity.repository import SQLAlchemyIdentityRepository
 from {{.PackageName}}.identity.service import IdentityService
 from {{.PackageName}}.migrations import upgrade_database
-
+{{if .Business -}}
+from {{.PackageName}}.{{.Business.PackageName}}.http import (
+    install_error_handlers as install_business_error_handlers,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.http import router as business_router
+from {{.PackageName}}.{{.Business.PackageName}}.repository import SQLAlchemy{{.Business.EntityClass}}Repository
+from {{.PackageName}}.{{.Business.PackageName}}.service import {{.Business.EntityClass}}Service
+{{end}}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -26,6 +33,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
+{{if .Business}}
+        business_repository = SQLAlchemy{{.Business.EntityClass}}Repository(engine)
+        app.state.business_service = {{.Business.EntityClass}}Service(business_repository)
+{{end}}
         app.state.database_probe = DatabaseProbe(engine)
         app.state.cookie_secure = settings.cookie_secure
         yield
@@ -37,8 +48,14 @@ def create_app() -> FastAPI:
     """Create one application without opening infrastructure during import."""
     application = FastAPI(title="{{.ProjectName}}", version="0.1.0", lifespan=lifespan)
     install_error_handlers(application)
+{{if .Business}}
+    install_business_error_handlers(application)
+{{end}}
     application.include_router(health_router)
     application.include_router(identity_router)
+{{if .Business}}
+    application.include_router(business_router)
+{{end}}
     return application
 
 

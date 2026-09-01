@@ -64,7 +64,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Java platform capability parity.
 - [x] Python 3.12+/FastAPI foundation for PostgreSQL and MySQL with deterministic uv locks, Alembic migrations, liveness/readiness, and frozen quality gates.
 - [x] Python session/token identity, permission RBAC, transactional audit, stable OpenAPI, SQLite repository contracts, and live PostgreSQL/MySQL CI gates.
-- [ ] Python Blueprint CRUD, shared Vue administration, organization tenancy, and M5 platform capability parity.
+- [x] Python Blueprint CRUD with five portable field types, keyset pagination, optimistic concurrency, transactional audit, stable OpenAPI, and dual-database gates.
+- [ ] Python shared Vue administration, organization tenancy, and M5 platform capability parity.
 
 ## M7 — General business suite and storefront
 

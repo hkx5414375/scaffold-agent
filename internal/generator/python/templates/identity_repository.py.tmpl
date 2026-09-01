@@ -135,7 +135,7 @@ class SQLAlchemyIdentityRepository:
                     created_at=audit_event.created_at,
                 )
             )
-            _append_audit(connection, audit_event)
+            append_audit(connection, audit_event)
 
     def delete_session(self, token_hash: str) -> None:
         with self._engine.begin() as connection:
@@ -161,14 +161,15 @@ class SQLAlchemyIdentityRepository:
                     created_at=audit_event.created_at,
                 )
             )
-            _append_audit(connection, audit_event)
+            append_audit(connection, audit_event)
 
     def append_audit(self, audit_event: AuditEvent) -> None:
         with self._engine.begin() as connection:
-            _append_audit(connection, audit_event)
+            append_audit(connection, audit_event)
 
 
-def _append_audit(connection: Connection, event: AuditEvent) -> None:
+def append_audit(connection: Connection, event: AuditEvent) -> None:
+    """Append one audit event inside the caller's transaction."""
     connection.execute(
         insert(audit_events).values(
             id=event.id,

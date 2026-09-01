@@ -112,6 +112,155 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           $ref: "#/components/responses/ValidationError"
+{{if .Business}}
+  {{.Business.RoutePath}}:
+    post:
+      operationId: create{{.Business.EntityClass}}
+      summary: Create one {{.Business.EntityName}}
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/{{.Business.EntityClass}}Write"
+      responses:
+        "201":
+          description: Record created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{{.Business.EntityClass}}Record"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      operationId: list{{.Business.EntityClass}}
+      summary: List a bounded {{.Business.EntityName}} keyset page
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 191
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Bounded keyset page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{{.Business.EntityClass}}Page"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  {{.Business.RoutePath}}/{record_id}:
+    parameters:
+      - name: record_id
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 191
+    get:
+      operationId: get{{.Business.EntityClass}}
+      summary: Read one {{.Business.EntityName}}
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Requested record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{{.Business.EntityClass}}Record"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: update{{.Business.EntityClass}}
+      summary: Replace one exact {{.Business.EntityName}} version
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/{{.Business.EntityClass}}Update"
+      responses:
+        "200":
+          description: Updated record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/{{.Business.EntityClass}}Record"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    delete:
+      operationId: delete{{.Business.EntityClass}}
+      summary: Delete one exact {{.Business.EntityName}} version
+      security:
+        - bearerAuth: []
+        - sessionCookie: []
+      parameters:
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: string
+            pattern: "^[1-9][0-9]*$"
+            maxLength: 19
+      responses:
+        "204":
+          description: Record deleted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+{{end}}
 components:
   securitySchemes:
     bearerAuth:
@@ -136,6 +285,18 @@ components:
             $ref: "#/components/schemas/ApiError"
     Forbidden:
       description: Permission is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    NotFound:
+      description: Record does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    Conflict:
+      description: Unique value or optimistic version conflict.
       content:
         application/json:
           schema:
@@ -214,3 +375,131 @@ components:
           type: string
         message:
           type: string
+{{if .Business}}
+    {{.Business.EntityClass}}Record:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+{{- range .Business.Fields}}
+{{- if .Required}}
+        - {{.Name}}
+{{- end}}
+{{- end}}
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+{{- range .Business.Fields}}
+        {{.Name}}:
+{{- if .Required}}
+          type: {{.OpenAPIType}}
+{{- else}}
+          type: [{{.OpenAPIType}}, "null"]
+{{- end}}
+{{- if .StringLike}}
+          minLength: 1
+          maxLength: {{.MaximumLength}}
+{{- end}}
+{{- if .OpenAPIFormat}}
+          format: {{.OpenAPIFormat}}
+{{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
+{{- if .Int64}}
+          maxLength: 20
+{{- end}}
+{{- end}}
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 19
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    {{.Business.EntityClass}}Write:
+      type: object
+      additionalProperties: false
+      required:
+{{- range .Business.Fields}}
+{{- if .Required}}
+        - {{.Name}}
+{{- end}}
+{{- end}}
+      properties:
+{{- range .Business.Fields}}
+        {{.Name}}:
+{{- if .Required}}
+          type: {{.OpenAPIType}}
+{{- else}}
+          type: [{{.OpenAPIType}}, "null"]
+{{- end}}
+{{- if .StringLike}}
+          minLength: 1
+          maxLength: {{.MaximumLength}}
+{{- end}}
+{{- if .OpenAPIFormat}}
+          format: {{.OpenAPIFormat}}
+{{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
+{{- if .Int64}}
+          maxLength: 20
+{{- end}}
+{{- end}}
+    {{.Business.EntityClass}}Update:
+      type: object
+      additionalProperties: false
+      required:
+{{- range .Business.Fields}}
+{{- if .Required}}
+        - {{.Name}}
+{{- end}}
+{{- end}}
+        - version
+      properties:
+{{- range .Business.Fields}}
+        {{.Name}}:
+{{- if .Required}}
+          type: {{.OpenAPIType}}
+{{- else}}
+          type: [{{.OpenAPIType}}, "null"]
+{{- end}}
+{{- if .StringLike}}
+          minLength: 1
+          maxLength: {{.MaximumLength}}
+{{- end}}
+{{- if .OpenAPIFormat}}
+          format: {{.OpenAPIFormat}}
+{{- end}}
+{{- if .OpenAPIPattern}}
+          pattern: {{.OpenAPIPattern}}
+{{- end}}
+{{- if .Int64}}
+          maxLength: 20
+{{- end}}
+{{- end}}
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          maxLength: 19
+    {{.Business.EntityClass}}Page:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/{{.Business.EntityClass}}Record"
+        next_cursor:
+          type: string
+{{end}}

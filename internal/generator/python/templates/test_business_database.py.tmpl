@@ -1,0 +1,88 @@
+"""{{.Business.EntityClass}} repository contract for SQLite and the selected live database."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import AuditEvent, audit_events, metadata
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record
+from {{.PackageName}}.{{.Business.PackageName}}.repository import (
+    BusinessConflict,
+    BusinessNotFound,
+    SQLAlchemy{{.Business.EntityClass}}Repository,
+)
+
+
+def record(record_id: str, *, second: bool = False, version: str = "1") -> {{.Business.EntityClass}}Record:
+    return {{.Business.EntityClass}}Record(
+        id=record_id,
+{{- range .Business.Fields}}
+        {{.Name}}={{if $.Business.HasUnique}}{{if .Unique}}({{.SampleTwo}} if second else {{.SampleOne}}){{else}}{{if .Required}}{{.SampleOne}}{{else}}None{{end}}{{end}}{{else}}({{.SampleTwo}} if second else {{.SampleOne}}){{end}},
+{{- end}}
+        version=version,
+        created_at=datetime(2026, 9, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+
+def audit(event_id: str, action: str) -> AuditEvent:
+    return AuditEvent(event_id, None, action, "succeeded", event_id, None, None, datetime.now(UTC))
+
+
+def repository_contract(engine: Engine) -> None:
+    repository = SQLAlchemy{{.Business.EntityClass}}Repository(engine)
+    record_id = str(uuid4())
+    value = record(record_id)
+    repository.create(value, audit(str(uuid4()), "create"))
+
+    fetched = repository.get(record_id)
+    page = repository.list("", 20)
+    updated = repository.update(record(record_id, second=True), audit(str(uuid4()), "update"))
+
+    assert fetched is not None
+    assert fetched.id == record_id
+    assert any(item.id == record_id for item in page.items)
+    assert updated.version == "2"
+    with pytest.raises(BusinessConflict):
+        repository.create(updated, audit(str(uuid4()), "duplicate"))
+    with pytest.raises(BusinessConflict):
+        repository.update(record(record_id, version="1"), audit(str(uuid4()), "stale"))
+    with pytest.raises(BusinessNotFound):
+        repository.delete("missing", 1, audit(str(uuid4()), "missing"))
+
+    repository.delete(record_id, 2, audit(str(uuid4()), "delete"))
+    assert repository.get(record_id) is None
+    with engine.connect() as connection:
+        assert len(connection.execute(select(audit_events)).all()) >= 3
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    metadata.create_all(engine)
+    try:
+        repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        repository_contract(engine)
+    finally:
+        engine.dispose()

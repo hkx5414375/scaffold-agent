@@ -93,6 +93,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"java-session-token-identity",
 				"python-fastapi-foundation",
 				"python-session-token-identity",
+				"python-blueprint-crud",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

@@ -19,6 +19,13 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/auth/logout", "post"),
         ("/api/v1/auth/me", "get"),
         ("/api/v1/auth/tokens", "post"),
+{{- if .Business}}
+        ("{{.Business.RoutePath}}", "post"),
+        ("{{.Business.RoutePath}}", "get"),
+        ("{{.Business.RoutePath}}/{record_id}", "get"),
+        ("{{.Business.RoutePath}}/{record_id}", "put"),
+        ("{{.Business.RoutePath}}/{record_id}", "delete"),
+{{- end}}
     }
     runtime_operations = {
         (path, method)
@@ -46,6 +53,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
     )
 
     assert imported_roots.isdisjoint({"fastapi", "sqlalchemy"})
+{{- if .Business}}
+
+    business_tree = ast.parse((PACKAGE / "{{.Business.PackageName}}" / "service.py").read_text(encoding="utf-8"))
+    business_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(business_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert business_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
 
 
 def test_production_code_contains_no_print_calls() -> None:

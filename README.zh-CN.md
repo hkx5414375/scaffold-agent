@@ -8,7 +8,7 @@ Scaffold Agent 是一个供 AI 编码助手调用的、模型无关的本地工�
 
 ## 当前状态
 
-项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 适配器已完成平台能力对齐，包含 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。Python 3.12+/FastAPI 适配器现已能生成 PostgreSQL 或 MySQL 身份服务，包含确定性 uv 锁、Alembic 迁移、有界健康检查、PBKDF2 密码、Session 与 Bearer 双认证、权限 RBAC、事务审计、稳定 OpenAPI，以及 Ruff、严格 mypy、Bandit、pytest 90% 覆盖率和双数据库真库门禁。Python 的 CRUD/平台能力对齐与 Nuxt 商城仍在建设，Schema 在 1.0 前保持实验状态。
+项目正在从底层开始建设。目前已完成协议内核、确定性文件事务、稳定 JSON CLI、六工具 MCP 服务，以及支持 PostgreSQL/MySQL 的 Go 生成器和 M5 平台能力套件。Java 21/Spring Boot 适配器已完成平台能力对齐，包含 CRUD、组织租户、可靠任务、通知、文件资产、缓存、任务管理、可观测性、CSV、审批、OpenAPI 和共用 Vue 管理端。Python 3.12+/FastAPI 适配器现已能生成 PostgreSQL 或 MySQL 服务，包含确定性 uv 锁、Alembic 迁移、有界健康检查、安全 Session/Token 身份、权限 RBAC、事务审计、稳定 OpenAPI，以及带游标分页和乐观锁的 Blueprint CRUD；同时执行 Ruff、严格 mypy、Bandit、pytest 90% 覆盖率和双数据库真库门禁。Python 管理端/平台能力对齐与 Nuxt 商城仍在建设，Schema 在 1.0 前保持实验状态。
 
 ## 设计目标
 
@@ -58,6 +58,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-ser
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-java --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-java --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/minimal-python --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/task-service-python --blueprint scaffold.yaml
 ```
 
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)、[Agent 调用接口](docs/agent-interface.zh-CN.md)、[基础架构决策](docs/adr/0001-foundation.md)和[开发路线图](docs/roadmap.md)。

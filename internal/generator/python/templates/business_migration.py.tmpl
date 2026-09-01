@@ -1,0 +1,89 @@
+"""Create Blueprint-defined {{.Business.EntityName}} CRUD storage and permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000002_business"
+down_revision: str | None = "000001_identity"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create business permissions and one portable optimistic-lock table."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    op.bulk_insert(
+        permissions,
+        [
+            {"code": "{{.Business.PermissionPrefix}}:create", "description": "Create {{.Business.EntityName}} records"},
+            {"code": "{{.Business.PermissionPrefix}}:read", "description": "Read {{.Business.EntityName}} records"},
+            {"code": "{{.Business.PermissionPrefix}}:update", "description": "Update {{.Business.EntityName}} records"},
+            {"code": "{{.Business.PermissionPrefix}}:delete", "description": "Delete {{.Business.EntityName}} records"},
+        ],
+    )
+    op.bulk_insert(
+        role_permissions,
+        [
+            {"role_code": "admin", "permission_code": "{{.Business.PermissionPrefix}}:create"},
+            {"role_code": "admin", "permission_code": "{{.Business.PermissionPrefix}}:read"},
+            {"role_code": "admin", "permission_code": "{{.Business.PermissionPrefix}}:update"},
+            {"role_code": "admin", "permission_code": "{{.Business.PermissionPrefix}}:delete"},
+        ],
+    )
+    op.create_table(
+        "{{.Business.TableName}}",
+        sa.Column("id", sa.String(length=191), nullable=False),
+{{- range .Business.Fields}}
+        sa.Column("{{.Name}}", {{.SQLAlchemyType}}, nullable={{if .Required}}False{{else}}True{{end}}),
+{{- end}}
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("version > 0", name="{{.Business.VersionCheckName}}"),
+        sa.PrimaryKeyConstraint("id", name="{{.Business.PrimaryKeyName}}"),
+{{- range .Business.Fields}}
+{{- if .Unique}}
+        sa.UniqueConstraint("{{.Name}}", name="{{.UniqueName}}"),
+{{- end}}
+{{- end}}
+    )
+    op.create_index(
+        "{{.Business.IndexName}}",
+        "{{.Business.TableName}}",
+        [sa.text("created_at DESC"), "id"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    """Remove business storage and its built-in administrator permissions."""
+    op.drop_index("{{.Business.IndexName}}", table_name="{{.Business.TableName}}")
+    op.drop_table("{{.Business.TableName}}")
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    codes = [
+        "{{.Business.PermissionPrefix}}:create",
+        "{{.Business.PermissionPrefix}}:read",
+        "{{.Business.PermissionPrefix}}:update",
+        "{{.Business.PermissionPrefix}}:delete",
+    ]
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

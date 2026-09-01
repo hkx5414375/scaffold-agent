@@ -1,0 +1,210 @@
+"""{{.Business.EntityClass}} use-case and HTTP contract tests."""
+
+from datetime import UTC, datetime
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{.PackageName}}.errors import install_error_handlers as install_identity_errors
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.{{.Business.PackageName}}.http import install_error_handlers, router
+from {{.PackageName}}.{{.Business.PackageName}}.models import (
+    {{.Business.EntityClass}}Record,
+    {{.Business.EntityClass}}Update,
+    {{.Business.EntityClass}}Write,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.repository import (
+    BusinessConflict,
+    BusinessNotFound,
+    PageResult,
+)
+from {{.PackageName}}.{{.Business.PackageName}}.service import (
+    BusinessError,
+    BusinessErrorKind,
+    {{.Business.EntityClass}}Service,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+ACTOR = Principal(user_id="admin-1", email="admin@example.com", role="admin", method="token")
+
+
+def write_one() -> {{.Business.EntityClass}}Write:
+    return {{.Business.EntityClass}}Write(
+{{- range .Business.Fields}}
+        {{.Name}}={{.SampleOne}},
+{{- end}}
+    )
+
+
+def write_two() -> {{.Business.EntityClass}}Write:
+    return {{.Business.EntityClass}}Write(
+{{- range .Business.Fields}}
+        {{.Name}}={{.SampleTwo}},
+{{- end}}
+    )
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.values: dict[str, {{.Business.EntityClass}}Record] = {}
+        self.audits: list[AuditEvent] = []
+        self.conflict_on_create = False
+
+    def create(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> None:
+        if self.conflict_on_create:
+            raise BusinessConflict("a unique value already exists")
+{{- if .Business.HasUnique}}
+        for existing in self.values.values():
+            unique_pairs: list[tuple[object, object]] = []
+{{- range .Business.Fields}}
+{{- if .Unique}}
+            unique_pairs.append((existing.{{.Name}}, value.{{.Name}}))
+{{- end}}
+{{- end}}
+            if any(left == right for left, right in unique_pairs):
+                raise BusinessConflict("a unique value already exists")
+{{- end}}
+        self.values[value.id] = value
+        self.audits.append(audit)
+
+    def get(self, record_id: str) -> {{.Business.EntityClass}}Record | None:
+        return self.values.get(record_id)
+
+    def list(self, cursor: str, limit: int) -> PageResult:
+        values = [value for key, value in sorted(self.values.items()) if key > cursor]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return PageResult(values[:limit], next_cursor)
+
+    def update(self, value: {{.Business.EntityClass}}Record, audit: AuditEvent) -> {{.Business.EntityClass}}Record:
+        existing = self.values.get(value.id)
+        if existing is None:
+            raise BusinessNotFound(value.id)
+        if existing.version != value.version:
+            raise BusinessConflict("version is stale")
+        updated = value.model_copy(
+            update={"version": str(int(value.version) + 1), "created_at": existing.created_at}
+        )
+        self.values[value.id] = updated
+        self.audits.append(audit)
+        return updated
+
+    def delete(self, record_id: str, version: int, audit: AuditEvent) -> None:
+        existing = self.values.get(record_id)
+        if existing is None:
+            raise BusinessNotFound(record_id)
+        if int(existing.version) != version:
+            raise BusinessConflict("version is stale")
+        del self.values[record_id]
+        self.audits.append(audit)
+
+
+def test_create_read_list_update_delete_and_audit() -> None:
+    repository = MemoryRepository()
+    service = {{.Business.EntityClass}}Service(repository, lambda: NOW)
+
+    created = service.create(write_one(), ACTOR)
+    fetched = service.get(created.id, ACTOR)
+    page = service.list("", 20, ACTOR)
+    replacement = write_two().model_dump()
+    updated = service.update(
+        created.id,
+        {{.Business.EntityClass}}Update(**replacement, version=created.version),
+        ACTOR,
+    )
+    service.delete(created.id, updated.version, ACTOR)
+
+    assert fetched.id == created.id
+    assert page.items[0].id == created.id
+    assert updated.version == "2"
+    assert repository.values == {}
+    assert [event.action for event in repository.audits] == [
+        "{{.Business.PermissionPrefix}}:create",
+        "{{.Business.PermissionPrefix}}:update",
+        "{{.Business.PermissionPrefix}}:delete",
+    ]
+
+
+def test_business_failures_are_stable() -> None:
+    repository = MemoryRepository()
+    service = {{.Business.EntityClass}}Service(repository, lambda: NOW)
+    created = service.create(write_one(), ACTOR)
+
+    repository.conflict_on_create = True
+    with pytest.raises(BusinessError) as duplicate:
+        service.create(write_two(), ACTOR)
+    repository.conflict_on_create = False
+    assert duplicate.value.kind == BusinessErrorKind.CONFLICT
+    with pytest.raises(BusinessError) as missing:
+        service.get("missing", ACTOR)
+    with pytest.raises(BusinessError) as stale:
+        service.update(
+            created.id,
+            {{.Business.EntityClass}}Update(**write_two().model_dump(), version="99"),
+            ACTOR,
+        )
+    with pytest.raises(BusinessError) as invalid_version:
+        service.delete(created.id, "0", ACTOR)
+    with pytest.raises(BusinessError):
+        service.list("bad\ncursor", 20, ACTOR)
+    with pytest.raises(BusinessError):
+        service.list("", 101, ACTOR)
+    with pytest.raises(BusinessError):
+        service.get("\n", ACTOR)
+    with pytest.raises(BusinessError):
+        service.create(write_one(), ACTOR.model_copy(update={"user_id": ""}))
+
+    assert missing.value.kind == BusinessErrorKind.NOT_FOUND
+    assert stale.value.kind == BusinessErrorKind.CONFLICT
+    assert invalid_version.value.kind == BusinessErrorKind.INVALID_INPUT
+
+
+class SecurityService:
+    def authenticate(self, session_token: str, bearer_token: str) -> Principal:
+        del session_token
+        if bearer_token != "api-secret":
+            raise AssertionError("test requires bearer authentication")
+        return ACTOR
+
+    def authorize(
+        self,
+        actor: Principal,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> None:
+        del actor, ip_address, user_agent
+        assert permission.startswith("{{.Business.PermissionPrefix}}:")
+
+
+def test_http_crud_contract_and_error_mapping() -> None:
+    application = FastAPI()
+    application.state.identity_service = SecurityService()
+    application.state.business_service = {{.Business.EntityClass}}Service(MemoryRepository(), lambda: NOW)
+    install_identity_errors(application)
+    install_error_handlers(application)
+    application.include_router(router)
+    client = TestClient(application, headers={"Authorization": "Bearer api-secret"})
+    first = write_one().model_dump(mode="json")
+    second = write_two().model_dump(mode="json")
+
+    created = client.post("{{.Business.RoutePath}}", json=first)
+    record_id = created.json()["id"]
+    fetched = client.get(f"{{.Business.RoutePath}}/{record_id}")
+    page = client.get("{{.Business.RoutePath}}", params={"limit": 20})
+    updated = client.put(
+        f"{{.Business.RoutePath}}/{record_id}",
+        json={**second, "version": created.json()["version"]},
+    )
+    removed = client.delete(
+        f"{{.Business.RoutePath}}/{record_id}", params={"version": updated.json()["version"]}
+    )
+    missing = client.get(f"{{.Business.RoutePath}}/{record_id}")
+
+    assert created.status_code == 201
+    assert fetched.status_code == 200
+    assert len(page.json()["items"]) == 1
+    assert updated.json()["version"] == "2"
+    assert removed.status_code == 204
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "{{.Business.PermissionPrefix}}.not_found"
