@@ -1,0 +1,32 @@
+export default defineNuxtConfig({
+  compatibilityDate: "2026-09-01",
+  css: ["~/assets/css/main.css"],
+  devtools: { enabled: false },
+  modules: ["@nuxt/eslint"],
+  runtimeConfig: {
+    apiBaseUrl: process.env.SCAFFOLD_API_BASE_URL || "http://127.0.0.1:8080",
+  },
+  app: {
+    head: {
+      htmlAttrs: { lang: "en" },
+      title: [[.DisplayNameJSON]],
+      meta: [
+        { charset: "utf-8" },
+        { name: "viewport", content: "width=device-width, initial-scale=1" },
+        {
+          name: "description",
+          content: [[.DescriptionJSON]],
+        },
+      ],
+    },
+  },
+  routeRules: {
+    "/**": {
+      headers: {
+        "referrer-policy": "strict-origin-when-cross-origin",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+      },
+    },
+  },
+});

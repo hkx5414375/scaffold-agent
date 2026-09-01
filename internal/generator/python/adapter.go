@@ -18,6 +18,7 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
+	storefrontui "github.com/hkx5414375/scaffold-agent/internal/generator/storefront"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -27,6 +28,8 @@ const (
 	baseVersion             = "0.1.0"
 	crudOwner               = "python-crud"
 	crudVersion             = "0.1.0"
+	storefrontOwner         = storefrontui.Owner
+	storefrontVersion       = storefrontui.Version
 	tenancyOwner            = "organization-tenancy"
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
@@ -268,9 +271,10 @@ type businessField struct {
 }
 
 type renderTarget struct {
-	Template    string
-	Owner       string
-	SharedAdmin bool
+	Template         string
+	Owner            string
+	SharedAdmin      bool
+	SharedStorefront bool
 }
 
 var baseTemplates = map[string]string{
@@ -466,8 +470,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
 		return generator.Result{}, fmt.Errorf("the Python adapter supports only the Element Plus administration UI")
 	}
-	if enabled(project.Spec.Stack.Storefront) {
-		return generator.Result{}, fmt.Errorf("the Python adapter does not generate a storefront yet")
+	storefrontEnabled := enabled(project.Spec.Stack.Storefront)
+	if storefrontEnabled && project.Spec.Stack.Storefront != "nuxt" {
+		return generator.Result{}, fmt.Errorf("the Python adapter supports only the Nuxt storefront")
 	}
 	if !hasExactAuthModes(project.Spec.Auth.Modes, "session", "token") {
 		return generator.Result{}, fmt.Errorf("the Python adapter requires both session and token authentication")
@@ -577,7 +582,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+4,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(storefrontui.BaseTemplates)+4,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -745,6 +750,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if storefrontEnabled {
+		for path, templatePath := range storefrontui.BaseTemplates {
+			targets[path] = renderTarget{
+				Template:         templatePath,
+				Owner:            storefrontui.Owner,
+				SharedStorefront: true,
+			}
+		}
+	}
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -761,6 +775,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		var err error
 		if target.SharedAdmin {
 			content, err = adminui.Render(target.Template, data)
+		} else if target.SharedStorefront {
+			content, err = storefrontui.Render(
+				target.Template,
+				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+			)
 		} else {
 			content, err = render(target.Template, data)
 		}
@@ -775,6 +794,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if adminEnabled {
 		capabilityLock[adminui.Owner] = adminui.Version
+	}
+	if storefrontEnabled {
+		capabilityLock[storefrontOwner] = storefrontVersion
 	}
 	if tenancyEnabled {
 		capabilityLock[tenancyOwner] = selectedTenancyVersion

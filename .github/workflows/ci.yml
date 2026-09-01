@@ -61,6 +61,28 @@ jobs:
           SCAFFOLD_AGENT_RUN_ADMIN_BUILD: "1"
         run: go test ./internal/engine -run '^(TestGoPlanApplyVerifyEndToEnd|TestGoTenantLifecyclePostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantFilesPostgreSQLPlanApplyVerifyEndToEnd|TestGoFilesWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantJobAdministrationPostgreSQLPlanApplyVerifyEndToEnd|TestGoJobAdministrationWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantCSVImportExportPostgreSQLPlanApplyVerifyEndToEnd|TestGoTenantApprovalWorkflowsPostgreSQLPlanApplyVerifyEndToEnd|TestJavaPostgreSQLTenancyLifecyclePlanApplyVerifyEndToEnd|TestJavaPostgreSQLPlatformCapabilitiesCompose|TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantFilesPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantJobAdministrationPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantCSVImportExportPlanApplyVerifyEndToEnd|TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd|TestPythonPostgreSQLPlatformCapabilitiesCompose)$' -count=1
 
+  generated-storefront:
+    name: Shared generated Nuxt storefront foundation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: internal/generator/storefront/templates/package-lock.json
+      - name: Audit locked dependencies
+        working-directory: internal/generator/storefront/templates
+        run: npm audit --package-lock-only --audit-level=high
+      - name: Generate all backend variants and run storefront quality gates
+        env:
+          SCAFFOLD_AGENT_RUN_STOREFRONT_BUILD: "1"
+        run: go test ./internal/engine -run '^TestSharedNuxtStorefrontPlanApplyVerifyAllBackends$' -count=1
+
   generated-java:
     name: Generated Java identity and CRUD
     runs-on: ubuntu-latest

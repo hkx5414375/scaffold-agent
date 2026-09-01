@@ -1,0 +1,92 @@
+<script setup lang="ts">
+import type { StorefrontStatus } from "../../shared/types/storefront";
+
+const { data, error, refresh, status } = await useFetch<StorefrontStatus>(
+  "/api/storefront/status",
+  { key: "storefront-status" },
+);
+
+const backendAvailable = computed(
+  () => !error.value && data.value?.available === true,
+);
+const handleRefresh = (): void => {
+  void refresh();
+};
+</script>
+
+<template>
+  <div class="home-page">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">[[.ProjectName]]</p>
+        <h1>[[.DisplayNameHTML]]</h1>
+        <p class="hero-summary">
+          A server-rendered Nuxt storefront foundation with a bounded backend
+          boundary, deterministic dependencies, and production quality gates.
+        </p>
+        <div class="hero-actions">
+          <a class="primary-action" href="#foundation"
+            >Explore the foundation</a
+          >
+          <button
+            class="secondary-action"
+            type="button"
+            :disabled="status === 'pending'"
+            @click="handleRefresh"
+          >
+            Recheck backend
+          </button>
+        </div>
+      </div>
+      <aside class="status-card" aria-live="polite">
+        <span
+          :class="['status-dot', { available: backendAvailable }]"
+          aria-hidden="true"
+        />
+        <div>
+          <strong>{{
+            backendAvailable ? "Backend available" : "Backend unavailable"
+          }}</strong>
+          <p>No backend error details are exposed to the browser.</p>
+        </div>
+      </aside>
+    </section>
+
+    <section
+      id="foundation"
+      class="foundation-grid"
+      aria-labelledby="foundation-title"
+    >
+      <div class="section-heading">
+        <p class="eyebrow">Foundation 0.1</p>
+        <h2 id="foundation-title">
+          The stable shell before commerce features.
+        </h2>
+      </div>
+      <article>
+        <span>01</span>
+        <h3>Server boundary</h3>
+        <p>
+          The browser calls a local Nuxt endpoint. Backend locations remain
+          server-only runtime configuration.
+        </p>
+      </article>
+      <article>
+        <span>02</span>
+        <h3>Safe failures</h3>
+        <p>
+          Timeouts and upstream details collapse into a small public
+          availability contract.
+        </p>
+      </article>
+      <article>
+        <span>03</span>
+        <h3>Composable surface</h3>
+        <p>
+          Catalog, cart, checkout, and account capabilities can extend this
+          project without replacing its base.
+        </p>
+      </article>
+    </section>
+  </div>
+</template>

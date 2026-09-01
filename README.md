@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. Generated Python projects additionally enforce deterministic uv locks, Ruff, strict mypy, Bandit, pytest coverage, and live-database gates. Nuxt storefronts remain in progress; schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can also generate the same locked Nuxt 4 SSR storefront foundation with a server-only backend boundary and complete frontend quality gates. Commerce capability pages remain in progress; schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -34,6 +34,7 @@ Prerequisites:
 - Go 1.27 or newer in the 1.27 release line
 - Git
 - Node.js 22.12 or newer when validating generated frontends
+- Node.js 24.11 or newer when validating generated Nuxt storefronts
 - Python 3.12 or 3.13 and uv 0.12.8 when validating generated Python services
 
 Run the baseline checks:
@@ -68,6 +69,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/job-admin-task-se
 go run ./cmd/scaffold-agent validate --project-root ./examples/observability-task-service-python --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/csv-transfer-task-service-python --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/approval-task-service-python --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/storefront-foundation --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

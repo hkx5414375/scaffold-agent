@@ -17,6 +17,7 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
+	storefrontui "github.com/hkx5414375/scaffold-agent/internal/generator/storefront"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -28,6 +29,8 @@ const (
 	businessVersion         = "0.3.0"
 	adminCapability         = adminui.Owner
 	adminVersion            = adminui.Version
+	storefrontCapability    = storefrontui.Owner
+	storefrontVersion       = storefrontui.Version
 	tenancyCapability       = "organization-tenancy"
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
@@ -427,8 +430,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !supported {
 		return generator.Result{}, fmt.Errorf("the Go adapter supports only PostgreSQL and MySQL")
 	}
-	if enabled(project.Spec.Stack.Storefront) {
-		return generator.Result{}, fmt.Errorf("the Go adapter does not generate a storefront yet")
+	storefrontEnabled := enabled(project.Spec.Stack.Storefront)
+	if storefrontEnabled && project.Spec.Stack.Storefront != "nuxt" {
+		return generator.Result{}, fmt.Errorf("the Go adapter supports only the Nuxt storefront")
 	}
 	adminEnabled := enabled(project.Spec.Stack.AdminUI)
 	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
@@ -547,7 +551,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if approvalsEnabled {
 		data.MigrationCount++
 	}
-	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+1)
+	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+len(storefrontui.BaseTemplates)+1)
 	for path, templatePath := range outputTemplates {
 		targets[path] = renderTarget{TemplatePath: templatePath, Owner: baseCapability}
 	}
@@ -588,6 +592,16 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 		capabilityLock[adminCapability] = adminVersion
+	}
+	if storefrontEnabled {
+		for path, templatePath := range storefrontui.BaseTemplates {
+			targets[path] = renderTarget{
+				TemplatePath:     templatePath,
+				Owner:            storefrontCapability,
+				SharedStorefront: true,
+			}
+		}
+		capabilityLock[storefrontCapability] = storefrontVersion
 	}
 	if tenancyEnabled {
 		for path, templatePath := range tenancyTemplates {
@@ -739,6 +753,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		var err error
 		if target.SharedAdmin {
 			content, err = adminui.Render(target.TemplatePath, data)
+		} else if target.SharedStorefront {
+			content, err = storefrontui.Render(
+				target.TemplatePath,
+				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+			)
 		} else {
 			content, err = render(target.TemplatePath, data)
 		}
@@ -807,9 +826,10 @@ type databaseData struct {
 }
 
 type renderTarget struct {
-	TemplatePath string
-	Owner        string
-	SharedAdmin  bool
+	TemplatePath     string
+	Owner            string
+	SharedAdmin      bool
+	SharedStorefront bool
 }
 
 type businessData struct {

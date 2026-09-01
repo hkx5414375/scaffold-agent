@@ -8,6 +8,7 @@ import (
 
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
+	storefrontui "github.com/hkx5414375/scaffold-agent/internal/generator/storefront"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 	"go.yaml.in/yaml/v3"
 )
@@ -60,6 +61,35 @@ func TestGenerateFoundationForBothDatabases(t *testing.T) {
 	}
 }
 
+func TestGenerateSharedNuxtStorefrontFoundation(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Metadata.DisplayName = "Demo Store"
+	project.Spec.Stack.Storefront = "nuxt"
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 29+len(storefrontui.BaseTemplates) ||
+		generated.CapabilityLock[storefrontOwner] != storefrontVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	for _, path := range []string{
+		"web/storefront/package-lock.json",
+		"web/storefront/nuxt.config.ts",
+		"web/storefront/app/pages/index.vue",
+		"web/storefront/server/api/storefront/status.get.ts",
+	} {
+		if outputContent(generated, path) == nil || outputOwner(generated, path) != storefrontOwner {
+			t.Errorf("Generate() storefront output %s is missing or has the wrong owner", path)
+		}
+	}
+	if !strings.Contains(string(outputContent(generated, "web/storefront/app/pages/index.vue")), "Demo Store") {
+		t.Fatal("generated storefront does not use the project display name")
+	}
+}
+
 func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 	t.Parallel()
 
@@ -69,7 +99,7 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 		want   string
 	}{
 		{name: "admin", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "unsupported" }, want: "Element Plus"},
-		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }, want: "storefront"},
+		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "unsupported" }, want: "Nuxt"},
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
 			project.Spec.Capabilities = []spec.CapabilitySelection{{Name: "unsupported", Version: "0.1.0"}}

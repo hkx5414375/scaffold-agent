@@ -1,0 +1,28 @@
+# [[.ProjectName]] storefront
+
+This Nuxt storefront foundation is generated deterministically by Scaffold Agent.
+It provides the shared SSR shell and bounded backend boundary that later catalog,
+cart, checkout, order, account, and marketing capability packs extend.
+
+## Runtime
+
+- Node.js 24.11 or newer
+- `SCAFFOLD_API_BASE_URL`: server-only backend base URL; defaults to `http://127.0.0.1:8080`
+
+The browser calls `GET /api/storefront/status`. Nuxt calls the generated backend
+`GET /readyz` with a two-second deadline and never exposes its address or failure
+details to the browser.
+
+## Commands
+
+```bash
+npm ci
+npm run lint
+npm run test
+npm run typecheck
+npm run build
+npm run format
+```
+
+Do not place API tokens, payment secrets, backend credentials, or private customer
+data in `runtimeConfig.public`, client components, browser storage, or source files.

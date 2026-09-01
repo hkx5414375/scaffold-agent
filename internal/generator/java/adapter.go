@@ -16,6 +16,7 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
 	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
+	storefrontui "github.com/hkx5414375/scaffold-agent/internal/generator/storefront"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -27,6 +28,8 @@ const (
 	businessVersion         = "0.1.0"
 	adminOwner              = adminui.Owner
 	adminVersion            = adminui.Version
+	storefrontOwner         = storefrontui.Owner
+	storefrontVersion       = storefrontui.Version
 	tenancyOwner            = "organization-tenancy"
 	tenancyVersion          = "0.1.0"
 	tenancyMembersVersion   = "0.2.0"
@@ -321,8 +324,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !supported {
 		return generator.Result{}, fmt.Errorf("the Java adapter supports only PostgreSQL and MySQL")
 	}
-	if enabled(project.Spec.Stack.Storefront) {
-		return generator.Result{}, fmt.Errorf("the Java adapter does not generate a storefront yet")
+	storefrontEnabled := enabled(project.Spec.Stack.Storefront)
+	if storefrontEnabled && project.Spec.Stack.Storefront != "nuxt" {
+		return generator.Result{}, fmt.Errorf("the Java adapter supports only the Nuxt storefront")
 	}
 	adminEnabled := enabled(project.Spec.Stack.AdminUI)
 	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
@@ -456,12 +460,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Approvals:        approvalsEnabled,
 		MigrationCount:   migrationCount,
 	}
-	targets := make(map[string]string, len(outputTemplates)+20)
+	targets := make(map[string]string, len(outputTemplates)+len(storefrontui.BaseTemplates)+20)
 	for path, templatePath := range outputTemplates {
 		targets[path] = templatePath
 	}
 	businessPaths := make(map[string]struct{}, 9)
 	adminPaths := make(map[string]struct{}, len(adminui.BaseTemplates)+1)
+	storefrontPaths := make(map[string]struct{}, len(storefrontui.BaseTemplates))
 	tenancyPaths := make(map[string]struct{}, 27)
 	jobsPaths := make(map[string]struct{}, 12)
 	notificationPaths := make(map[string]struct{}, 11)
@@ -478,6 +483,10 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addAdminTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		adminPaths[path] = struct{}{}
+	}
+	addStorefrontTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		storefrontPaths[path] = struct{}{}
 	}
 	addTenancyTarget := func(path, templatePath string) {
 		targets[path] = templatePath
@@ -839,6 +848,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[adminOwner] = adminVersion
 	}
+	if storefrontEnabled {
+		for path, templatePath := range storefrontui.BaseTemplates {
+			addStorefrontTarget(path, templatePath)
+		}
+		capabilityLock[storefrontOwner] = storefrontVersion
+	}
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -854,6 +869,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		var err error
 		if _, isAdminPath := adminPaths[path]; isAdminPath {
 			content, err = adminui.Render(targets[path], data)
+		} else if _, isStorefrontPath := storefrontPaths[path]; isStorefrontPath {
+			content, err = storefrontui.Render(
+				targets[path],
+				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+			)
 		} else {
 			content, err = render(targets[path], data)
 		}
@@ -866,6 +886,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isAdminPath := adminPaths[path]; isAdminPath {
 			owner = adminOwner
+		}
+		if _, isStorefrontPath := storefrontPaths[path]; isStorefrontPath {
+			owner = storefrontOwner
 		}
 		if _, isTenancyPath := tenancyPaths[path]; isTenancyPath {
 			owner = tenancyOwner

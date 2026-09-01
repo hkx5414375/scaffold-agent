@@ -81,7 +81,15 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 
 ## M7 — General business suite and storefront
 
-Membership, CRM, ERP and inventory, commerce, marketing, payment abstraction, sandbox adapters, and Nuxt storefront.
+- [x] Shared Nuxt 4 storefront foundation for Go, Java, and Python with SSR, a server-only backend boundary, deterministic locks, safe failures, and complete frontend quality gates.
+- [ ] Customer accounts and membership lifecycle.
+- [ ] CRM contacts, organizations, activities, and pipeline.
+- [ ] ERP catalog, procurement, stock ledger, reservations, and inventory movements.
+- [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
+- [ ] Marketing campaigns, coupons, and promotion evaluation.
+- [ ] Payment abstraction with idempotent intents, callbacks, refunds, and reconciliation.
+- [ ] Deterministic sandbox adapters for email, object storage, payments, and commerce demonstrations.
+- [ ] Nuxt catalog, cart, checkout, account, and order capability pages.
 
 ## M8 — Cross-agent conformance
 

@@ -106,6 +106,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"python-safe-http-observability",
 				"python-atomic-csv-import-export",
 				"python-portable-approval-workflows",
+				"shared-nuxt-storefront-foundation",
 			},
 			ContractTargets: map[string][]string{
 				"backends":   {"go", "java", "python"},

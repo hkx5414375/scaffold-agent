@@ -1,0 +1,14 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: storefront-foundation
+  display_name: Storefront Foundation
+spec:
+  stack:
+    backend: go
+    admin_ui: none
+    storefront: nuxt
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]

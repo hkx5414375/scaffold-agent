@@ -10,6 +10,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	storefrontui "github.com/hkx5414375/scaffold-agent/internal/generator/storefront"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -42,6 +43,36 @@ func TestGenerateBaseServiceIsDeterministic(t *testing.T) {
 				t.Fatalf("generated %q is not gofmt formatted", first.Outputs[index].Path)
 			}
 		}
+	}
+}
+
+func TestGenerateSharedNuxtStorefrontFoundation(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Metadata.DisplayName = "Demo Store"
+	project.Spec.Stack.Storefront = "nuxt"
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	wantOutputs := len(outputTemplates) + len(databaseTemplates["postgresql"].Outputs) + len(storefrontui.BaseTemplates)
+	if len(generated.Outputs) != wantOutputs ||
+		generated.CapabilityLock[storefrontCapability] != storefrontVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	for _, path := range []string{
+		"web/storefront/package-lock.json",
+		"web/storefront/nuxt.config.ts",
+		"web/storefront/app/pages/index.vue",
+		"web/storefront/server/api/storefront/status.get.ts",
+	} {
+		if outputContent(generated, path) == nil || outputOwner(generated, path) != storefrontCapability {
+			t.Errorf("Generate() storefront output %s is missing or has the wrong owner", path)
+		}
+	}
+	if !strings.Contains(string(outputContent(generated, "web/storefront/app/pages/index.vue")), "Demo Store") {
+		t.Fatal("generated storefront does not use the project display name")
 	}
 }
 
@@ -778,7 +809,7 @@ func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
 		mutate func(*spec.Project)
 	}{
 		{name: "unsupported database", mutate: func(project *spec.Project) { project.Spec.Database.Engine = "sqlite" }},
-		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }},
+		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "unsupported" }},
 		{name: "single auth mode", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }},
 	}
 	for _, test := range tests {
@@ -856,4 +887,13 @@ func outputContent(generated generator.Result, path string) []byte {
 		}
 	}
 	return nil
+}
+
+func outputOwner(generated generator.Result, path string) string {
+	for _, output := range generated.Outputs {
+		if output.Path == path {
+			return output.Owner
+		}
+	}
+	return ""
 }
