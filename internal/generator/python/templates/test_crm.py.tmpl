@@ -1,0 +1,485 @@
+"""CRM normalization, lifecycle, isolation, and failure contracts."""
+
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.crm.models import (
+    AccountUpdate,
+    AccountWrite,
+    ActivityType,
+    ActivityWrite,
+    ContactUpdate,
+    ContactWrite,
+    CRMAccount,
+    CRMActivity,
+    CRMContact,
+    CRMError,
+    CRMErrorKind,
+    CRMOpportunity,
+    CRMStageTransition,
+    CRMTransition,
+    OpportunityStage,
+    OpportunityUpdate,
+    OpportunityWrite,
+    RecordStatus,
+    SubjectType,
+)
+from {{.PackageName}}.crm.repository import (
+    AccountMutation,
+    AccountPageResult,
+    ActivityPageResult,
+    ContactMutation,
+    ContactPageResult,
+    CRMConflict,
+    CRMNotFound,
+    OpportunityMutation,
+    OpportunityPageResult,
+    RecordTransition,
+    StageTransition,
+)
+from {{.PackageName}}.crm.service import CRMService
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.accounts: dict[str, CRMAccount] = {}
+        self.contacts: dict[str, CRMContact] = {}
+        self.activities: dict[str, CRMActivity] = {}
+        self.opportunities: dict[str, CRMOpportunity] = {}
+        self.audits: list[AuditEvent] = []
+        self.failure: Exception | None = None
+
+    def create_account(self, value: CRMAccount, audit: AuditEvent) -> None:
+        self._fail()
+        self.accounts[value.id] = value
+        self.audits.append(audit)
+
+    def get_account(self, organization_id: str, record_id: str) -> CRMAccount | None:
+        self._fail()
+        return _scoped(self.accounts.get(record_id), organization_id)
+
+    def list_accounts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> AccountPageResult:
+        self._fail()
+        values = _page(self.accounts.values(), organization_id, status, cursor)
+        return AccountPageResult(values[:limit], _next(values, limit))
+
+    def update_account(self, value: AccountMutation, audit: AuditEvent) -> CRMAccount:
+        current = self.get_account(value.organization_id, value.account_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.status != RecordStatus.ACTIVE
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "name": value.name,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.accounts[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def transition_account(self, value: RecordTransition, audit: AuditEvent) -> CRMAccount:
+        current = self.get_account(value.organization_id, value.record_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.status != value.from_status
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "status": value.to_status,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.accounts[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def create_contact(self, value: CRMContact, audit: AuditEvent) -> None:
+        self._fail()
+        if value.account_id and self.get_account(_organization(value), value.account_id) is None:
+            raise CRMNotFound()
+        if value.email and any(
+            item.email == value.email and _organization(item) == _organization(value)
+            for item in self.contacts.values()
+        ):
+            raise CRMConflict()
+        self.contacts[value.id] = value
+        self.audits.append(audit)
+
+    def get_contact(self, organization_id: str, record_id: str) -> CRMContact | None:
+        self._fail()
+        return _scoped(self.contacts.get(record_id), organization_id)
+
+    def list_contacts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ContactPageResult:
+        self._fail()
+        values = _page(self.contacts.values(), organization_id, status, cursor)
+        return ContactPageResult(values[:limit], _next(values, limit))
+
+    def update_contact(self, value: ContactMutation, audit: AuditEvent) -> CRMContact:
+        current = self.get_contact(value.organization_id, value.contact_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.status != RecordStatus.ACTIVE
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "account_id": value.account_id,
+                "name": value.name,
+                "email": value.email,
+                "phone": value.phone,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.contacts[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def transition_contact(self, value: RecordTransition, audit: AuditEvent) -> CRMContact:
+        current = self.get_contact(value.organization_id, value.record_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.status != value.from_status
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "status": value.to_status,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.contacts[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def create_activity(self, value: CRMActivity, audit: AuditEvent) -> None:
+        self._fail()
+        if value.subject_type == SubjectType.ACCOUNT:
+            subject: CRMAccount | CRMContact | CRMOpportunity | None = self.accounts.get(
+                value.subject_id
+            )
+        elif value.subject_type == SubjectType.CONTACT:
+            subject = self.contacts.get(value.subject_id)
+        else:
+            subject = self.opportunities.get(value.subject_id)
+        if subject is None or _organization(subject) != _organization(value):
+            raise CRMNotFound()
+        self.activities[value.id] = value
+        self.audits.append(audit)
+
+    def list_activities(
+        self,
+        organization_id: str,
+        subject_type: str,
+        subject_id: str,
+        cursor: str,
+        limit: int,
+    ) -> ActivityPageResult:
+        self._fail()
+        values = sorted(
+            (
+                item
+                for item in self.activities.values()
+                if _organization(item) == organization_id
+                and (not subject_type or item.subject_type.value == subject_type)
+                and (not subject_id or item.subject_id == subject_id)
+                and (not cursor or item.id > cursor)
+            ),
+            key=lambda item: item.id,
+        )
+        return ActivityPageResult(values[:limit], _next(values, limit))
+
+    def create_opportunity(self, value: CRMOpportunity, audit: AuditEvent) -> None:
+        self._fail()
+        account = self.get_account(_organization(value), value.account_id)
+        if account is None or account.status != RecordStatus.ACTIVE:
+            raise CRMNotFound()
+        self.opportunities[value.id] = value
+        self.audits.append(audit)
+
+    def get_opportunity(self, organization_id: str, record_id: str) -> CRMOpportunity | None:
+        self._fail()
+        return _scoped(self.opportunities.get(record_id), organization_id)
+
+    def list_opportunities(
+        self, organization_id: str, stage: str, cursor: str, limit: int
+    ) -> OpportunityPageResult:
+        self._fail()
+        values = sorted(
+            (
+                item
+                for item in self.opportunities.values()
+                if _organization(item) == organization_id
+                and (not stage or item.stage.value == stage)
+                and (not cursor or item.id > cursor)
+            ),
+            key=lambda item: item.id,
+        )
+        return OpportunityPageResult(values[:limit], _next(values, limit))
+
+    def update_opportunity(self, value: OpportunityMutation, audit: AuditEvent) -> CRMOpportunity:
+        current = self.get_opportunity(value.organization_id, value.opportunity_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.stage in {OpportunityStage.WON, OpportunityStage.LOST}
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "account_id": value.account_id,
+                "name": value.name,
+                "amount_minor": str(value.amount_minor),
+                "currency": value.currency,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.opportunities[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def advance_opportunity(self, value: StageTransition, audit: AuditEvent) -> CRMOpportunity:
+        current = self.get_opportunity(value.organization_id, value.opportunity_id)
+        if (
+            current is None
+            or int(current.version) != value.expected_version
+            or current.stage != value.from_stage
+        ):
+            raise CRMConflict()
+        changed = current.model_copy(
+            update={
+                "stage": value.to_stage,
+                "version": str(value.expected_version + 1),
+                "updated_at": value.updated_at,
+            }
+        )
+        self.opportunities[changed.id] = changed
+        self.audits.append(audit)
+        return changed
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+CRMValue = CRMAccount | CRMContact | CRMActivity | CRMOpportunity
+
+
+def _scoped[RecordValue: (CRMAccount, CRMContact, CRMActivity, CRMOpportunity)](
+    value: RecordValue | None, organization_id: str
+) -> RecordValue | None:
+    if value is None or _organization(value) != organization_id:
+        return None
+    return value
+
+
+def _organization(value: CRMValue) -> str:
+    return {{if .Tenancy}}value.organization_id{{else}}""{{end}}
+
+
+def _page[PageValue: (CRMAccount, CRMContact)](
+    source: Iterable[PageValue], organization_id: str, status: str, cursor: str
+) -> list[PageValue]:
+    values = [
+        item
+        for item in source
+        if _organization(item) == organization_id
+        and (not status or item.status.value == status)
+        and (not cursor or item.id > cursor)
+    ]
+    return sorted(values, key=lambda item: item.id)
+
+
+def _next[RecordValue: (CRMAccount, CRMContact, CRMActivity, CRMOpportunity)](
+    values: list[RecordValue], limit: int
+) -> str:
+    return values[limit - 1].id if len(values) > limit else ""
+
+
+def _actor(user_id: str = "admin-1") -> Principal:
+    return Principal(
+        user_id=user_id,
+        email="admin@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id="organization-1",
+{{- end}}
+    )
+
+
+def _service(repository: MemoryRepository) -> CRMService:
+    return CRMService(repository, lambda: NOW)
+
+
+def test_full_record_lifecycle_and_forward_only_pipeline() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    account = service.create_account(AccountWrite(name=" Acme "), actor)
+    contact = service.create_contact(
+        ContactWrite(
+            account_id=account.id,
+            name=" Ada ",
+            email="ADA@EXAMPLE.COM",
+            phone=" +1 555 0100 ",
+        ),
+        actor,
+    )
+    activity = service.create_activity(
+        ActivityWrite(
+            subject_type=SubjectType.CONTACT,
+            subject_id=contact.id,
+            type=ActivityType.CALL,
+            summary=" Discovery call ",
+            occurred_at=NOW,
+        ),
+        actor,
+    )
+    opportunity = service.create_opportunity(
+        OpportunityWrite(
+            account_id=account.id,
+            name=" Expansion ",
+            amount_minor="12500",
+            currency="usd",
+        ),
+        actor,
+    )
+
+    assert account.name == "Acme"
+    assert contact.email == "ada@example.com"
+    assert activity.summary == "Discovery call"
+    assert opportunity.amount_minor == "12500"
+    assert service.get_account(account.id, actor) == account
+    assert service.get_contact(contact.id, actor) == contact
+    assert service.get_opportunity(opportunity.id, actor) == opportunity
+    assert service.list_accounts("active", "", 20, actor).items == [account]
+    assert service.list_contacts("active", "", 20, actor).items == [contact]
+    assert service.list_activities("contact", contact.id, "", 20, actor).items == [activity]
+    assert service.list_opportunities("lead", "", 20, actor).items == [opportunity]
+
+    account = service.update_account(account.id, AccountUpdate(name="Acme Two", version="1"), actor)
+    contact = service.update_contact(
+        contact.id,
+        ContactUpdate(name="Ada Two", email="ada2@example.com", version="1"),
+        actor,
+    )
+    opportunity = service.update_opportunity(
+        opportunity.id,
+        OpportunityUpdate(
+            account_id=account.id,
+            name="Expansion Two",
+            amount_minor="13000",
+            currency="EUR",
+            version="1",
+        ),
+        actor,
+    )
+    qualified = service.advance_opportunity(
+        opportunity.id,
+        CRMStageTransition(stage=OpportunityStage.QUALIFIED, version="2"),
+        actor,
+    )
+    assert qualified.stage == OpportunityStage.QUALIFIED
+    with pytest.raises(CRMError) as skipped:
+        service.advance_opportunity(
+            qualified.id,
+            CRMStageTransition(stage=OpportunityStage.WON, version="3"),
+            actor,
+        )
+    assert skipped.value.kind == CRMErrorKind.CONFLICT
+
+    archived_account = service.archive_account(account.id, CRMTransition(version="2"), actor)
+    archived_contact = service.archive_contact(contact.id, CRMTransition(version="2"), actor)
+    assert (
+        service.reactivate_account(
+            account.id, CRMTransition(version=archived_account.version), actor
+        ).status
+        == RecordStatus.ACTIVE
+    )
+    assert (
+        service.reactivate_contact(
+            contact.id, CRMTransition(version=archived_contact.version), actor
+        ).status
+        == RecordStatus.ACTIVE
+    )
+    assert len(repository.audits) == 12
+
+
+def test_validation_conflicts_pagination_and_storage_failures() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    account = service.create_account(AccountWrite(name="A"), actor)
+    service.create_account(AccountWrite(name="B"), actor)
+    page = service.list_accounts("", "", 1, actor)
+    assert len(page.items) == 1
+    assert page.next_cursor
+
+    operations: list[Callable[[], object]] = [
+        lambda: service.get_account(" ", actor),
+        lambda: service.list_accounts("unknown", "", 20, actor),
+        lambda: service.list_contacts("", "x" * 192, 20, actor),
+        lambda: service.list_opportunities("", "", 101, actor),
+        lambda: service.list_activities("contact", "", "", 20, actor),
+        lambda: service.create_contact(ContactWrite(name="bad\nname"), actor),
+        lambda: service.create_opportunity(
+            OpportunityWrite(
+                account_id=account.id,
+                name="Deal",
+                amount_minor="9223372036854775808",
+                currency="USD",
+            ),
+            actor,
+        ),
+    ]
+    for operation in operations:
+        with pytest.raises(CRMError) as failure:
+            operation()
+        assert failure.value.kind == CRMErrorKind.INVALID
+
+    with pytest.raises(CRMError) as missing:
+        service.create_opportunity(
+            OpportunityWrite(account_id="missing", name="Deal", amount_minor="1", currency="USD"),
+            actor,
+        )
+    assert missing.value.kind == CRMErrorKind.NOT_FOUND
+
+    service.create_contact(ContactWrite(name="Ada", email="ada@example.com"), actor)
+    with pytest.raises(CRMError) as duplicate:
+        service.create_contact(ContactWrite(name="Other", email="ADA@example.com"), actor)
+    assert duplicate.value.kind == CRMErrorKind.CONFLICT
+
+    repository.failure = RuntimeError("database password")
+    with pytest.raises(CRMError) as storage:
+        service.list_accounts("", "", 20, actor)
+    assert storage.value.kind == CRMErrorKind.STORAGE
+    assert "database password" not in storage.value.message
+
+    with pytest.raises(CRMError):
+        _service(MemoryRepository()).create_account(AccountWrite(name="A"), _actor(""))
+    with pytest.raises(CRMError):
+        CRMService(MemoryRepository(), lambda: NOW.replace(tzinfo=None)).create_account(
+            AccountWrite(name="A"), actor
+        )

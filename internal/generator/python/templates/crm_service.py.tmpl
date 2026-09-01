@@ -1,0 +1,630 @@
+"""Portable CRM use cases and lifecycle rules."""
+
+import re
+from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import parseaddr
+from typing import NoReturn
+from uuid import uuid4
+
+from {{.PackageName}}.crm.models import (
+    AccountPage,
+    AccountUpdate,
+    AccountWrite,
+    ActivityPage,
+    ActivityWrite,
+    ContactPage,
+    ContactUpdate,
+    ContactWrite,
+    CRMAccount,
+    CRMActivity,
+    CRMContact,
+    CRMError,
+    CRMErrorKind,
+    CRMOpportunity,
+    CRMStageTransition,
+    CRMTransition,
+    OpportunityPage,
+    OpportunityStage,
+    OpportunityUpdate,
+    OpportunityWrite,
+    RecordStatus,
+    SubjectType,
+)
+from {{.PackageName}}.crm.repository import (
+    AccountMutation,
+    ContactMutation,
+    CRMConflict,
+    CRMNotFound,
+    CRMRepository,
+    OpportunityMutation,
+    RecordTransition,
+    StageTransition,
+)
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+MAXIMUM_INTEGER = 2**63 - 1
+MAXIMUM_IDENTIFIER_LENGTH = 191
+CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+STATUSES = {status.value for status in RecordStatus}
+STAGES = {stage.value for stage in OpportunityStage}
+SUBJECTS = {subject.value for subject in SubjectType}
+
+
+class CRMService:
+    """Enforce CRM normalization, tenant scope, and state machines."""
+
+    def __init__(
+        self,
+        repository: CRMRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def create_account(self, value: AccountWrite, actor: Principal) -> CRMAccount:
+        """Create one active business account."""
+{{- if .Tenancy}}
+        organization_id = _actor_scope(actor)
+{{- else}}
+        _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        account = CRMAccount(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            name=_required(value.name, 160),
+            status=RecordStatus.ACTIVE,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_account(
+                account, _audit(actor, "crm:accounts:create", account.id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return account
+
+    def get_account(self, record_id: str, actor: Principal) -> CRMAccount:
+        """Read one scoped business account."""
+        try:
+            value = self._repository.get_account(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_accounts(self, status: str, cursor: str, limit: int, actor: Principal) -> AccountPage:
+        """List business accounts in keyset order."""
+        normalized_status = status.strip()
+        _page(normalized_status, STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_accounts(
+                _actor_scope(actor), normalized_status, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return AccountPage(items=result.items, next_cursor=result.next_cursor)
+
+    def update_account(self, record_id: str, value: AccountUpdate, actor: Principal) -> CRMAccount:
+        """Update mutable account content with an optimistic version."""
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        mutation = AccountMutation(
+            organization_id=organization_id,
+            account_id=normalized_id,
+            name=_required(value.name, 160),
+            expected_version=_integer(value.version, positive=True),
+            updated_at=now,
+        )
+        try:
+            return self._repository.update_account(
+                mutation, _audit(actor, "crm:accounts:update", normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def archive_account(self, record_id: str, value: CRMTransition, actor: Principal) -> CRMAccount:
+        """Archive one active account without deleting it."""
+        return self._transition_account(
+            record_id,
+            value,
+            RecordStatus.ACTIVE,
+            RecordStatus.ARCHIVED,
+            "crm:accounts:archive",
+            actor,
+        )
+
+    def reactivate_account(
+        self, record_id: str, value: CRMTransition, actor: Principal
+    ) -> CRMAccount:
+        """Reactivate one archived account."""
+        return self._transition_account(
+            record_id,
+            value,
+            RecordStatus.ARCHIVED,
+            RecordStatus.ACTIVE,
+            "crm:accounts:reactivate",
+            actor,
+        )
+
+    def _transition_account(
+        self,
+        record_id: str,
+        value: CRMTransition,
+        from_status: RecordStatus,
+        to_status: RecordStatus,
+        action: str,
+        actor: Principal,
+    ) -> CRMAccount:
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        transition = RecordTransition(
+            organization_id,
+            normalized_id,
+            _integer(value.version, positive=True),
+            from_status,
+            to_status,
+            now,
+        )
+        try:
+            return self._repository.transition_account(
+                transition, _audit(actor, action, normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def create_contact(self, value: ContactWrite, actor: Principal) -> CRMContact:
+        """Create one active contact with an optional account association."""
+        normalized = _contact(value)
+{{- if .Tenancy}}
+        organization_id = _actor_scope(actor)
+{{- else}}
+        _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        contact = CRMContact(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            account_id=normalized.account_id,
+            name=normalized.name,
+            email=normalized.email,
+            phone=normalized.phone,
+            status=RecordStatus.ACTIVE,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_contact(
+                contact, _audit(actor, "crm:contacts:create", contact.id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return contact
+
+    def get_contact(self, record_id: str, actor: Principal) -> CRMContact:
+        """Read one scoped contact."""
+        try:
+            value = self._repository.get_contact(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_contacts(self, status: str, cursor: str, limit: int, actor: Principal) -> ContactPage:
+        """List contacts in keyset order."""
+        normalized_status = status.strip()
+        _page(normalized_status, STATUSES, cursor, limit)
+        try:
+            result = self._repository.list_contacts(
+                _actor_scope(actor), normalized_status, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return ContactPage(items=result.items, next_cursor=result.next_cursor)
+
+    def update_contact(self, record_id: str, value: ContactUpdate, actor: Principal) -> CRMContact:
+        """Replace mutable contact content with an optimistic version."""
+        normalized = _contact(value)
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        mutation = ContactMutation(
+            organization_id=organization_id,
+            contact_id=normalized_id,
+            account_id=normalized.account_id,
+            name=normalized.name,
+            email=normalized.email,
+            phone=normalized.phone,
+            expected_version=_integer(value.version, positive=True),
+            updated_at=now,
+        )
+        try:
+            return self._repository.update_contact(
+                mutation, _audit(actor, "crm:contacts:update", normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def archive_contact(self, record_id: str, value: CRMTransition, actor: Principal) -> CRMContact:
+        """Archive one active contact."""
+        return self._transition_contact(
+            record_id,
+            value,
+            RecordStatus.ACTIVE,
+            RecordStatus.ARCHIVED,
+            "crm:contacts:archive",
+            actor,
+        )
+
+    def reactivate_contact(
+        self, record_id: str, value: CRMTransition, actor: Principal
+    ) -> CRMContact:
+        """Reactivate one archived contact."""
+        return self._transition_contact(
+            record_id,
+            value,
+            RecordStatus.ARCHIVED,
+            RecordStatus.ACTIVE,
+            "crm:contacts:reactivate",
+            actor,
+        )
+
+    def _transition_contact(
+        self,
+        record_id: str,
+        value: CRMTransition,
+        from_status: RecordStatus,
+        to_status: RecordStatus,
+        action: str,
+        actor: Principal,
+    ) -> CRMContact:
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        transition = RecordTransition(
+            organization_id,
+            normalized_id,
+            _integer(value.version, positive=True),
+            from_status,
+            to_status,
+            now,
+        )
+        try:
+            return self._repository.transition_contact(
+                transition, _audit(actor, action, normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def create_activity(self, value: ActivityWrite, actor: Principal) -> CRMActivity:
+        """Record one immutable activity for an existing scoped subject."""
+{{- if .Tenancy}}
+        organization_id = _actor_scope(actor)
+{{- else}}
+        _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        activity = CRMActivity(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            subject_type=value.subject_type,
+            subject_id=_identifier(value.subject_id),
+            type=value.type,
+            summary=_required(value.summary, 4000),
+            occurred_at=_aware(value.occurred_at),
+            created_by=actor.user_id,
+            created_at=now,
+        )
+        try:
+            self._repository.create_activity(
+                activity, _audit(actor, "crm:activities:create", activity.id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return activity
+
+    def list_activities(
+        self,
+        subject_type: str,
+        subject_id: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> ActivityPage:
+        """List immutable activities, optionally for one subject."""
+        normalized_type = subject_type.strip()
+        normalized_id = subject_id.strip()
+        _page(normalized_type, SUBJECTS, cursor, limit)
+        if bool(normalized_type) != bool(normalized_id):
+            raise _invalid()
+        if normalized_id:
+            normalized_id = _identifier(normalized_id)
+        try:
+            result = self._repository.list_activities(
+                _actor_scope(actor),
+                normalized_type,
+                normalized_id,
+                cursor.strip(),
+                limit,
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return ActivityPage(items=result.items, next_cursor=result.next_cursor)
+
+    def create_opportunity(self, value: OpportunityWrite, actor: Principal) -> CRMOpportunity:
+        """Create one lead opportunity for an active scoped account."""
+        account_id, name, amount_minor, currency = _opportunity(value)
+{{- if .Tenancy}}
+        organization_id = _actor_scope(actor)
+{{- else}}
+        _actor_scope(actor)
+{{- end}}
+        now = _now(self._clock)
+        opportunity = CRMOpportunity(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            account_id=account_id,
+            name=name,
+            amount_minor=str(amount_minor),
+            currency=currency,
+            stage=OpportunityStage.LEAD,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create_opportunity(
+                opportunity,
+                _audit(actor, "crm:opportunities:create", opportunity.id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return opportunity
+
+    def get_opportunity(self, record_id: str, actor: Principal) -> CRMOpportunity:
+        """Read one scoped sales opportunity."""
+        try:
+            value = self._repository.get_opportunity(_actor_scope(actor), _identifier(record_id))
+        except Exception as error:
+            _raise_repository(error)
+        if value is None:
+            raise _not_found()
+        return value
+
+    def list_opportunities(
+        self, stage: str, cursor: str, limit: int, actor: Principal
+    ) -> OpportunityPage:
+        """List sales opportunities in keyset order."""
+        normalized_stage = stage.strip()
+        _page(normalized_stage, STAGES, cursor, limit)
+        try:
+            result = self._repository.list_opportunities(
+                _actor_scope(actor), normalized_stage, cursor.strip(), limit
+            )
+        except Exception as error:
+            _raise_repository(error)
+        return OpportunityPage(items=result.items, next_cursor=result.next_cursor)
+
+    def update_opportunity(
+        self, record_id: str, value: OpportunityUpdate, actor: Principal
+    ) -> CRMOpportunity:
+        """Replace content of a nonterminal opportunity."""
+        account_id, name, amount_minor, currency = _opportunity(value)
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        now = _now(self._clock)
+        mutation = OpportunityMutation(
+            organization_id=organization_id,
+            opportunity_id=normalized_id,
+            account_id=account_id,
+            name=name,
+            amount_minor=amount_minor,
+            currency=currency,
+            expected_version=_integer(value.version, positive=True),
+            updated_at=now,
+        )
+        try:
+            return self._repository.update_opportunity(
+                mutation, _audit(actor, "crm:opportunities:update", normalized_id, now)
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+    def advance_opportunity(
+        self, record_id: str, value: CRMStageTransition, actor: Principal
+    ) -> CRMOpportunity:
+        """Advance exactly one stage or move a nonterminal opportunity to lost."""
+        organization_id = _actor_scope(actor)
+        normalized_id = _identifier(record_id)
+        current = self.get_opportunity(normalized_id, actor)
+        if not _valid_stage_transition(current.stage, value.stage):
+            raise _conflict()
+        now = _now(self._clock)
+        transition = StageTransition(
+            organization_id=organization_id,
+            opportunity_id=normalized_id,
+            expected_version=_integer(value.version, positive=True),
+            from_stage=current.stage,
+            to_stage=value.stage,
+            updated_at=now,
+        )
+        try:
+            return self._repository.advance_opportunity(
+                transition,
+                _audit(actor, "crm:opportunities:advance", normalized_id, now),
+            )
+        except Exception as error:
+            _raise_repository(error)
+
+
+def _contact(value: ContactWrite) -> ContactWrite:
+    account_id = (value.account_id or "").strip()
+    normalized_account = _identifier(account_id) if account_id else None
+    email = (value.email or "").strip().lower()
+    parsed = parseaddr(email)[1] if email else ""
+    phone = (value.phone or "").strip()
+    if (
+        email and (parsed != email or EMAIL_PATTERN.fullmatch(email) is None or not _safe(email))
+    ) or not _optional(phone, 64):
+        raise _invalid()
+    return ContactWrite(
+        account_id=normalized_account,
+        name=_required(value.name, 160),
+        email=email or None,
+        phone=phone or None,
+    )
+
+
+def _opportunity(value: OpportunityWrite) -> tuple[str, str, int, str]:
+    currency = value.currency.strip().upper()
+    if CURRENCY_PATTERN.fullmatch(currency) is None:
+        raise _invalid()
+    return (
+        _identifier(value.account_id),
+        _required(value.name, 160),
+        _integer(value.amount_minor),
+        currency,
+    )
+
+
+def _valid_stage_transition(from_stage: OpportunityStage, to_stage: OpportunityStage) -> bool:
+    return (
+        to_stage == OpportunityStage.LOST
+        and from_stage
+        in {
+            OpportunityStage.LEAD,
+            OpportunityStage.QUALIFIED,
+            OpportunityStage.PROPOSAL,
+        }
+    ) or (from_stage, to_stage) in {
+        (OpportunityStage.LEAD, OpportunityStage.QUALIFIED),
+        (OpportunityStage.QUALIFIED, OpportunityStage.PROPOSAL),
+        (OpportunityStage.PROPOSAL, OpportunityStage.WON),
+    }
+
+
+def _actor_scope(actor: Principal) -> str:
+    if not _required(actor.user_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+{{- if .Tenancy}}
+    organization_id = (actor.organization_id or "").strip()
+    if not _required(organization_id, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+    return organization_id
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _identifier(value: str) -> str:
+    normalized = value.strip()
+    if not _required(normalized, MAXIMUM_IDENTIFIER_LENGTH):
+        raise _invalid()
+    return normalized
+
+
+def _integer(value: str, *, positive: bool = False) -> int:
+    try:
+        number = int(value, 10)
+    except ValueError as error:
+        raise _invalid() from error
+    minimum = 1 if positive else 0
+    if number < minimum or number > MAXIMUM_INTEGER or str(number) != value:
+        raise _invalid()
+    return number
+
+
+def _page(filter_value: str, choices: set[str], cursor: str, limit: int) -> None:
+    normalized_cursor = cursor.strip()
+    if (
+        (filter_value and filter_value not in choices)
+        or len(normalized_cursor) > MAXIMUM_IDENTIFIER_LENGTH
+        or not _safe(normalized_cursor)
+        or limit < 1
+        or limit > 100
+    ):
+        raise _invalid()
+
+
+def _required(value: str, maximum: int) -> str:
+    normalized = value.strip()
+    if not normalized or not _optional(normalized, maximum):
+        raise _invalid()
+    return normalized
+
+
+def _optional(value: str, maximum: int) -> bool:
+    return len(value) <= maximum and _safe(value)
+
+
+def _safe(value: str) -> bool:
+    return all(character.isprintable() for character in value)
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    return _aware(clock())
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _raise_repository(error: Exception) -> NoReturn:
+    if isinstance(error, CRMError):
+        raise error
+    if isinstance(error, CRMNotFound):
+        raise _not_found() from error
+    if isinstance(error, CRMConflict):
+        raise _conflict() from error
+    raise _storage() from error
+
+
+def _invalid() -> CRMError:
+    return CRMError(CRMErrorKind.INVALID, "CRM data is invalid")
+
+
+def _not_found() -> CRMError:
+    return CRMError(CRMErrorKind.NOT_FOUND, "CRM record was not found")
+
+
+def _conflict() -> CRMError:
+    return CRMError(
+        CRMErrorKind.CONFLICT,
+        "CRM record changed or conflicts with current state",
+    )
+
+
+def _storage() -> CRMError:
+    return CRMError(CRMErrorKind.STORAGE, "CRM operation could not be completed")

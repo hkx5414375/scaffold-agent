@@ -1,0 +1,276 @@
+"""CRM transaction, association, isolation, and permission storage contracts."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select{{if .Tenancy}}, update{{end}}
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.crm.models import (
+    AccountUpdate,
+    AccountWrite,
+    ActivityType,
+    ActivityWrite,
+    ContactWrite,
+    CRMError,
+    CRMErrorKind,
+    CRMStageTransition,
+    CRMTransition,
+    OpportunityStage,
+    OpportunityUpdate,
+    OpportunityWrite,
+    RecordStatus,
+    SubjectType,
+    crm_accounts,
+    crm_activities,
+    crm_contacts,
+    crm_opportunities,
+)
+from {{.PackageName}}.crm.repository import SQLAlchemyCRMRepository
+from {{.PackageName}}.crm.service import CRMService
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import Principal, audit_events, role_permissions, users
+from {{.PackageName}}.migrations import upgrade_database
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    user_id = "crm-admin-" + suffix
+    email = suffix + "@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    actor = Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization = tenancy.create("CRM " + suffix, actor)
+    actor = actor.model_copy(update={"organization_id": organization.id})
+{{- end}}
+
+    service = CRMService(SQLAlchemyCRMRepository(engine), lambda: now)
+    account = service.create_account(AccountWrite(name=" Acme "), actor)
+    contact = service.create_contact(
+        ContactWrite(
+            account_id=account.id,
+            name=" Ada ",
+            email=("Ada." + suffix + "@EXAMPLE.COM"),
+            phone=" +1 555 0100 ",
+        ),
+        actor,
+    )
+    activity = service.create_activity(
+        ActivityWrite(
+            subject_type=SubjectType.CONTACT,
+            subject_id=contact.id,
+            type=ActivityType.CALL,
+            summary=" Discovery call ",
+            occurred_at=now,
+        ),
+        actor,
+    )
+    opportunity = service.create_opportunity(
+        OpportunityWrite(
+            account_id=account.id,
+            name=" Expansion ",
+            amount_minor="12500",
+            currency="usd",
+        ),
+        actor,
+    )
+    assert contact.email == ("ada." + suffix + "@example.com")
+    assert activity.summary == "Discovery call"
+    assert opportunity.amount_minor == "12500"
+    assert service.list_accounts("active", "", 20, actor).items == [account]
+    assert service.list_contacts("active", "", 20, actor).items == [contact]
+    assert service.list_activities("contact", contact.id, "", 20, actor).items == [activity]
+    assert service.list_opportunities("lead", "", 20, actor).items == [opportunity]
+
+    with pytest.raises(CRMError) as duplicate:
+        service.create_contact(ContactWrite(name="Duplicate", email=contact.email.upper()), actor)
+    assert duplicate.value.kind == CRMErrorKind.CONFLICT
+
+{{- if .Tenancy}}
+    wrong_scope = actor.model_copy(update={"organization_id": "missing-" + suffix})
+    with pytest.raises(CRMError) as hidden:
+        service.get_account(account.id, wrong_scope)
+    assert hidden.value.kind == CRMErrorKind.NOT_FOUND
+    with pytest.raises(CRMError) as cross_scope:
+        service.create_opportunity(
+            OpportunityWrite(
+                account_id=account.id,
+                name="Cross scope",
+                amount_minor="1",
+                currency="USD",
+            ),
+            wrong_scope,
+        )
+    assert cross_scope.value.kind == CRMErrorKind.NOT_FOUND
+{{- end}}
+
+    missing_actor = actor.model_copy(update={"user_id": "missing-" + suffix})
+    with pytest.raises(CRMError) as failed_audit:
+        service.update_account(
+            account.id,
+            AccountUpdate(name="Must roll back", version="1"),
+            missing_actor,
+        )
+    assert failed_audit.value.kind == CRMErrorKind.CONFLICT
+    assert service.get_account(account.id, actor).name == "Acme"
+    assert service.get_account(account.id, actor).version == "1"
+
+    account = service.update_account(account.id, AccountUpdate(name="Acme Two", version="1"), actor)
+    with pytest.raises(CRMError) as stale:
+        service.update_account(
+            account.id,
+            AccountUpdate(name="Stale", version="1"),
+            actor,
+        )
+    assert stale.value.kind == CRMErrorKind.CONFLICT
+
+    opportunity = service.advance_opportunity(
+        opportunity.id,
+        CRMStageTransition(stage=OpportunityStage.QUALIFIED, version="1"),
+        actor,
+    )
+    opportunity = service.advance_opportunity(
+        opportunity.id,
+        CRMStageTransition(stage=OpportunityStage.PROPOSAL, version="2"),
+        actor,
+    )
+    opportunity = service.advance_opportunity(
+        opportunity.id,
+        CRMStageTransition(stage=OpportunityStage.WON, version="3"),
+        actor,
+    )
+    with pytest.raises(CRMError) as terminal:
+        service.update_opportunity(
+            opportunity.id,
+            OpportunityUpdate(
+                account_id=account.id,
+                name="Closed deal",
+                amount_minor="13000",
+                currency="EUR",
+                version="4",
+            ),
+            actor,
+        )
+    assert terminal.value.kind == CRMErrorKind.CONFLICT
+
+    archived_account = service.archive_account(account.id, CRMTransition(version="2"), actor)
+    assert archived_account.status == RecordStatus.ARCHIVED
+    account = service.reactivate_account(account.id, CRMTransition(version="3"), actor)
+    archived_contact = service.archive_contact(contact.id, CRMTransition(version="1"), actor)
+    assert archived_contact.status == RecordStatus.ARCHIVED
+    contact = service.reactivate_contact(contact.id, CRMTransition(version="2"), actor)
+    assert account.version == "4"
+    assert contact.version == "3"
+
+    permission_codes = ["crm:read", "crm:write", "crm:pipeline:manage"]
+    with engine.connect() as connection:
+        audit_count = connection.scalar(
+            select(func.count())
+            .select_from(audit_events)
+            .where(
+                audit_events.c.user_id == user_id,
+                audit_events.c.action.like("crm:%"),
+            )
+        )
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(permission_codes)
+                )
+            ).all()
+        )
+    assert audit_count == 12
+    assert grants == {
+        ("admin", "crm:read"),
+        ("admin", "crm:write"),
+        ("admin", "crm:pipeline:manage"),
+    }
+
+{{- if .Tenancy}}
+    with engine.begin() as connection:
+        connection.execute(
+            update(organizations)
+            .where(organizations.c.id == organization.id)
+            .values(status="inactive", deactivated_at=now, updated_at=now)
+        )
+    with pytest.raises(CRMError) as inactive:
+        service.get_account(account.id, actor)
+    assert inactive.value.kind == CRMErrorKind.NOT_FOUND
+    with pytest.raises(CRMError) as inactive_write:
+        service.create_account(AccountWrite(name="Unavailable"), actor)
+    assert inactive_write.value.kind == CRMErrorKind.NOT_FOUND
+{{- end}}
+
+    with engine.begin() as connection:
+        connection.execute(delete(crm_activities).where(crm_activities.c.id == activity.id))
+        connection.execute(
+            delete(crm_opportunities).where(crm_opportunities.c.id == opportunity.id)
+        )
+        connection.execute(delete(crm_contacts).where(crm_contacts.c.id == contact.id))
+        connection.execute(delete(crm_accounts).where(crm_accounts.c.id == account.id))
+        connection.execute(delete(audit_events).where(audit_events.c.user_id == user_id))
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id == user_id))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

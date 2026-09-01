@@ -1,6 +1,6 @@
 # ADR 0052：可组合 CRM 核心契约
 
-- 状态：Proposed
+- 状态：Accepted
 - 日期：2026-09-02
 
 ## 背景
@@ -22,4 +22,4 @@
 
 - AI 可以通过一个能力选择获得常用 CRM 主干，不再重复设计企业、联系人、活动和销售阶段。
 - ERP、商城订单、营销和支付能力可以引用稳定 CRM 企业或联系人标识，但不会反向耦合 CRM 核心。
-- 本 ADR 只有在 Go、Java、Python、PostgreSQL、MySQL、共享 Vue 管理端与跨语言契约门禁全部通过后才改为 Accepted。
+- Go、Java、Python 已分别通过 PostgreSQL/MySQL 生成、服务测试、数据库契约与共享 Vue 管理端门禁；三语言 OpenAPI、权限、Schema、迁移表和管理端一致性由自动化契约测试持续验证。

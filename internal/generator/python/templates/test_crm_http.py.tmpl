@@ -1,0 +1,205 @@
+"""CRM administrator transport, serialization, and error response contracts."""
+
+from collections.abc import Callable
+
+from fastapi import FastAPI
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+from test_crm import MemoryRepository, _actor, _service
+
+from {{.PackageName}}.crm.http import (
+    advance_opportunity,
+    archive_account,
+    archive_contact,
+    create_account,
+    create_activity,
+    create_contact,
+    create_opportunity,
+    get_account,
+    get_contact,
+    get_opportunity,
+    install_error_handlers,
+    list_accounts,
+    list_activities,
+    list_contacts,
+    list_opportunities,
+    reactivate_account,
+    reactivate_contact,
+    router,
+    update_account,
+    update_contact,
+    update_opportunity,
+)
+from {{.PackageName}}.crm.models import (
+    AccountUpdate,
+    AccountWrite,
+    ActivityType,
+    ActivityWrite,
+    ContactUpdate,
+    ContactWrite,
+    CRMError,
+    CRMErrorKind,
+    CRMStageTransition,
+    CRMTransition,
+    OpportunityStage,
+    OpportunityUpdate,
+    OpportunityWrite,
+    RecordStatus,
+    SubjectType,
+)
+
+
+def test_direct_transport_covers_records_and_pipeline() -> None:
+    service = _service(MemoryRepository())
+    actor = _actor()
+    account = create_account(AccountWrite(name="Acme"), actor, service)
+    contact = create_contact(
+        ContactWrite(
+            account_id=account.id,
+            name="Ada",
+            email="ada@example.com",
+        ),
+        actor,
+        service,
+    )
+    activity = create_activity(
+        ActivityWrite(
+            subject_type=SubjectType.CONTACT,
+            subject_id=contact.id,
+            type=ActivityType.MEETING,
+            summary="Review",
+            occurred_at=account.created_at,
+        ),
+        actor,
+        service,
+    )
+    opportunity = create_opportunity(
+        OpportunityWrite(
+            account_id=account.id,
+            name="Expansion",
+            amount_minor="2500",
+            currency="usd",
+        ),
+        actor,
+        service,
+    )
+    assert get_account(account.id, actor, service) == account
+    assert get_contact(contact.id, actor, service) == contact
+    assert get_opportunity(opportunity.id, actor, service) == opportunity
+    assert list_accounts(actor, service).items == [account]
+    assert list_contacts(actor, service).items == [contact]
+    assert list_activities(actor, service, "contact", contact.id).items == [activity]
+    assert list_opportunities(actor, service, "lead").items == [opportunity]
+
+    account = update_account(
+        account.id, AccountUpdate(name="Acme Two", version="1"), actor, service
+    )
+    contact = update_contact(
+        contact.id,
+        ContactUpdate(
+            account_id=account.id,
+            name="Ada Two",
+            email="ada2@example.com",
+            version="1",
+        ),
+        actor,
+        service,
+    )
+    opportunity = update_opportunity(
+        opportunity.id,
+        OpportunityUpdate(
+            account_id=account.id,
+            name="Expansion Two",
+            amount_minor="3000",
+            currency="EUR",
+            version="1",
+        ),
+        actor,
+        service,
+    )
+    qualified = advance_opportunity(
+        opportunity.id,
+        CRMStageTransition(stage=OpportunityStage.QUALIFIED, version="2"),
+        actor,
+        service,
+    )
+    assert qualified.stage == OpportunityStage.QUALIFIED
+
+    archived_account = archive_account(account.id, CRMTransition(version="2"), actor, service)
+    archived_contact = archive_contact(contact.id, CRMTransition(version="2"), actor, service)
+    assert archived_account.status == RecordStatus.ARCHIVED
+    assert archived_contact.status == RecordStatus.ARCHIVED
+    assert (
+        reactivate_account(account.id, CRMTransition(version="3"), actor, service).status
+        == RecordStatus.ACTIVE
+    )
+    assert (
+        reactivate_contact(contact.id, CRMTransition(version="3"), actor, service).status
+        == RecordStatus.ACTIVE
+    )
+
+
+def test_real_routes_serialize_integer_contracts_as_decimal_strings() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor()
+    application = FastAPI()
+    application.state.crm_service = service
+    install_error_handlers(application)
+    for route in router.routes:
+        if isinstance(route, APIRoute):
+            for dependency in route.dependant.dependencies:
+                if dependency.name == "principal" and dependency.call is not None:
+                    application.dependency_overrides[dependency.call] = lambda: actor
+    application.include_router(router)
+    client = TestClient(application)
+
+    account = client.post("/api/v1/crm/accounts", json={"name": "Acme"})
+    assert account.status_code == 201
+    account_id = account.json()["id"]
+    opportunity = client.post(
+        "/api/v1/crm/opportunities",
+        json={
+            "account_id": account_id,
+            "name": "Expansion",
+            "amount_minor": "9223372036854775807",
+            "currency": "usd",
+        },
+    )
+    assert opportunity.status_code == 201
+    assert opportunity.json()["amount_minor"] == "9223372036854775807"
+    assert opportunity.json()["version"] == "1"
+    page = client.get("/api/v1/crm/opportunities?stage=lead&limit=1")
+    assert page.status_code == 200
+    assert page.json()["items"][0]["amount_minor"] == "9223372036854775807"
+
+
+def test_crm_errors_use_stable_public_mapping() -> None:
+    cases = {
+        CRMErrorKind.INVALID: (400, "crm.invalid", "CRM data is invalid"),
+        CRMErrorKind.NOT_FOUND: (404, "crm.not_found", "CRM record was not found"),
+        CRMErrorKind.CONFLICT: (
+            409,
+            "crm.conflict",
+            "CRM record changed or conflicts with current state",
+        ),
+        CRMErrorKind.STORAGE: (
+            500,
+            "internal.error",
+            "CRM operation could not be completed",
+        ),
+    }
+    for kind, (status, code, message) in cases.items():
+        application = FastAPI()
+        install_error_handlers(application)
+        application.get("/failure")(_failure_handler(kind, message))
+        response = TestClient(application).get("/failure")
+        assert response.status_code == status
+        assert response.json() == {"code": code, "message": message}
+
+
+def _failure_handler(kind: CRMErrorKind, message: str) -> Callable[[], None]:
+    def failure() -> None:
+        raise CRMError(kind, message)
+
+    return failure

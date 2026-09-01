@@ -1,0 +1,385 @@
+"""Permission-protected CRM HTTP transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.crm.models import (
+    AccountPage,
+    AccountUpdate,
+    AccountWrite,
+    ActivityPage,
+    ActivityWrite,
+    ContactPage,
+    ContactUpdate,
+    ContactWrite,
+    CRMAccount,
+    CRMActivity,
+    CRMContact,
+    CRMError,
+    CRMErrorKind,
+    CRMOpportunity,
+    CRMStageTransition,
+    CRMTransition,
+    OpportunityPage,
+    OpportunityUpdate,
+    OpportunityWrite,
+)
+from {{.PackageName}}.crm.service import CRMService
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+
+router = APIRouter(tags=["crm"])
+
+
+def crm_service(request: Request) -> CRMService:
+    """Resolve the process-scoped CRM service."""
+    service: CRMService = request.app.state.crm_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable CRM failure responses."""
+
+    @app.exception_handler(CRMError)
+    async def crm_error(_request: Request, error: CRMError) -> JSONResponse:
+        status, code = {
+            CRMErrorKind.INVALID: (400, "crm.invalid"),
+            CRMErrorKind.NOT_FOUND: (404, "crm.not_found"),
+            CRMErrorKind.CONFLICT: (409, "crm.conflict"),
+            CRMErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post(
+    "/api/v1/crm/accounts",
+    response_model=CRMAccount,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_account(
+    value: AccountWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMAccount:
+    """Create one business account."""
+    return service.create_account(value, principal)
+
+
+@router.get("/api/v1/crm/accounts", response_model=AccountPage)
+def list_accounts(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> AccountPage:
+    """List scoped business accounts."""
+    return service.list_accounts(status, cursor, limit, principal)
+
+
+@router.get(
+    "/api/v1/crm/accounts/{id}",
+    response_model=CRMAccount,
+    response_model_exclude_none=True,
+)
+def get_account(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMAccount:
+    """Read one scoped business account."""
+    return service.get_account(id, principal)
+
+
+@router.put(
+    "/api/v1/crm/accounts/{id}",
+    response_model=CRMAccount,
+    response_model_exclude_none=True,
+)
+def update_account(
+    id: str,
+    value: AccountUpdate,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMAccount:
+    """Update one active business account."""
+    return service.update_account(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/accounts/{id}/archive",
+    response_model=CRMAccount,
+    response_model_exclude_none=True,
+)
+def archive_account(
+    id: str,
+    value: CRMTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMAccount:
+    """Archive one active account."""
+    return service.archive_account(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/accounts/{id}/reactivate",
+    response_model=CRMAccount,
+    response_model_exclude_none=True,
+)
+def reactivate_account(
+    id: str,
+    value: CRMTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMAccount:
+    """Reactivate one archived account."""
+    return service.reactivate_account(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/contacts",
+    response_model=CRMContact,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_contact(
+    value: ContactWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMContact:
+    """Create one contact."""
+    return service.create_contact(value, principal)
+
+
+@router.get("/api/v1/crm/contacts", response_model=ContactPage)
+def list_contacts(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+    status: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ContactPage:
+    """List scoped contacts."""
+    return service.list_contacts(status, cursor, limit, principal)
+
+
+@router.get(
+    "/api/v1/crm/contacts/{id}",
+    response_model=CRMContact,
+    response_model_exclude_none=True,
+)
+def get_contact(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMContact:
+    """Read one scoped contact."""
+    return service.get_contact(id, principal)
+
+
+@router.put(
+    "/api/v1/crm/contacts/{id}",
+    response_model=CRMContact,
+    response_model_exclude_none=True,
+)
+def update_contact(
+    id: str,
+    value: ContactUpdate,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMContact:
+    """Update one active contact."""
+    return service.update_contact(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/contacts/{id}/archive",
+    response_model=CRMContact,
+    response_model_exclude_none=True,
+)
+def archive_contact(
+    id: str,
+    value: CRMTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMContact:
+    """Archive one active contact."""
+    return service.archive_contact(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/contacts/{id}/reactivate",
+    response_model=CRMContact,
+    response_model_exclude_none=True,
+)
+def reactivate_contact(
+    id: str,
+    value: CRMTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMContact:
+    """Reactivate one archived contact."""
+    return service.reactivate_contact(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/activities",
+    response_model=CRMActivity,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_activity(
+    value: ActivityWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMActivity:
+    """Record one immutable activity."""
+    return service.create_activity(value, principal)
+
+
+@router.get("/api/v1/crm/activities", response_model=ActivityPage)
+def list_activities(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+    subject_type: Annotated[str, Query(max_length=16)] = "",
+    subject_id: Annotated[str, Query(max_length=191)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ActivityPage:
+    """List immutable activities, optionally for one subject."""
+    return service.list_activities(subject_type, subject_id, cursor, limit, principal)
+
+
+@router.post(
+    "/api/v1/crm/opportunities",
+    response_model=CRMOpportunity,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def create_opportunity(
+    value: OpportunityWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMOpportunity:
+    """Create one lead opportunity."""
+    return service.create_opportunity(value, principal)
+
+
+@router.get("/api/v1/crm/opportunities", response_model=OpportunityPage)
+def list_opportunities(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+    stage: Annotated[str, Query(max_length=16)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> OpportunityPage:
+    """List scoped opportunities."""
+    return service.list_opportunities(stage, cursor, limit, principal)
+
+
+@router.get(
+    "/api/v1/crm/opportunities/{id}",
+    response_model=CRMOpportunity,
+    response_model_exclude_none=True,
+)
+def get_opportunity(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMOpportunity:
+    """Read one scoped opportunity."""
+    return service.get_opportunity(id, principal)
+
+
+@router.put(
+    "/api/v1/crm/opportunities/{id}",
+    response_model=CRMOpportunity,
+    response_model_exclude_none=True,
+)
+def update_opportunity(
+    id: str,
+    value: OpportunityUpdate,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:write"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMOpportunity:
+    """Update one nonterminal opportunity."""
+    return service.update_opportunity(id, value, principal)
+
+
+@router.post(
+    "/api/v1/crm/opportunities/{id}/advance",
+    response_model=CRMOpportunity,
+    response_model_exclude_none=True,
+)
+def advance_opportunity(
+    id: str,
+    value: CRMStageTransition,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("crm:pipeline:manage"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[CRMService, Depends(crm_service)],
+) -> CRMOpportunity:
+    """Advance one opportunity exactly one stage or to lost."""
+    return service.advance_opportunity(id, value, principal)

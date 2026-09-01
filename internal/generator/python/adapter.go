@@ -54,6 +54,8 @@ const (
 	catalogVersion          = "0.1.0"
 	customerOwner           = "customer-accounts"
 	customerVersion         = "0.1.0"
+	crmOwner                = "crm-core"
+	crmVersion              = "0.1.0"
 )
 
 //go:embed all:templates
@@ -213,6 +215,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: customerOwner, Version: customerVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Separate storefront customer identities, sessions, lifecycle, and administration.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: crmOwner, Version: crmVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable accounts, contacts, activities, and sales opportunities.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -492,6 +504,18 @@ var customerTemplates = map[string]string{
 	"tests/test_customer_accounts_http.py":                       "templates/test_customer_accounts_http.py.tmpl",
 }
 
+var crmTemplates = map[string]string{
+	"src/package/crm/__init__.py":                  "templates/crm_init.py.tmpl",
+	"src/package/crm/http.py":                      "templates/crm_http.py.tmpl",
+	"src/package/crm/models.py":                    "templates/crm_models.py.tmpl",
+	"src/package/crm/repository.py":                "templates/crm_repository.py.tmpl",
+	"src/package/crm/service.py":                   "templates/crm_service.py.tmpl",
+	"src/package/migration/versions/000280_crm.py": "templates/crm_migration.py.tmpl",
+	"tests/test_crm.py":                            "templates/test_crm.py.tmpl",
+	"tests/test_crm_database.py":                   "templates/test_crm_database.py.tmpl",
+	"tests/test_crm_http.py":                       "templates/test_crm_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -557,6 +581,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	approvalsEnabled := false
 	catalogEnabled := false
 	customerEnabled := false
+	crmEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -596,6 +621,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == customerOwner {
 			customerEnabled = true
 		}
+		if pack.Metadata.Name == crmOwner {
+			crmEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
@@ -605,6 +633,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if customerEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, fmt.Errorf(
 			"customer-accounts with organization-tenancy requires organization-tenancy 0.3.0",
+		)
+	}
+	if crmEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"crm-core with organization-tenancy requires organization-tenancy 0.3.0",
 		)
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -649,11 +682,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Approvals:             approvalsEnabled,
 		Catalog:               catalogEnabled,
 		CustomerAccounts:      customerEnabled,
+		CRM:                   crmEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+6,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+len(catalogTemplates)+len(customerTemplates)+len(crmTemplates)+len(storefrontui.BaseTemplates)+len(storefrontui.CatalogTemplates)+len(storefrontui.CustomerAccountTemplates)+7,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -790,6 +824,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if crmEnabled {
+		for path, templatePath := range crmTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    crmOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -847,6 +889,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets["web/admin/src/views/CustomerAccountsView.vue"] = renderTarget{
 				Template:    "templates/src/views/CustomerAccountsView.vue.tmpl",
 				Owner:       customerOwner,
+				SharedAdmin: true,
+			}
+		}
+		if crmEnabled {
+			targets["web/admin/src/views/CRMView.vue"] = renderTarget{
+				Template:    "templates/src/views/CRMView.vue.tmpl",
+				Owner:       crmOwner,
 				SharedAdmin: true,
 			}
 		}
@@ -954,6 +1003,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if customerEnabled {
 		capabilityLock[customerOwner] = customerVersion
 	}
+	if crmEnabled {
+		capabilityLock[crmOwner] = crmVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -982,6 +1034,10 @@ func migrationModels(data templateData) (string, string) {
 	if data.CustomerAccounts {
 		imports = append(imports, "from "+data.PackageName+".customer_accounts import models as customer_models")
 		metadata = append(metadata, "_customer_metadata = customer_models.customer_accounts.metadata")
+	}
+	if data.CRM {
+		imports = append(imports, "from "+data.PackageName+".crm import models as crm_models")
+		metadata = append(metadata, "_crm_metadata = crm_models.crm_accounts.metadata")
 	}
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")

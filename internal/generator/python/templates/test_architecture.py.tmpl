@@ -55,6 +55,27 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/customers/{id}/suspend", "post"),
         ("/api/v1/customers/{id}/reactivate", "post"),
 {{- end}}
+{{- if .CRM}}
+        ("/api/v1/crm/accounts", "post"),
+        ("/api/v1/crm/accounts", "get"),
+        ("/api/v1/crm/accounts/{id}", "get"),
+        ("/api/v1/crm/accounts/{id}", "put"),
+        ("/api/v1/crm/accounts/{id}/archive", "post"),
+        ("/api/v1/crm/accounts/{id}/reactivate", "post"),
+        ("/api/v1/crm/contacts", "post"),
+        ("/api/v1/crm/contacts", "get"),
+        ("/api/v1/crm/contacts/{id}", "get"),
+        ("/api/v1/crm/contacts/{id}", "put"),
+        ("/api/v1/crm/contacts/{id}/archive", "post"),
+        ("/api/v1/crm/contacts/{id}/reactivate", "post"),
+        ("/api/v1/crm/activities", "post"),
+        ("/api/v1/crm/activities", "get"),
+        ("/api/v1/crm/opportunities", "post"),
+        ("/api/v1/crm/opportunities", "get"),
+        ("/api/v1/crm/opportunities/{id}", "get"),
+        ("/api/v1/crm/opportunities/{id}", "put"),
+        ("/api/v1/crm/opportunities/{id}/advance", "post"),
+{{- end}}
 {{- if .Tenancy}}
         ("/api/v1/organizations", "post"),
         ("/api/v1/organizations", "get"),
@@ -239,6 +260,16 @@ def test_identity_service_has_no_transport_or_orm_imports() -> None:
         if isinstance(node, ast.ImportFrom) and node.module is not None
     }
     assert customer_imports.isdisjoint({"fastapi", "sqlalchemy"})
+{{- end}}
+{{- if .CRM}}
+
+    crm_tree = ast.parse((PACKAGE / "crm" / "service.py").read_text(encoding="utf-8"))
+    crm_imports = {
+        node.module.split(".", maxsplit=1)[0]
+        for node in ast.walk(crm_tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert crm_imports.isdisjoint({"fastapi", "sqlalchemy"})
 {{- end}}
 
 

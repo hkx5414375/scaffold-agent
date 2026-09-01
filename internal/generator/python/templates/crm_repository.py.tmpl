@@ -1,0 +1,782 @@
+"""Transactional CRM persistence with scope and atomic audit evidence."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, cast
+
+import sqlalchemy as sa
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.crm.models import (
+    CRMAccount,
+    CRMActivity,
+    CRMContact,
+    CRMOpportunity,
+    OpportunityStage,
+    RecordStatus,
+    SubjectType,
+    crm_accounts,
+    crm_activities,
+    crm_contacts,
+    crm_opportunities,
+)
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organizations
+{{- end}}
+
+
+class CRMConflict(Exception):
+    """An optimistic, lifecycle, or uniqueness constraint rejected a mutation."""
+
+
+class CRMNotFound(Exception):
+    """A required scoped CRM association does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class AccountMutation:
+    """Normalized optimistic account replacement."""
+
+    organization_id: str
+    account_id: str
+    name: str
+    expected_version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ContactMutation:
+    """Normalized optimistic contact replacement."""
+
+    organization_id: str
+    contact_id: str
+    account_id: str | None
+    name: str
+    email: str | None
+    phone: str | None
+    expected_version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityMutation:
+    """Normalized optimistic opportunity replacement."""
+
+    organization_id: str
+    opportunity_id: str
+    account_id: str
+    name: str
+    amount_minor: int
+    currency: str
+    expected_version: int
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecordTransition:
+    """Database-enforced active/archive transition."""
+
+    organization_id: str
+    record_id: str
+    expected_version: int
+    from_status: RecordStatus
+    to_status: RecordStatus
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StageTransition:
+    """Database-enforced opportunity stage transition."""
+
+    organization_id: str
+    opportunity_id: str
+    expected_version: int
+    from_stage: OpportunityStage
+    to_stage: OpportunityStage
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AccountPageResult:
+    items: list[CRMAccount]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ContactPageResult:
+    items: list[CRMContact]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityPageResult:
+    items: list[CRMActivity]
+    next_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpportunityPageResult:
+    items: list[CRMOpportunity]
+    next_cursor: str
+
+
+class CRMRepository(Protocol):
+    """Persistence seam for scoped CRM transactions."""
+
+    def create_account(self, value: CRMAccount, audit: AuditEvent) -> None: ...
+
+    def get_account(self, organization_id: str, record_id: str) -> CRMAccount | None: ...
+
+    def list_accounts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> AccountPageResult: ...
+
+    def update_account(self, value: AccountMutation, audit: AuditEvent) -> CRMAccount: ...
+
+    def transition_account(self, value: RecordTransition, audit: AuditEvent) -> CRMAccount: ...
+
+    def create_contact(self, value: CRMContact, audit: AuditEvent) -> None: ...
+
+    def get_contact(self, organization_id: str, record_id: str) -> CRMContact | None: ...
+
+    def list_contacts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ContactPageResult: ...
+
+    def update_contact(self, value: ContactMutation, audit: AuditEvent) -> CRMContact: ...
+
+    def transition_contact(self, value: RecordTransition, audit: AuditEvent) -> CRMContact: ...
+
+    def create_activity(self, value: CRMActivity, audit: AuditEvent) -> None: ...
+
+    def list_activities(
+        self,
+        organization_id: str,
+        subject_type: str,
+        subject_id: str,
+        cursor: str,
+        limit: int,
+    ) -> ActivityPageResult: ...
+
+    def create_opportunity(self, value: CRMOpportunity, audit: AuditEvent) -> None: ...
+
+    def get_opportunity(self, organization_id: str, record_id: str) -> CRMOpportunity | None: ...
+
+    def list_opportunities(
+        self, organization_id: str, stage: str, cursor: str, limit: int
+    ) -> OpportunityPageResult: ...
+
+    def update_opportunity(
+        self, value: OpportunityMutation, audit: AuditEvent
+    ) -> CRMOpportunity: ...
+
+    def advance_opportunity(self, value: StageTransition, audit: AuditEvent) -> CRMOpportunity: ...
+
+
+class SQLAlchemyCRMRepository:
+    """SQLAlchemy adapter repeating scope, version, and state predicates in SQL."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create_account(self, value: CRMAccount, audit: AuditEvent) -> None:
+        self._create(
+            _organization(value),
+            crm_accounts,
+            _account_values(value),
+            audit,
+        )
+
+    def get_account(self, organization_id: str, record_id: str) -> CRMAccount | None:
+        statement = select(crm_accounts).where(
+            crm_accounts.c.id == record_id,
+            func.coalesce(crm_accounts.c.organization_id, "") == organization_id,
+            _active_scope(crm_accounts),
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_account(row) if row is not None else None
+
+    def list_accounts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> AccountPageResult:
+        statement = select(crm_accounts).where(
+            func.coalesce(crm_accounts.c.organization_id, "") == organization_id,
+            _active_scope(crm_accounts),
+        )
+        if status:
+            statement = statement.where(crm_accounts.c.status == status)
+        if cursor:
+            statement = statement.where(crm_accounts.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(crm_accounts.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_account(row) for row in rows]
+        return AccountPageResult(values[:limit], _next(values, limit))
+
+    def update_account(self, value: AccountMutation, audit: AuditEvent) -> CRMAccount:
+        def mutation(connection: Connection) -> CRMAccount:
+            changed = connection.execute(
+                update(crm_accounts)
+                .where(
+                    crm_accounts.c.id == value.account_id,
+                    func.coalesce(crm_accounts.c.organization_id, "") == value.organization_id,
+                    crm_accounts.c.version == value.expected_version,
+                    crm_accounts.c.status == RecordStatus.ACTIVE.value,
+                )
+                .values(
+                    name=value.name,
+                    version=crm_accounts.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_account(connection, value.organization_id, value.account_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def transition_account(self, value: RecordTransition, audit: AuditEvent) -> CRMAccount:
+        def mutation(connection: Connection) -> CRMAccount:
+            changed = connection.execute(
+                update(crm_accounts)
+                .where(
+                    crm_accounts.c.id == value.record_id,
+                    func.coalesce(crm_accounts.c.organization_id, "") == value.organization_id,
+                    crm_accounts.c.version == value.expected_version,
+                    crm_accounts.c.status == value.from_status.value,
+                )
+                .values(
+                    status=value.to_status.value,
+                    version=crm_accounts.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_account(connection, value.organization_id, value.record_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def create_contact(self, value: CRMContact, audit: AuditEvent) -> None:
+        def validate(connection: Connection) -> None:
+            _require_account(connection, _organization(value), value.account_id)
+
+        self._create(
+            _organization(value),
+            crm_contacts,
+            _contact_values(value),
+            audit,
+            validate,
+        )
+
+    def get_contact(self, organization_id: str, record_id: str) -> CRMContact | None:
+        statement = select(crm_contacts).where(
+            crm_contacts.c.id == record_id,
+            func.coalesce(crm_contacts.c.organization_id, "") == organization_id,
+            _active_scope(crm_contacts),
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_contact(row) if row is not None else None
+
+    def list_contacts(
+        self, organization_id: str, status: str, cursor: str, limit: int
+    ) -> ContactPageResult:
+        statement = select(crm_contacts).where(
+            func.coalesce(crm_contacts.c.organization_id, "") == organization_id,
+            _active_scope(crm_contacts),
+        )
+        if status:
+            statement = statement.where(crm_contacts.c.status == status)
+        if cursor:
+            statement = statement.where(crm_contacts.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(crm_contacts.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_contact(row) for row in rows]
+        return ContactPageResult(values[:limit], _next(values, limit))
+
+    def update_contact(self, value: ContactMutation, audit: AuditEvent) -> CRMContact:
+        def mutation(connection: Connection) -> CRMContact:
+            _require_account(connection, value.organization_id, value.account_id)
+            changed = connection.execute(
+                update(crm_contacts)
+                .where(
+                    crm_contacts.c.id == value.contact_id,
+                    func.coalesce(crm_contacts.c.organization_id, "") == value.organization_id,
+                    crm_contacts.c.version == value.expected_version,
+                    crm_contacts.c.status == RecordStatus.ACTIVE.value,
+                )
+                .values(
+                    account_id=value.account_id,
+                    name=value.name,
+                    email=value.email,
+                    phone=value.phone,
+                    version=crm_contacts.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_contact(connection, value.organization_id, value.contact_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def transition_contact(self, value: RecordTransition, audit: AuditEvent) -> CRMContact:
+        def mutation(connection: Connection) -> CRMContact:
+            changed = connection.execute(
+                update(crm_contacts)
+                .where(
+                    crm_contacts.c.id == value.record_id,
+                    func.coalesce(crm_contacts.c.organization_id, "") == value.organization_id,
+                    crm_contacts.c.version == value.expected_version,
+                    crm_contacts.c.status == value.from_status.value,
+                )
+                .values(
+                    status=value.to_status.value,
+                    version=crm_contacts.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_contact(connection, value.organization_id, value.record_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def create_activity(self, value: CRMActivity, audit: AuditEvent) -> None:
+        def validate(connection: Connection) -> None:
+            _require_subject(
+                connection,
+                _organization(value),
+                value.subject_type,
+                value.subject_id,
+            )
+
+        self._create(
+            _organization(value),
+            crm_activities,
+            _activity_values(value),
+            audit,
+            validate,
+        )
+
+    def list_activities(
+        self,
+        organization_id: str,
+        subject_type: str,
+        subject_id: str,
+        cursor: str,
+        limit: int,
+    ) -> ActivityPageResult:
+        statement = select(crm_activities).where(
+            func.coalesce(crm_activities.c.organization_id, "") == organization_id,
+            _active_scope(crm_activities),
+        )
+        if subject_type:
+            statement = statement.where(crm_activities.c.subject_type == subject_type)
+        if subject_id:
+            statement = statement.where(crm_activities.c.subject_id == subject_id)
+        if cursor:
+            statement = statement.where(crm_activities.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(crm_activities.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_activity(row) for row in rows]
+        return ActivityPageResult(values[:limit], _next(values, limit))
+
+    def create_opportunity(self, value: CRMOpportunity, audit: AuditEvent) -> None:
+        def validate(connection: Connection) -> None:
+            _require_account(connection, _organization(value), value.account_id)
+
+        self._create(
+            _organization(value),
+            crm_opportunities,
+            _opportunity_values(value),
+            audit,
+            validate,
+        )
+
+    def get_opportunity(self, organization_id: str, record_id: str) -> CRMOpportunity | None:
+        statement = select(crm_opportunities).where(
+            crm_opportunities.c.id == record_id,
+            func.coalesce(crm_opportunities.c.organization_id, "") == organization_id,
+            _active_scope(crm_opportunities),
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_opportunity(row) if row is not None else None
+
+    def list_opportunities(
+        self, organization_id: str, stage: str, cursor: str, limit: int
+    ) -> OpportunityPageResult:
+        statement = select(crm_opportunities).where(
+            func.coalesce(crm_opportunities.c.organization_id, "") == organization_id,
+            _active_scope(crm_opportunities),
+        )
+        if stage:
+            statement = statement.where(crm_opportunities.c.stage == stage)
+        if cursor:
+            statement = statement.where(crm_opportunities.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = (
+                connection.execute(statement.order_by(crm_opportunities.c.id).limit(limit + 1))
+                .mappings()
+                .all()
+            )
+        values = [_map_opportunity(row) for row in rows]
+        return OpportunityPageResult(values[:limit], _next(values, limit))
+
+    def update_opportunity(self, value: OpportunityMutation, audit: AuditEvent) -> CRMOpportunity:
+        def mutation(connection: Connection) -> CRMOpportunity:
+            _require_account(connection, value.organization_id, value.account_id)
+            changed = connection.execute(
+                update(crm_opportunities)
+                .where(
+                    crm_opportunities.c.id == value.opportunity_id,
+                    func.coalesce(crm_opportunities.c.organization_id, "") == value.organization_id,
+                    crm_opportunities.c.version == value.expected_version,
+                    crm_opportunities.c.stage.not_in(
+                        [OpportunityStage.WON.value, OpportunityStage.LOST.value]
+                    ),
+                )
+                .values(
+                    account_id=value.account_id,
+                    name=value.name,
+                    amount_minor=value.amount_minor,
+                    currency=value.currency,
+                    version=crm_opportunities.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_opportunity(connection, value.organization_id, value.opportunity_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def advance_opportunity(self, value: StageTransition, audit: AuditEvent) -> CRMOpportunity:
+        def mutation(connection: Connection) -> CRMOpportunity:
+            changed = connection.execute(
+                update(crm_opportunities)
+                .where(
+                    crm_opportunities.c.id == value.opportunity_id,
+                    func.coalesce(crm_opportunities.c.organization_id, "") == value.organization_id,
+                    crm_opportunities.c.version == value.expected_version,
+                    crm_opportunities.c.stage == value.from_stage.value,
+                )
+                .values(
+                    stage=value.to_stage.value,
+                    version=crm_opportunities.c.version + 1,
+                    updated_at=value.updated_at,
+                )
+            ).rowcount
+            _require_mutation(changed)
+            return _read_opportunity(connection, value.organization_id, value.opportunity_id)
+
+        return self._mutate(value.organization_id, audit, mutation)
+
+    def _create(
+        self,
+        organization_id: str,
+        table: sa.Table,
+        values: dict[str, object],
+        audit: AuditEvent,
+        validate: "Validator | None" = None,
+    ) -> None:
+        try:
+            with self._engine.begin() as connection:
+                _lock_scope(connection, organization_id)
+                if validate is not None:
+                    validate(connection)
+                connection.execute(insert(table).values(**values))
+                append_audit(connection, audit)
+        except IntegrityError as error:
+            raise CRMConflict() from error
+
+    def _mutate[CRMResult: (CRMAccount, CRMContact, CRMOpportunity)](
+        self,
+        organization_id: str,
+        audit: AuditEvent,
+        mutation: Callable[[Connection], CRMResult],
+    ) -> CRMResult:
+        try:
+            with self._engine.begin() as connection:
+                _lock_scope(connection, organization_id)
+                result = mutation(connection)
+                append_audit(connection, audit)
+                return result
+        except IntegrityError as error:
+            raise CRMConflict() from error
+
+
+Validator = Callable[[Connection], None]
+
+
+def _active_scope(table: sa.Table) -> sa.ColumnElement[bool]:
+{{- if .Tenancy}}
+    return sa.exists(
+        select(organizations.c.id).where(
+            organizations.c.id == table.c.organization_id,
+            organizations.c.status == "active",
+        )
+    )
+{{- else}}
+    del table
+    return sa.true()
+{{- end}}
+
+
+def _lock_scope(connection: Connection, organization_id: str) -> None:
+{{- if .Tenancy}}
+    found = connection.execute(
+        select(organizations.c.id)
+        .where(
+            organizations.c.id == organization_id,
+            organizations.c.status == "active",
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if found is None:
+        raise CRMNotFound()
+{{- else}}
+    del connection, organization_id
+{{- end}}
+
+
+def _require_account(connection: Connection, organization_id: str, account_id: str | None) -> None:
+    if account_id is None:
+        return
+    found = connection.execute(
+        select(crm_accounts.c.id)
+        .where(
+            crm_accounts.c.id == account_id,
+            func.coalesce(crm_accounts.c.organization_id, "") == organization_id,
+            crm_accounts.c.status == RecordStatus.ACTIVE.value,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if found is None:
+        raise CRMNotFound()
+
+
+def _require_subject(
+    connection: Connection,
+    organization_id: str,
+    subject_type: SubjectType,
+    subject_id: str,
+) -> None:
+    table = {
+        SubjectType.ACCOUNT: crm_accounts,
+        SubjectType.CONTACT: crm_contacts,
+        SubjectType.OPPORTUNITY: crm_opportunities,
+    }[subject_type]
+    found = connection.execute(
+        select(table.c.id)
+        .where(
+            table.c.id == subject_id,
+            func.coalesce(table.c.organization_id, "") == organization_id,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if found is None:
+        raise CRMNotFound()
+
+
+def _read_account(connection: Connection, organization_id: str, record_id: str) -> CRMAccount:
+    row = (
+        connection.execute(
+            select(crm_accounts).where(
+                crm_accounts.c.id == record_id,
+                func.coalesce(crm_accounts.c.organization_id, "") == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_account(row)
+
+
+def _read_contact(connection: Connection, organization_id: str, record_id: str) -> CRMContact:
+    row = (
+        connection.execute(
+            select(crm_contacts).where(
+                crm_contacts.c.id == record_id,
+                func.coalesce(crm_contacts.c.organization_id, "") == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_contact(row)
+
+
+def _read_opportunity(
+    connection: Connection, organization_id: str, record_id: str
+) -> CRMOpportunity:
+    row = (
+        connection.execute(
+            select(crm_opportunities).where(
+                crm_opportunities.c.id == record_id,
+                func.coalesce(crm_opportunities.c.organization_id, "") == organization_id,
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return _map_opportunity(row)
+
+
+def _require_mutation(changed: int) -> None:
+    if changed != 1:
+        raise CRMConflict()
+
+
+def _next[Identified: (CRMAccount, CRMContact, CRMActivity, CRMOpportunity)](
+    values: list[Identified], limit: int
+) -> str:
+    return values[limit - 1].id if len(values) > limit else ""
+
+
+def _organization(value: CRMAccount | CRMContact | CRMActivity | CRMOpportunity) -> str:
+    return {{if .Tenancy}}value.organization_id{{else}}""{{end}}
+
+
+def _account_values(value: CRMAccount) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": {{if .Tenancy}}value.organization_id{{else}}None{{end}},
+        "name": value.name,
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _contact_values(value: CRMContact) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": {{if .Tenancy}}value.organization_id{{else}}None{{end}},
+        "account_id": value.account_id,
+        "name": value.name,
+        "email": value.email,
+        "phone": value.phone,
+        "status": value.status.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _activity_values(value: CRMActivity) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": {{if .Tenancy}}value.organization_id{{else}}None{{end}},
+        "subject_type": value.subject_type.value,
+        "subject_id": value.subject_id,
+        "activity_type": value.type.value,
+        "summary": value.summary,
+        "occurred_at": value.occurred_at,
+        "created_by": value.created_by,
+        "created_at": value.created_at,
+    }
+
+
+def _opportunity_values(value: CRMOpportunity) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": {{if .Tenancy}}value.organization_id{{else}}None{{end}},
+        "account_id": value.account_id,
+        "name": value.name,
+        "amount_minor": int(value.amount_minor),
+        "currency": value.currency,
+        "stage": value.stage.value,
+        "version": int(value.version),
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _map_account(row: RowMapping) -> CRMAccount:
+    return CRMAccount(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        name=str(row["name"]),
+        status=RecordStatus(str(row["status"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_contact(row: RowMapping) -> CRMContact:
+    return CRMContact(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        account_id=_optional(row["account_id"]),
+        name=str(row["name"]),
+        email=_optional(row["email"]),
+        phone=_optional(row["phone"]),
+        status=RecordStatus(str(row["status"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_activity(row: RowMapping) -> CRMActivity:
+    return CRMActivity(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        subject_type=SubjectType(str(row["subject_type"])),
+        subject_id=str(row["subject_id"]),
+        type=str(row["activity_type"]),
+        summary=str(row["summary"]),
+        occurred_at=_utc(cast(datetime, row["occurred_at"])),
+        created_by=str(row["created_by"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+    )
+
+
+def _map_opportunity(row: RowMapping) -> CRMOpportunity:
+    return CRMOpportunity(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        account_id=str(row["account_id"]),
+        name=str(row["name"]),
+        amount_minor=str(row["amount_minor"]),
+        currency=str(row["currency"]),
+        stage=OpportunityStage(str(row["stage"])),
+        version=str(row["version"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _optional(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

@@ -91,7 +91,7 @@ func (engine *Engine) Query(ctx context.Context, input QueryInput) result.Envelo
 				"portable-approval-workflows",
 				"portable-commerce-catalog",
 				"portable-customer-accounts",
-				"go-java-crm-core",
+				"go-java-python-crm-core",
 				"java-spring-boot-foundation",
 				"java-session-token-identity",
 				"python-fastapi-foundation",

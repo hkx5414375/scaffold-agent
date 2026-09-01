@@ -275,6 +275,95 @@ func TestCustomerAccountsRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateCRMCoreAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Metadata.DisplayName = "Generated Python CRM Service"
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: crmOwner, Version: crmVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[crmOwner] != crmVersion ||
+				generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				generated.CapabilityLock[adminui.Owner] != adminui.Version {
+				t.Fatalf("Generate(%s) capability lock = %#v", database, generated.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/demo_service/crm/models.py",
+				"src/demo_service/crm/service.py",
+				"src/demo_service/crm/repository.py",
+				"src/demo_service/crm/http.py",
+				"src/demo_service/migration/versions/000280_crm.py",
+				"tests/test_crm.py",
+				"tests/test_crm_database.py",
+				"tests/test_crm_http.py",
+				"web/admin/src/views/CRMView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != crmOwner {
+					t.Errorf("Generate(%s) CRM output %s is missing or has the wrong owner", database, path)
+				}
+			}
+			assertions := map[string][]string{
+				"src/demo_service/main.py": {
+					"app.state.crm_service = CRMService",
+					"application.include_router(crm_router)",
+				},
+				"src/demo_service/crm/repository.py": {
+					"organizations.c.status == \"active\"",
+					"append_audit(connection, audit)",
+					"with_for_update()",
+				},
+				"api/openapi.yaml": {
+					"/api/v1/crm/accounts:",
+					"/api/v1/crm/opportunities/{id}/advance:",
+					"crm:pipeline:manage",
+					"amount_minor:",
+				},
+				"web/admin/src/App.vue": {"CRMView"},
+			}
+			for path, fragments := range assertions {
+				content := string(outputContent(generated, path))
+				for _, fragment := range fragments {
+					if !strings.Contains(content, fragment) {
+						t.Errorf("%s does not contain %q", path, fragment)
+					}
+				}
+			}
+			var contract map[string]any
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &contract); err != nil {
+				t.Fatalf("generated CRM OpenAPI is invalid YAML: %v", err)
+			}
+		})
+	}
+}
+
+func TestCRMCoreRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: crmOwner, Version: crmVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate(tenancy %s) error = %v", version, err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 	t.Parallel()
 

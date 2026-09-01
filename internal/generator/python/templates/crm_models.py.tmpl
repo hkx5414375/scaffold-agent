@@ -1,0 +1,418 @@
+"""CRM API records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from {{.PackageName}}.identity.models import metadata
+
+NON_NEGATIVE_INTEGER = r"^(0|[1-9][0-9]*)$"
+POSITIVE_VERSION = r"^[1-9][0-9]*$"
+
+crm_accounts = sa.Table(
+    "crm_accounts",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('active', 'archived')", name="crm_accounts_status"),
+    sa.CheckConstraint("version > 0", name="crm_accounts_version"),
+)
+sa.Index(
+    "crm_accounts_scope_status_idx",
+{{- if .Tenancy}}
+    crm_accounts.c.organization_id,
+{{- end}}
+    crm_accounts.c.status,
+    crm_accounts.c.id,
+)
+
+crm_contacts = sa.Table(
+    "crm_contacts",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("account_id", sa.String(191), sa.ForeignKey("crm_accounts.id"), nullable=True),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("email", sa.String(254), nullable=True),
+    sa.Column("phone", sa.String(64), nullable=True),
+    sa.Column("status", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("status in ('active', 'archived')", name="crm_contacts_status"),
+    sa.CheckConstraint("version > 0", name="crm_contacts_version"),
+    sa.UniqueConstraint(
+{{- if .Tenancy}}
+        "organization_id",
+{{- end}}
+        "email",
+        name="crm_contacts_scope_email_unique",
+    ),
+)
+sa.Index(
+    "crm_contacts_scope_status_idx",
+{{- if .Tenancy}}
+    crm_contacts.c.organization_id,
+{{- end}}
+    crm_contacts.c.status,
+    crm_contacts.c.id,
+)
+sa.Index("crm_contacts_account_idx", crm_contacts.c.account_id, crm_contacts.c.id)
+
+crm_opportunities = sa.Table(
+    "crm_opportunities",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("account_id", sa.String(191), sa.ForeignKey("crm_accounts.id"), nullable=False),
+    sa.Column("name", sa.String(160), nullable=False),
+    sa.Column("amount_minor", sa.BigInteger(), nullable=False),
+    sa.Column("currency", sa.String(3), nullable=False),
+    sa.Column("stage", sa.String(16), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint("amount_minor >= 0", name="crm_opportunities_amount"),
+    sa.CheckConstraint(
+        "stage in ('lead', 'qualified', 'proposal', 'won', 'lost')",
+        name="crm_opportunities_stage",
+    ),
+    sa.CheckConstraint("version > 0", name="crm_opportunities_version"),
+)
+sa.Index(
+    "crm_opportunities_scope_stage_idx",
+{{- if .Tenancy}}
+    crm_opportunities.c.organization_id,
+{{- end}}
+    crm_opportunities.c.stage,
+    crm_opportunities.c.id,
+)
+sa.Index(
+    "crm_opportunities_account_idx",
+    crm_opportunities.c.account_id,
+    crm_opportunities.c.id,
+)
+
+crm_activities = sa.Table(
+    "crm_activities",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("subject_type", sa.String(16), nullable=False),
+    sa.Column("subject_id", sa.String(191), nullable=False),
+    sa.Column("activity_type", sa.String(16), nullable=False),
+    sa.Column("summary", sa.Text(), nullable=False),
+    sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_by", sa.String(191), sa.ForeignKey("identity_users.id"), nullable=False),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "subject_type in ('account', 'contact', 'opportunity')",
+        name="crm_activities_subject",
+    ),
+    sa.CheckConstraint(
+        "activity_type in ('note', 'call', 'email', 'meeting')",
+        name="crm_activities_type",
+    ),
+)
+sa.Index(
+    "crm_activities_scope_subject_idx",
+{{- if .Tenancy}}
+    crm_activities.c.organization_id,
+{{- end}}
+    crm_activities.c.subject_type,
+    crm_activities.c.subject_id,
+    crm_activities.c.id,
+)
+
+
+class RecordStatus(StrEnum):
+    """Reversible CRM record lifecycle."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ActivityType(StrEnum):
+    """Immutable interaction category."""
+
+    NOTE = "note"
+    CALL = "call"
+    EMAIL = "email"
+    MEETING = "meeting"
+
+
+class SubjectType(StrEnum):
+    """CRM activity subject category."""
+
+    ACCOUNT = "account"
+    CONTACT = "contact"
+    OPPORTUNITY = "opportunity"
+
+
+class OpportunityStage(StrEnum):
+    """Forward-only sales stage."""
+
+    LEAD = "lead"
+    QUALIFIED = "qualified"
+    PROPOSAL = "proposal"
+    WON = "won"
+    LOST = "lost"
+
+
+class CRMErrorKind(StrEnum):
+    """Stable CRM failure categories."""
+
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    STORAGE = "storage"
+
+
+class CRMError(Exception):
+    """Expected CRM failure without storage internals."""
+
+    def __init__(self, kind: CRMErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class StrictModel(BaseModel):
+    """Reject fields outside the stable CRM contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CRMAccount(StrictModel):
+    """Business customer company, distinct from a tenancy organization."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    name: str = Field(min_length=1, max_length=160)
+    status: RecordStatus
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        return _aware(value)
+
+
+class CRMContact(StrictModel):
+    """Natural person optionally associated with one business account."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    account_id: str | None = Field(default=None, min_length=1, max_length=191)
+    name: str = Field(min_length=1, max_length=160)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=64)
+    status: RecordStatus
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        return _aware(value)
+
+
+class CRMActivity(StrictModel):
+    """Immutable CRM interaction."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    subject_type: SubjectType
+    subject_id: str = Field(min_length=1, max_length=191)
+    type: ActivityType
+    summary: str = Field(min_length=1, max_length=4000)
+    occurred_at: datetime
+    created_by: str = Field(min_length=1, max_length=191)
+    created_at: datetime
+
+    @field_validator("occurred_at", "created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        return _aware(value)
+
+
+class CRMOpportunity(StrictModel):
+    """Forward-only sales opportunity."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    account_id: str = Field(min_length=1, max_length=191)
+    name: str = Field(min_length=1, max_length=160)
+    amount_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    currency: str = Field(pattern=r"^[A-Z]{3}$", max_length=3)
+    stage: OpportunityStage
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        return _aware(value)
+
+
+class AccountWrite(StrictModel):
+    """Bounded business account input."""
+
+    name: str = Field(min_length=1, max_length=160)
+
+
+class AccountUpdate(AccountWrite):
+    """Optimistic account replacement."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class ContactWrite(StrictModel):
+    """Bounded contact input."""
+
+    account_id: str | None = Field(default=None, min_length=1, max_length=191)
+    name: str = Field(min_length=1, max_length=160)
+    email: str | None = Field(default=None, max_length=254)
+    phone: str | None = Field(default=None, max_length=64)
+
+
+class ContactUpdate(ContactWrite):
+    """Optimistic contact replacement."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class ActivityWrite(StrictModel):
+    """Immutable activity input."""
+
+    subject_type: SubjectType
+    subject_id: str = Field(min_length=1, max_length=191)
+    type: ActivityType
+    summary: str = Field(min_length=1, max_length=4000)
+    occurred_at: datetime
+
+    @field_validator("occurred_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        return _aware(value)
+
+
+class OpportunityWrite(StrictModel):
+    """Bounded opportunity input."""
+
+    account_id: str = Field(min_length=1, max_length=191)
+    name: str = Field(min_length=1, max_length=160)
+    amount_minor: str = Field(pattern=NON_NEGATIVE_INTEGER, max_length=19)
+    currency: str = Field(min_length=3, max_length=3)
+
+
+class OpportunityUpdate(OpportunityWrite):
+    """Optimistic opportunity replacement."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class CRMTransition(StrictModel):
+    """Optimistic record transition."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+
+
+class CRMStageTransition(CRMTransition):
+    """Optimistic opportunity stage transition."""
+
+    stage: OpportunityStage
+
+
+class AccountPage(StrictModel):
+    """Bounded account page."""
+
+    items: list[CRMAccount]
+    next_cursor: str
+
+
+class ContactPage(StrictModel):
+    """Bounded contact page."""
+
+    items: list[CRMContact]
+    next_cursor: str
+
+
+class ActivityPage(StrictModel):
+    """Bounded activity page."""
+
+    items: list[CRMActivity]
+    next_cursor: str
+
+
+class OpportunityPage(StrictModel):
+    """Bounded opportunity page."""
+
+    items: list[CRMOpportunity]
+    next_cursor: str
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("datetime values must include a UTC offset")
+    return value

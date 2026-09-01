@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation, `commerce-catalog` `0.1.0`, and `customer-accounts` `0.1.0` with separate storefront identity, shared Vue customer administration, and Nuxt account pages. Go and Java also implement `crm-core` `0.1.0` across PostgreSQL and MySQL with business accounts, contacts, immutable activities, forward-only opportunities, and shared Vue administration; Python parity is next. Schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation, `commerce-catalog` `0.1.0`, `customer-accounts` `0.1.0`, and `crm-core` `0.1.0`. CRM generation includes business accounts, contacts, immutable activities, forward-only opportunities, atomic audit, active-tenant isolation, and the identical Vue administration view; a cross-backend OpenAPI and migration conformance gate keeps Go, Java, and Python aligned. Schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -77,6 +77,8 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-go
 go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-java --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-python --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/crm-service-go --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/crm-service-java --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/crm-service-python --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

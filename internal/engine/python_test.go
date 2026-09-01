@@ -212,12 +212,28 @@ func TestPythonMySQLCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, false, false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantCRMCorePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, true, "0.3.0", false, false, false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLTenantCRMCorePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "0.3.0", false, false, false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonPostgreSQLCRMCorePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", false, false, "", false, false, false, false, false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLCRMCorePlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", false, false, "", false, false, false, false, false, false, false, false, false, false, true)
+}
+
 func TestPythonPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func TestPythonMySQLPlatformCapabilitiesCompose(t *testing.T) {
-	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true)
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true, true, true, true)
 }
 
 func runGeneratedPythonReference(
@@ -262,6 +278,7 @@ func runGeneratedPythonReferenceOptions(
 	approvals := len(platformSelections) > 1 && platformSelections[1]
 	catalog := len(platformSelections) > 2 && platformSelections[2]
 	customerAccounts := len(platformSelections) > 3 && platformSelections[3]
+	crm := len(platformSelections) > 4 && platformSelections[4]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -299,7 +316,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "STOREFRONT", storefront)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals || catalog || customerAccounts || crm {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -359,6 +376,11 @@ CAPABILITIES
 	}
 	if customerAccounts {
 		capabilities += `    - name: customer-accounts
+      version: 0.1.0
+`
+	}
+	if crm {
+		capabilities += `    - name: crm-core
       version: 0.1.0
 `
 	}
@@ -473,6 +495,12 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
+	if crm {
+		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -517,6 +545,9 @@ CAPABILITIES
 	if customerAccounts && (plannedData.CapabilityLock["customer-accounts"] != "0.1.0" ||
 		plannedData.CapabilityLock["nuxt-storefront"] != "0.1.0") {
 		t.Fatalf("Plan() customer accounts lock = %#v", plannedData.CapabilityLock)
+	}
+	if crm && plannedData.CapabilityLock["crm-core"] != "0.1.0" {
+		t.Fatalf("Plan() CRM core lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

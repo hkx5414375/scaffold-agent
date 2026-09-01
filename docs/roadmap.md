@@ -93,7 +93,8 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Portable `crm-core` 0.1 contract for business accounts, contacts, immutable activities, opportunities, tenant isolation, audit, pagination, and forward-only pipeline stages.
 - [x] Go `crm-core` 0.1 reference implementation for PostgreSQL and MySQL with shared Vue administration.
 - [x] Java `crm-core` 0.1 parity for PostgreSQL and MySQL with Spring Boot, atomic JDBC audit, and shared Vue administration.
-- [ ] Python `crm-core` 0.1 parity.
+- [x] Python `crm-core` 0.1 parity for PostgreSQL and MySQL with FastAPI, SQLAlchemy, Alembic, atomic audit, active-tenant isolation, and shared Vue administration.
+- [x] Cross-backend CRM OpenAPI, permission, schema, migration, and shared administration conformance gate.
 - [ ] ERP catalog, procurement, stock ledger, reservations, and inventory movements.
 - [ ] Commerce catalog, pricing, cart, checkout, orders, fulfillment, and returns.
 - [ ] Marketing campaigns, coupons, and promotion evaluation.

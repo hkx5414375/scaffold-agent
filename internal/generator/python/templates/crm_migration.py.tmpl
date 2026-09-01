@@ -1,0 +1,190 @@
+"""Create portable CRM storage and permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000280_crm"
+down_revision: str | None = {{if .CustomerAccounts}}"000270_customer_accounts"{{else if .Catalog}}"000260_commerce_catalog"{{else if .Approvals}}"000250_approval_workflows"{{else if .CSVTransfer}}"000240_csv_import_export"{{else if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else if .Business}}"000002_business"{{else}}"000001_identity"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create CRM entities, scoped indexes, and separated grants."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {
+            "code": "crm:read",
+            "description": "Read CRM accounts, contacts, activities, and opportunities",
+        },
+        {
+            "code": "crm:write",
+            "description": "Create and update CRM records",
+        },
+        {
+            "code": "crm:pipeline:manage",
+            "description": "Advance CRM opportunity stages",
+        },
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in rows],
+    )
+
+    op.create_table(
+        "crm_accounts",
+        sa.Column("id", sa.String(191), primary_key=True),
+        _organization_column(),
+        sa.Column("name", sa.String(160), nullable=False),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("status in ('active', 'archived')", name="crm_accounts_status"),
+        sa.CheckConstraint("version > 0", name="crm_accounts_version"),
+    )
+    op.create_index(
+        "crm_accounts_scope_status_idx",
+        "crm_accounts",
+        [{{if .Tenancy}}"organization_id", {{end}}"status", "id"],
+    )
+    op.create_table(
+        "crm_contacts",
+        sa.Column("id", sa.String(191), primary_key=True),
+        _organization_column(),
+        sa.Column(
+            "account_id",
+            sa.String(191),
+            sa.ForeignKey("crm_accounts.id"),
+            nullable=True,
+        ),
+        sa.Column("name", sa.String(160), nullable=False),
+        sa.Column("email", sa.String(254), nullable=True),
+        sa.Column("phone", sa.String(64), nullable=True),
+        sa.Column("status", sa.String(16), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("status in ('active', 'archived')", name="crm_contacts_status"),
+        sa.CheckConstraint("version > 0", name="crm_contacts_version"),
+        sa.UniqueConstraint(
+{{- if .Tenancy}}
+            "organization_id",
+{{- end}}
+            "email",
+            name="crm_contacts_scope_email_unique",
+        ),
+    )
+    op.create_index(
+        "crm_contacts_scope_status_idx",
+        "crm_contacts",
+        [{{if .Tenancy}}"organization_id", {{end}}"status", "id"],
+    )
+    op.create_index("crm_contacts_account_idx", "crm_contacts", ["account_id", "id"])
+    op.create_table(
+        "crm_opportunities",
+        sa.Column("id", sa.String(191), primary_key=True),
+        _organization_column(),
+        sa.Column(
+            "account_id",
+            sa.String(191),
+            sa.ForeignKey("crm_accounts.id"),
+            nullable=False,
+        ),
+        sa.Column("name", sa.String(160), nullable=False),
+        sa.Column("amount_minor", sa.BigInteger(), nullable=False),
+        sa.Column("currency", sa.String(3), nullable=False),
+        sa.Column("stage", sa.String(16), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint("amount_minor >= 0", name="crm_opportunities_amount"),
+        sa.CheckConstraint(
+            "stage in ('lead', 'qualified', 'proposal', 'won', 'lost')",
+            name="crm_opportunities_stage",
+        ),
+        sa.CheckConstraint("version > 0", name="crm_opportunities_version"),
+    )
+    op.create_index(
+        "crm_opportunities_scope_stage_idx",
+        "crm_opportunities",
+        [{{if .Tenancy}}"organization_id", {{end}}"stage", "id"],
+    )
+    op.create_index(
+        "crm_opportunities_account_idx",
+        "crm_opportunities",
+        ["account_id", "id"],
+    )
+    op.create_table(
+        "crm_activities",
+        sa.Column("id", sa.String(191), primary_key=True),
+        _organization_column(),
+        sa.Column("subject_type", sa.String(16), nullable=False),
+        sa.Column("subject_id", sa.String(191), nullable=False),
+        sa.Column("activity_type", sa.String(16), nullable=False),
+        sa.Column("summary", sa.Text(), nullable=False),
+        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_by",
+            sa.String(191),
+            sa.ForeignKey("identity_users.id"),
+            nullable=False,
+        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "subject_type in ('account', 'contact', 'opportunity')",
+            name="crm_activities_subject",
+        ),
+        sa.CheckConstraint(
+            "activity_type in ('note', 'call', 'email', 'meeting')",
+            name="crm_activities_type",
+        ),
+    )
+    op.create_index(
+        "crm_activities_scope_subject_idx",
+        "crm_activities",
+        [{{if .Tenancy}}"organization_id", {{end}}"subject_type", "subject_id", "id"],
+    )
+
+
+def downgrade() -> None:
+    """Remove CRM storage and permissions."""
+    op.drop_table("crm_activities")
+    op.drop_table("crm_opportunities")
+    op.drop_table("crm_contacts")
+    op.drop_table("crm_accounts")
+    codes = ["crm:read", "crm:write", "crm:pipeline:manage"]
+    role_permissions = sa.table(
+        "identity_role_permissions", sa.column("permission_code", sa.String)
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))
+
+
+def _organization_column() -> sa.Column[str]:
+    return sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    )
