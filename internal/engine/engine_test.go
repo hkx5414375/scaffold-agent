@@ -389,7 +389,7 @@ func TestJavaMySQLTenantJobAdministrationPlanApplyVerifyEndToEnd(t *testing.T) {
 
 func TestJavaPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
 	runGeneratedJavaCapabilities(
-		t, "postgresql", true, true, "0.3.0", false, true, true, true, true, true, true, true,
+		t, "postgresql", true, true, "0.3.0", false, true, true, true, true, true, true, true, false,
 	)
 }
 
@@ -423,6 +423,20 @@ func TestJavaPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd(t *testing
 
 func TestJavaMySQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaApprovalReference(t, "mysql", true, "0.3.0")
+}
+
+func TestJavaPostgreSQLTenantCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCatalogReference(t, "postgresql", true)
+}
+
+func TestJavaMySQLTenantCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCatalogReference(t, "mysql", true)
+}
+
+func TestJavaPostgreSQLCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCapabilities(
+		t, "postgresql", false, false, "", false, false, false, false, false, false, false, false, true,
+	)
 }
 
 const tenancySelectionV1 = `  capabilities:
@@ -695,63 +709,70 @@ func runGeneratedJavaReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaJobsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, true, false, false, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaNotificationsReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, true, false, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaFilesReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true, false, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, true, false, false, false, false, false, false)
 }
 
 func runGeneratedJavaCacheReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, true, false, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, true, false, false, false, false, false)
 }
 
 func runGeneratedJavaJobAdministrationReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, true, false, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, true, false, false, false, false)
 }
 
 func runGeneratedJavaObservabilityReference(
 	t *testing.T, database string, business, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, true, false, false)
+	runGeneratedJavaCapabilities(t, database, business, admin, tenancyVersion, false, false, false, false, false, true, false, false, false)
 }
 
 func runGeneratedJavaCSVTransferReference(
 	t *testing.T, database string, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, true, admin, tenancyVersion, false, false, false, false, false, false, true, false)
+	runGeneratedJavaCapabilities(t, database, true, admin, tenancyVersion, false, false, false, false, false, false, true, false, false)
 }
 
 func runGeneratedJavaApprovalReference(
 	t *testing.T, database string, admin bool, tenancyVersion string,
 ) {
 	t.Helper()
-	runGeneratedJavaCapabilities(t, database, true, admin, tenancyVersion, false, false, false, false, false, false, false, true)
+	runGeneratedJavaCapabilities(t, database, true, admin, tenancyVersion, false, false, false, false, false, false, false, true, false)
+}
+
+func runGeneratedJavaCatalogReference(t *testing.T, database string, admin bool) {
+	t.Helper()
+	runGeneratedJavaCapabilities(
+		t, database, false, admin, "0.3.0", false, false, false, false, false, false, false, false, true,
+	)
 }
 
 func runGeneratedJavaCapabilities(
@@ -768,6 +789,7 @@ func runGeneratedJavaCapabilities(
 	observability bool,
 	csvTransfer bool,
 	approvals bool,
+	catalog bool,
 ) {
 	t.Helper()
 	root := t.TempDir()
@@ -867,6 +889,14 @@ MODULES
       version: 0.1.0
 `
 	}
+	if catalog {
+		if capabilities == "" {
+			capabilities = "  capabilities:\n"
+		}
+		capabilities += `    - name: commerce-catalog
+      version: 0.1.0
+`
+	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
 	if business {
@@ -906,7 +936,10 @@ MODULES
 		wantChanges = 41
 	}
 	if admin {
-		wantChanges += 20
+		wantChanges += 19
+		if business {
+			wantChanges++
+		}
 	}
 	if tenancyVersion != "" {
 		wantChanges += 9
@@ -957,6 +990,12 @@ MODULES
 			wantChanges++
 		}
 	}
+	if catalog {
+		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["java-service"] != "0.3.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -995,6 +1034,9 @@ MODULES
 	}
 	if approvals && plannedData.CapabilityLock["approval-workflows"] != "0.1.0" {
 		t.Fatalf("Plan() approval lock = %#v", plannedData.CapabilityLock)
+	}
+	if catalog && plannedData.CapabilityLock["commerce-catalog"] != "0.1.0" {
+		t.Fatalf("Plan() commerce catalog lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

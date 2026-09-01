@@ -1,0 +1,210 @@
+package {{.PackageName}}.catalog;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
+class CatalogServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void normalizesPublishesAndArchivesWithAuditEvidence() {
+        FakeRepository repository = new FakeRepository();
+        CatalogService service = service(repository);
+        Principal actor = actor();
+
+        CatalogProduct draft =
+                service.create(
+                        new CatalogService.WriteInput(
+                                " sku-1 ", " First product ", " details ", 1250L, "usd"),
+                        actor);
+        CatalogProduct active =
+                service.publish(
+                        draft.id(), new CatalogService.TransitionInput(1L), actor);
+        CatalogProduct archived =
+                service.archive(
+                        active.id(), new CatalogService.TransitionInput(2L), actor);
+
+        assertThat(draft.sku()).isEqualTo("SKU-1");
+        assertThat(draft.name()).isEqualTo("First product");
+        assertThat(draft.priceMinor()).isEqualTo(1250L);
+        assertThat(active.status()).isEqualTo(CatalogService.ACTIVE);
+        assertThat(archived.status()).isEqualTo(CatalogService.ARCHIVED);
+        assertThat(repository.audits)
+                .extracting(AuditEvent::action)
+                .containsExactly(
+                        "catalog:products:create",
+                        "catalog:products:publish",
+                        "catalog:products:archive");
+    }
+
+    @Test
+    void hidesDraftsAndRejectsStaleOrUnsafeMutations() {
+        CatalogService service = service(new FakeRepository());
+        Principal actor = actor();
+        CatalogProduct draft =
+                service.create(
+                        new CatalogService.WriteInput(
+                                "SKU-2", "Second", "", 0L, "CNY"),
+                        actor);
+
+        assertKind(
+                () -> service.getPublic(organizationId(), draft.id()),
+                CatalogException.Kind.NOT_FOUND);
+        assertKind(
+                () ->
+                        service.publish(
+                                draft.id(), new CatalogService.TransitionInput(2L), actor),
+                CatalogException.Kind.CONFLICT);
+        assertKind(
+                () ->
+                        service.create(
+                                new CatalogService.WriteInput(
+                                        "unsafe sku", "Name", "", 1L, "USD"),
+                                actor),
+                CatalogException.Kind.INVALID);
+        assertKind(
+                () -> service.list("unknown", "", 20, actor),
+                CatalogException.Kind.INVALID);
+    }
+
+    private static CatalogService service(FakeRepository repository) {
+        return new CatalogService(repository, Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static void assertKind(Runnable operation, CatalogException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CatalogException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+    private static Principal actor() {
+        return new Principal(
+                "admin-1",
+                "admin@example.com",
+                "admin",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+    private static String organizationId() {
+{{- if .Tenancy}}
+        return "organization-1";
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static final class FakeRepository implements CatalogRepository {
+
+        private final List<AuditEvent> audits = new ArrayList<>();
+        private CatalogProduct product;
+
+        @Override
+        public void create(CatalogProduct value, AuditEvent auditEvent) {
+            product = value;
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public Optional<CatalogProduct> get(String organizationId, String id) {
+            return matches(organizationId, id) ? Optional.of(product) : Optional.empty();
+        }
+
+        @Override
+        public Optional<CatalogProduct> getPublic(String organizationId, String id) {
+            return matches(organizationId, id) && CatalogService.ACTIVE.equals(product.status())
+                    ? Optional.of(product)
+                    : Optional.empty();
+        }
+
+        @Override
+        public PageResult list(
+                String organizationId,
+                String status,
+                String cursor,
+                int limit,
+                boolean publicRead) {
+            if (product == null
+                    || !scope(product).equals(organizationId)
+                    || (!status.isEmpty() && !status.equals(product.status()))
+                    || (publicRead && !CatalogService.ACTIVE.equals(product.status()))) {
+                return new PageResult(List.of(), "");
+            }
+            return new PageResult(List.of(product), "");
+        }
+
+        @Override
+        public CatalogProduct update(CatalogProduct value, AuditEvent auditEvent) {
+            if (!matches(scope(value), value.id())
+                    || product.version() != value.version()
+                    || CatalogService.ARCHIVED.equals(product.status())) {
+                throw conflict();
+            }
+            product =
+                    new CatalogProduct(
+                            product.id(),
+                            product.organizationId(),
+                            value.sku(),
+                            value.name(),
+                            value.description(),
+                            value.priceMinor(),
+                            value.currency(),
+                            product.status(),
+                            product.version() + 1,
+                            product.createdAt(),
+                            value.updatedAt());
+            audits.add(auditEvent);
+            return product;
+        }
+
+        @Override
+        public CatalogProduct transition(Transition transition, AuditEvent auditEvent) {
+            if (!matches(transition.organizationId(), transition.id())
+                    || product.version() != transition.expectedVersion()
+                    || !product.status().equals(transition.fromStatus())) {
+                throw conflict();
+            }
+            product =
+                    new CatalogProduct(
+                            product.id(),
+                            product.organizationId(),
+                            product.sku(),
+                            product.name(),
+                            product.description(),
+                            product.priceMinor(),
+                            product.currency(),
+                            transition.toStatus(),
+                            product.version() + 1,
+                            product.createdAt(),
+                            transition.updatedAt());
+            audits.add(auditEvent);
+            return product;
+        }
+
+        private boolean matches(String organizationId, String id) {
+            return product != null
+                    && product.id().equals(id)
+                    && scope(product).equals(organizationId);
+        }
+
+        private static String scope(CatalogProduct value) {
+            return value.organizationId() == null ? "" : value.organizationId();
+        }
+
+        private static CatalogException conflict() {
+            return new CatalogException(
+                    CatalogException.Kind.CONFLICT, "catalog product conflicts");
+        }
+    }
+}

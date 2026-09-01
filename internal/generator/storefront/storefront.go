@@ -24,6 +24,7 @@ type Data struct {
 	DisplayNameHTML string
 	DisplayNameJSON string
 	DescriptionJSON string
+	DescriptionLong bool
 	Catalog         bool
 	Tenancy         bool
 }
@@ -37,9 +38,8 @@ func NewData(projectName, displayName string) Data {
 	if err != nil {
 		panic("encode storefront display name: " + err.Error())
 	}
-	descriptionJSON, err := json.Marshal(
-		"A deterministic storefront generated for " + displayName + ".",
-	)
+	description := "A deterministic storefront generated for " + displayName + "."
+	descriptionJSON, err := json.Marshal(description)
 	if err != nil {
 		panic("encode storefront description: " + err.Error())
 	}
@@ -48,6 +48,7 @@ func NewData(projectName, displayName string) Data {
 		DisplayNameHTML: html.EscapeString(displayName),
 		DisplayNameJSON: string(displayNameJSON),
 		DescriptionJSON: string(descriptionJSON),
+		DescriptionLong: len([]rune(string(descriptionJSON))) > 61,
 	}
 }
 

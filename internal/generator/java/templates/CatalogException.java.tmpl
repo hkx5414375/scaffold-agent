@@ -1,0 +1,21 @@
+package {{.PackageName}}.catalog;
+
+public final class CatalogException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        CONFLICT
+    }
+
+    private final Kind kind;
+
+    public CatalogException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

@@ -1,0 +1,100 @@
+package {{.PackageName}}.catalog;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class CatalogController {
+
+    private static final String ADMIN_PATH = "/api/v1/catalog/products";
+    private static final String PUBLIC_PATH = "/api/v1/storefront/products";
+    private static final String ORGANIZATION_HEADER = "X-Organization-ID";
+
+    private final CatalogService service;
+
+    public CatalogController(CatalogService service) {
+        this.service = service;
+    }
+
+    @PostMapping(ADMIN_PATH)
+    @RequirePermission(value = "catalog:products:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public ResponseEntity<CatalogProduct> create(
+            @RequestBody CatalogService.WriteInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(service.create(input, actor));
+    }
+
+    @GetMapping(ADMIN_PATH)
+    @RequirePermission(value = "catalog:products:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CatalogService.Page list(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.list(status, cursor, limit, actor);
+    }
+
+    @GetMapping(ADMIN_PATH + "/{id}")
+    @RequirePermission(value = "catalog:products:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CatalogProduct get(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.get(id, actor);
+    }
+
+    @PutMapping(ADMIN_PATH + "/{id}")
+    @RequirePermission(value = "catalog:products:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CatalogProduct update(
+            @PathVariable String id,
+            @RequestBody CatalogService.UpdateInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.update(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/{id}/publish")
+    @RequirePermission(value = "catalog:products:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CatalogProduct publish(
+            @PathVariable String id,
+            @RequestBody CatalogService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.publish(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/{id}/archive")
+    @RequirePermission(value = "catalog:products:write"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CatalogProduct archive(
+            @PathVariable String id,
+            @RequestBody CatalogService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.archive(id, input, actor);
+    }
+
+    @GetMapping(PUBLIC_PATH)
+    public CatalogService.Page listPublic(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit) {
+        return service.listPublic(organizationId, cursor, limit);
+    }
+
+    @GetMapping(PUBLIC_PATH + "/{id}")
+    public CatalogProduct getPublic(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @PathVariable String id) {
+        return service.getPublic(organizationId, id);
+    }
+}

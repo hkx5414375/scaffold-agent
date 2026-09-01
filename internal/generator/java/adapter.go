@@ -50,6 +50,8 @@ const (
 	csvTransferVersion      = "0.1.0"
 	approvalsOwner          = "approval-workflows"
 	approvalsVersion        = "0.1.0"
+	catalogOwner            = "commerce-catalog"
+	catalogVersion          = "0.1.0"
 )
 
 //go:embed all:templates
@@ -83,6 +85,7 @@ type databaseData struct {
 	JobAdminMigrationTemplate         string
 	CSVTransferMigrationTemplate      string
 	ApprovalsMigrationTemplate        string
+	CatalogMigrationTemplate          string
 }
 
 var databases = map[string]databaseData{
@@ -104,6 +107,7 @@ var databases = map[string]databaseData{
 		JobAdminMigrationTemplate:         "templates/jobadmin_postgresql.sql.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_postgresql.sql.tmpl",
 		ApprovalsMigrationTemplate:        "templates/approvals_postgresql.sql.tmpl",
+		CatalogMigrationTemplate:          "templates/catalog_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -123,6 +127,7 @@ var databases = map[string]databaseData{
 		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
 		CSVTransferMigrationTemplate:      "templates/csv_transfer_mysql.sql.tmpl",
 		ApprovalsMigrationTemplate:        "templates/approvals_mysql.sql.tmpl",
+		CatalogMigrationTemplate:          "templates/catalog_mysql.sql.tmpl",
 	},
 }
 
@@ -235,6 +240,16 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyLifecycleVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization ownership, reversible lifecycle, invitations, and tenant isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: catalogOwner, Version: catalogVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable product catalog with audited publication and public storefront reads.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -363,6 +378,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	observabilityEnabled := false
 	csvTransferEnabled := false
 	approvalsEnabled := false
+	catalogEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -396,6 +412,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == approvalsOwner {
 			approvalsEnabled = true
 		}
+		if pack.Metadata.Name == catalogOwner {
+			catalogEnabled = true
+		}
+	}
+	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, fmt.Errorf(
+			"commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0",
+		)
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine, approvalsEnabled)
 	if err != nil {
@@ -439,6 +463,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if approvalsEnabled {
 		migrationCount++
 	}
+	if catalogEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -459,6 +486,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Observability:    observabilityEnabled,
 		CSVTransfer:      csvTransferEnabled,
 		Approvals:        approvalsEnabled,
+		Catalog:          catalogEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+len(storefrontui.BaseTemplates)+20)
@@ -477,6 +505,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	observabilityPaths := make(map[string]struct{}, 7)
 	csvTransferPaths := make(map[string]struct{}, 9)
 	approvalsPaths := make(map[string]struct{}, 11)
+	catalogPaths := make(map[string]struct{}, 12)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -544,6 +573,20 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		targets[path] = templatePath
 		approvalsPaths[path] = struct{}{}
 		adminPaths[path] = struct{}{}
+	}
+	addCatalogTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		catalogPaths[path] = struct{}{}
+	}
+	addCatalogUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		adminPaths[path] = struct{}{}
+		catalogPaths[path] = struct{}{}
+	}
+	addCatalogStorefront := func(path, templatePath string) {
+		targets[path] = templatePath
+		storefrontPaths[path] = struct{}{}
+		catalogPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -826,6 +869,33 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		capabilityLock[approvalsOwner] = approvalsVersion
 	}
+	if catalogEnabled {
+		for path, templatePath := range map[string]string{
+			mainRoot + "/catalog/CatalogProduct.java":                       "templates/CatalogProduct.java.tmpl",
+			mainRoot + "/catalog/CatalogException.java":                     "templates/CatalogException.java.tmpl",
+			mainRoot + "/catalog/CatalogRepository.java":                    "templates/CatalogRepository.java.tmpl",
+			mainRoot + "/catalog/JdbcCatalogRepository.java":                "templates/JdbcCatalogRepository.java.tmpl",
+			mainRoot + "/catalog/CatalogService.java":                       "templates/CatalogService.java.tmpl",
+			mainRoot + "/catalog/CatalogController.java":                    "templates/CatalogController.java.tmpl",
+			testRoot + "/catalog/CatalogServiceTest.java":                   "templates/CatalogServiceTest.java.tmpl",
+			testRoot + "/catalog/CatalogDatabaseIntegrationTest.java":       "templates/CatalogDatabaseIntegrationTest.java.tmpl",
+			"src/main/resources/db/migration/V000260__commerce_catalog.sql": database.CatalogMigrationTemplate,
+		} {
+			addCatalogTarget(path, templatePath)
+		}
+		if adminEnabled {
+			addCatalogUI(
+				"web/admin/src/views/CatalogView.vue",
+				"templates/src/views/CatalogView.vue.tmpl",
+			)
+		}
+		if storefrontEnabled {
+			for path, templatePath := range storefrontui.CatalogTemplates {
+				addCatalogStorefront(path, templatePath)
+			}
+		}
+		capabilityLock[catalogOwner] = catalogVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -871,9 +941,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if _, isAdminPath := adminPaths[path]; isAdminPath {
 			content, err = adminui.Render(targets[path], data)
 		} else if _, isStorefrontPath := storefrontPaths[path]; isStorefrontPath {
+			storefrontData := storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName)
+			storefrontData.Catalog = catalogEnabled
+			storefrontData.Tenancy = tenancyEnabled
 			content, err = storefrontui.Render(
 				targets[path],
-				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+				storefrontData,
 			)
 		} else {
 			content, err = render(targets[path], data)
@@ -917,6 +990,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isApprovalsPath := approvalsPaths[path]; isApprovalsPath {
 			owner = approvalsOwner
+		}
+		if _, isCatalogPath := catalogPaths[path]; isCatalogPath {
+			owner = catalogOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

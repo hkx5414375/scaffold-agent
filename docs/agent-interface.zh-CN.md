@@ -48,7 +48,7 @@ Go、Java 或 Python 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须�
 
 选择 `storefront: nuxt` 后，Go、Java、Python 都会在 `web/storefront` 生成完全相同的 Nuxt 4 SSR 底座，并在能力锁中记录 `nuxt-storefront` `0.1.0`。后端地址只通过服务端环境变量 `SCAFFOLD_API_BASE_URL` 提供；浏览器只访问有超时限制的本地状态接口，不会拿到上游地址或失败详情。生成项目固定 npm 依赖图，并必须通过 ESLint、Vitest、Nuxt 类型检查、生产构建、Prettier 和依赖审计。AI 后续应通过商城能力输出扩展这个底座，不得替换它的服务端边界，也不得把凭证写进公开运行时配置、浏览器存储或客户端组件。
 
-选择 `commerce-catalog` `0.1.0` 后，当前 Go 适配器会独立于 Blueprint 通用 CRUD 模块生成商品领域、PostgreSQL/MySQL 存储、OpenAPI、管理接口和公开接口；如果同时选择组织租户，必须使用 `organization-tenancy` `0.3.0`，以便公开接口隐藏已停用组织。SKU 和币种会规范成大写，金额采用最小货币单位的 `int64`，金额和版本在 JSON 中都使用十进制字符串。商品只允许从草稿发布为上架，再永久归档；所有写操作与安全审计在同一事务提交。公开接口只返回已上架商品。若同时选择 `storefront: nuxt`，还会生成 SSR 商品列表、详情页和服务端代理；租户标识必须通过服务端 `SCAFFOLD_ORGANIZATION_ID` 提供，AI 不得把它或后端地址暴露到浏览器配置。
+选择 `commerce-catalog` `0.1.0` 后，Go 或 Java 适配器会独立于 Blueprint 通用 CRUD 模块生成商品领域、PostgreSQL/MySQL 存储、OpenAPI、管理接口和公开接口；如果同时选择组织租户，必须使用 `organization-tenancy` `0.3.0`，以便公开接口隐藏已停用组织。SKU 和币种会规范成大写，金额采用最小货币单位的 `int64`，金额和版本在 JSON 中都使用十进制字符串。商品只允许从草稿发布为上架，再永久归档；所有写操作与安全审计在同一事务提交。公开接口只返回已上架商品。若同时选择 `storefront: nuxt`，还会生成 SSR 商品列表、详情页和服务端代理；租户标识必须通过服务端 `SCAFFOLD_ORGANIZATION_ID` 提供，AI 不得把它或后端地址暴露到浏览器配置。
 
 ## STDIO 协议
 

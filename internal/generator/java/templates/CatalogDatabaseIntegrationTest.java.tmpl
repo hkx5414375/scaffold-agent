@@ -1,0 +1,208 @@
+package {{.PackageName}}.catalog;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class CatalogDatabaseIntegrationTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    @Timeout(45)
+    void enforcesScopePublicationVersionUniquenessAndAtomicAudit() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_catalog_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("catalog@example.com", "correct horse battery staple");
+            Principal actor =
+                    identity.login(
+                                    "catalog@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Catalog", actor);
+            actor = scoped(actor, organization.id());
+{{- end}}
+            Principal scopedActor = actor;
+            CatalogService catalog =
+                    new CatalogService(
+                            new JdbcCatalogRepository(jdbc, transactions),
+                            Clock.fixed(NOW, ZoneOffset.UTC));
+            CatalogProduct draft =
+                    catalog.create(
+                            new CatalogService.WriteInput(
+                                    "SKU-1", "First product", "Details", 1250L, "USD"),
+                            scopedActor);
+
+            assertKind(
+                    () ->
+                            catalog.create(
+                                    new CatalogService.WriteInput(
+                                            "SKU-1", "Duplicate", "", 10L, "USD"),
+                                    scopedActor),
+                    CatalogException.Kind.CONFLICT);
+            assertThat(auditCount(jdbc, draft.id())).isEqualTo(1);
+            assertKind(
+                    () -> catalog.getPublic(organizationId(scopedActor), draft.id()),
+                    CatalogException.Kind.NOT_FOUND);
+
+            CatalogProduct active =
+                    catalog.publish(
+                            draft.id(), new CatalogService.TransitionInput(1L), scopedActor);
+            assertThat(catalog.getPublic(organizationId(scopedActor), active.id()).status())
+                    .isEqualTo(CatalogService.ACTIVE);
+            assertKind(
+                    () ->
+                            catalog.update(
+                                    active.id(),
+                                    new CatalogService.UpdateInput(
+                                            "SKU-1", "Stale", "", 10L, "USD", 1L),
+                                    scopedActor),
+                    CatalogException.Kind.CONFLICT);
+
+            CatalogProduct updated =
+                    catalog.update(
+                            active.id(),
+                            new CatalogService.UpdateInput(
+                                    "SKU-1", "Updated", "", 1500L, "USD", 2L),
+                            scopedActor);
+            assertThat(updated.status()).isEqualTo(CatalogService.ACTIVE);
+            assertThat(updated.version()).isEqualTo(3L);
+            CatalogProduct archived =
+                    catalog.archive(
+                            updated.id(), new CatalogService.TransitionInput(3L), scopedActor);
+            assertThat(archived.version()).isEqualTo(4L);
+            assertKind(
+                    () -> catalog.getPublic(organizationId(scopedActor), archived.id()),
+                    CatalogException.Kind.NOT_FOUND);
+            assertThat(auditCount(jdbc, draft.id())).isEqualTo(4);
+{{- if .Tenancy}}
+            jdbc.update(
+                    "update organizations set status = 'inactive', deactivated_at = ? where id = ?",
+                    Timestamp.from(NOW),
+                    organization.id());
+            assertThat(catalog.listPublic(organization.id(), "", 20).items()).isEmpty();
+{{- end}}
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static int auditCount(JdbcTemplate jdbc, String target) {
+        Integer count =
+                jdbc.queryForObject(
+                        "select count(*) from audit_events where target = ? "
+                                + "and action like 'catalog:products:%'",
+                        Integer.class,
+                        target);
+        return count == null ? 0 : count;
+    }
+
+    private static void assertKind(Runnable operation, CatalogException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CatalogException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+{{- if .Tenancy}}
+    private static Principal scoped(Principal actor, String organizationId) {
+        return new Principal(
+                actor.userId(), actor.email(), actor.role(), actor.method(), organizationId);
+    }
+
+{{- end}}
+    private static String organizationId(Principal actor) {
+{{- if .Tenancy}}
+        return actor.organizationId();
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

@@ -1,0 +1,325 @@
+package {{.PackageName}}.catalog;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class CatalogService {
+
+    public static final String DRAFT = "draft";
+    public static final String ACTIVE = "active";
+    public static final String ARCHIVED = "archived";
+
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final Pattern SKU_PATTERN =
+            Pattern.compile("^[A-Z0-9][A-Z0-9._-]{0,63}$");
+    private static final Pattern CURRENCY_PATTERN = Pattern.compile("^[A-Z]{3}$");
+    private static final Set<String> STATUSES = Set.of(DRAFT, ACTIVE, ARCHIVED);
+
+    private final CatalogRepository repository;
+    private final Clock clock;
+
+    public CatalogService(CatalogRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    CatalogService(CatalogRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public CatalogProduct create(WriteInput input, Principal actor) {
+        String organizationId = actorScope(actor);
+        WriteInput value = normalize(input);
+        Instant now = clock.instant();
+        CatalogProduct product =
+                new CatalogProduct(
+                        newId(),
+                        emptyToNull(organizationId),
+                        value.sku(),
+                        value.name(),
+                        value.description(),
+                        value.priceMinor(),
+                        value.currency(),
+                        DRAFT,
+                        1L,
+                        now,
+                        now);
+        repository.create(
+                product, audit(actor, "catalog:products:create", product.id(), now));
+        return product;
+    }
+
+    public CatalogProduct get(String id, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireIdentifier(id);
+        return repository
+                .get(organizationId, normalizedId)
+                .orElseThrow(CatalogService::notFound);
+    }
+
+    public CatalogProduct getPublic(String organizationId, String id) {
+        String scope = publicScope(organizationId);
+        String normalizedId = requireIdentifier(id);
+        return repository
+                .getPublic(scope, normalizedId)
+                .orElseThrow(CatalogService::notFound);
+    }
+
+    public Page list(String status, String cursor, int limit, Principal actor) {
+        return listInternal(actorScope(actor), text(status), cursor, limit, false);
+    }
+
+    public Page listPublic(String organizationId, String cursor, int limit) {
+        return listInternal(publicScope(organizationId), ACTIVE, cursor, limit, true);
+    }
+
+    public CatalogProduct update(String id, UpdateInput input, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireIdentifier(id);
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        WriteInput replacement =
+                normalize(
+                        new WriteInput(
+                                input.sku(),
+                                input.name(),
+                                input.description(),
+                                input.priceMinor(),
+                                input.currency()));
+        Instant now = clock.instant();
+        CatalogProduct product =
+                new CatalogProduct(
+                        normalizedId,
+                        emptyToNull(organizationId),
+                        replacement.sku(),
+                        replacement.name(),
+                        replacement.description(),
+                        replacement.priceMinor(),
+                        replacement.currency(),
+                        "",
+                        input.version(),
+                        now,
+                        now);
+        return repository.update(
+                product, audit(actor, "catalog:products:update", normalizedId, now));
+    }
+
+    public CatalogProduct publish(String id, TransitionInput input, Principal actor) {
+        return transition(
+                id,
+                requireVersion(input),
+                DRAFT,
+                ACTIVE,
+                "catalog:products:publish",
+                actor);
+    }
+
+    public CatalogProduct archive(String id, TransitionInput input, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireIdentifier(id);
+        long version = requireVersion(input);
+        CatalogProduct current =
+                repository
+                        .get(organizationId, normalizedId)
+                        .orElseThrow(CatalogService::notFound);
+        if (!DRAFT.equals(current.status()) && !ACTIVE.equals(current.status())) {
+            throw conflict();
+        }
+        return transition(
+                organizationId,
+                normalizedId,
+                version,
+                current.status(),
+                ARCHIVED,
+                "catalog:products:archive",
+                actor);
+    }
+
+    private CatalogProduct transition(
+            String id,
+            long version,
+            String fromStatus,
+            String toStatus,
+            String action,
+            Principal actor) {
+        return transition(
+                actorScope(actor),
+                requireIdentifier(id),
+                version,
+                fromStatus,
+                toStatus,
+                action,
+                actor);
+    }
+
+    private CatalogProduct transition(
+            String organizationId,
+            String id,
+            long version,
+            String fromStatus,
+            String toStatus,
+            String action,
+            Principal actor) {
+        Instant now = clock.instant();
+        CatalogRepository.Transition transition =
+                new CatalogRepository.Transition(
+                        organizationId, id, version, fromStatus, toStatus, now);
+        return repository.transition(transition, audit(actor, action, id, now));
+    }
+
+    private Page listInternal(
+            String organizationId,
+            String status,
+            String cursor,
+            int limit,
+            boolean publicRead) {
+        String normalizedCursor = text(cursor);
+        if (limit < 1
+                || limit > 100
+                || normalizedCursor.length() > MAXIMUM_IDENTIFIER_LENGTH
+                || !safeText(normalizedCursor)
+                || (!status.isEmpty() && !STATUSES.contains(status))) {
+            throw invalid();
+        }
+        CatalogRepository.PageResult result =
+                repository.list(
+                        organizationId, status, normalizedCursor, limit, publicRead);
+        return new Page(result.items(), result.nextCursor());
+    }
+
+    private static WriteInput normalize(WriteInput input) {
+        if (input == null || input.priceMinor() == null || input.priceMinor() < 0L) {
+            throw invalid();
+        }
+        String sku = text(input.sku()).toUpperCase(Locale.ROOT);
+        String name = text(input.name());
+        String description = text(input.description());
+        String currency = text(input.currency()).toUpperCase(Locale.ROOT);
+        if (!SKU_PATTERN.matcher(sku).matches()
+                || !validRequiredText(name, 160)
+                || !validOptionalText(description, 4000)
+                || !CURRENCY_PATTERN.matcher(currency).matches()) {
+            throw invalid();
+        }
+        return new WriteInput(sku, name, description, input.priceMinor(), currency);
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null || !validRequiredText(text(actor.userId()), MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        String organizationId = text(actor.organizationId());
+        if (!validRequiredText(organizationId, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return organizationId;
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static String publicScope(String organizationId) {
+        String normalized = text(organizationId);
+{{- if .Tenancy}}
+        if (!validRequiredText(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- else}}
+        if (!normalized.isEmpty()) {
+            throw invalid();
+        }
+{{- end}}
+        return normalized;
+    }
+
+    private static long requireVersion(TransitionInput input) {
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        return input.version();
+    }
+
+    private static String requireIdentifier(String id) {
+        String normalized = text(id);
+        if (!validRequiredText(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static boolean validRequiredText(String value, int maximumLength) {
+        return !value.isEmpty() && validOptionalText(value, maximumLength);
+    }
+
+    private static boolean validOptionalText(String value, int maximumLength) {
+        return value.codePointCount(0, value.length()) <= maximumLength && safeText(value);
+    }
+
+    private static boolean safeText(String value) {
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static AuditEvent audit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(
+                newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static CatalogException invalid() {
+        return new CatalogException(
+                CatalogException.Kind.INVALID, "catalog product data is invalid");
+    }
+
+    private static CatalogException notFound() {
+        return new CatalogException(
+                CatalogException.Kind.NOT_FOUND, "catalog product was not found");
+    }
+
+    private static CatalogException conflict() {
+        return new CatalogException(
+                CatalogException.Kind.CONFLICT,
+                "catalog product changed or conflicts with an existing SKU");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record WriteInput(
+            String sku, String name, String description, Long priceMinor, String currency) {}
+
+    public record UpdateInput(
+            String sku,
+            String name,
+            String description,
+            Long priceMinor,
+            String currency,
+            Long version) {}
+
+    public record TransitionInput(Long version) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record Page(List<CatalogProduct> items, String nextCursor) {}
+}

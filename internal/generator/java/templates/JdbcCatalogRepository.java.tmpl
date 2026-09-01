@@ -1,0 +1,276 @@
+package {{.PackageName}}.catalog;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcCatalogRepository implements CatalogRepository {
+
+    private static final String SELECT_COLUMNS =
+            "product.id, product.organization_id, product.sku, product.name, "
+                    + "product.description, product.price_minor, product.currency, "
+                    + "product.status, product.version, product.created_at, product.updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcCatalogRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public void create(CatalogProduct product, AuditEvent auditEvent) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        jdbcTemplate.update(
+                                "insert into catalog_products "
+                                        + "(id, organization_id, sku, name, description, "
+                                        + "price_minor, currency, status, version, "
+                                        + "created_at, updated_at) "
+                                        + "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                product.id(),
+                                product.organizationId(),
+                                product.sku(),
+                                product.name(),
+                                product.description(),
+                                product.priceMinor(),
+                                product.currency(),
+                                product.status(),
+                                product.version(),
+                                Timestamp.from(product.createdAt()),
+                                Timestamp.from(product.updatedAt()));
+                        appendAudit(auditEvent);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Optional<CatalogProduct> get(String organizationId, String id) {
+        return getInternal(organizationId, id);
+    }
+
+    @Override
+    public Optional<CatalogProduct> getPublic(String organizationId, String id) {
+        List<CatalogProduct> values =
+                jdbcTemplate.query(
+                        "select "
+                                + SELECT_COLUMNS
+                                + " from catalog_products product "
+{{- if .Tenancy}}
+                                + "join organizations organization "
+                                + "on organization.id = product.organization_id "
+{{- end}}
+                                + "where product.id = ? "
+                                + "and coalesce(product.organization_id, '') = ? "
+                                + "and product.status = 'active' "
+{{- if .Tenancy}}
+                                + "and organization.status = 'active'"
+{{- else}}
+                                + ""
+{{- end}},
+                        JdbcCatalogRepository::mapProduct,
+                        id,
+                        organizationId);
+        return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
+    }
+
+    @Override
+    public PageResult list(
+            String organizationId,
+            String status,
+            String cursor,
+            int limit,
+            boolean publicRead) {
+        List<CatalogProduct> values =
+                new ArrayList<>(
+                        jdbcTemplate.query(
+                                "select "
+                                        + SELECT_COLUMNS
+                                        + " from catalog_products product "
+{{- if .Tenancy}}
+                                        + "join organizations organization "
+                                        + "on organization.id = product.organization_id "
+{{- end}}
+                                        + "where coalesce(product.organization_id, '') = ? "
+                                        + "and (? = '' or product.status = ?) "
+                                        + "and (? = false or product.status = 'active') "
+{{- if .Tenancy}}
+                                        + "and (? = false or organization.status = 'active') "
+{{- end}}
+                                        + "and (? = '' or product.id > ?) "
+                                        + "order by product.id limit ?",
+                                JdbcCatalogRepository::mapProduct,
+                                organizationId,
+                                status,
+                                status,
+                                publicRead,
+{{- if .Tenancy}}
+                                publicRead,
+{{- end}}
+                                cursor,
+                                cursor,
+                                limit + 1));
+        String nextCursor = "";
+        if (values.size() > limit) {
+            nextCursor = values.get(limit - 1).id();
+            values = new ArrayList<>(values.subList(0, limit));
+        }
+        return new PageResult(List.copyOf(values), nextCursor);
+    }
+
+    @Override
+    public CatalogProduct update(CatalogProduct product, AuditEvent auditEvent) {
+        try {
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                int changed =
+                                        jdbcTemplate.update(
+                                                "update catalog_products set sku = ?, name = ?, "
+                                                        + "description = ?, price_minor = ?, "
+                                                        + "currency = ?, version = version + 1, "
+                                                        + "updated_at = ? where id = ? "
+                                                        + "and coalesce(organization_id, '') = ? "
+                                                        + "and version = ? and status <> 'archived'",
+                                                product.sku(),
+                                                product.name(),
+                                                product.description(),
+                                                product.priceMinor(),
+                                                product.currency(),
+                                                Timestamp.from(product.updatedAt()),
+                                                product.id(),
+                                                scope(product.organizationId()),
+                                                product.version());
+                                requireMutation(changed);
+                                appendAudit(auditEvent);
+                                return getInternal(scope(product.organizationId()), product.id())
+                                        .orElseThrow(JdbcCatalogRepository::notFound);
+                            }));
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public CatalogProduct transition(Transition transition, AuditEvent auditEvent) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            int changed =
+                                    jdbcTemplate.update(
+                                            "update catalog_products set status = ?, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? "
+                                                    + "and coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = ?",
+                                            transition.toStatus(),
+                                            Timestamp.from(transition.updatedAt()),
+                                            transition.id(),
+                                            transition.organizationId(),
+                                            transition.expectedVersion(),
+                                            transition.fromStatus());
+                            requireMutation(changed);
+                            appendAudit(auditEvent);
+                            return getInternal(transition.organizationId(), transition.id())
+                                    .orElseThrow(JdbcCatalogRepository::notFound);
+                        }));
+    }
+
+    private Optional<CatalogProduct> getInternal(String organizationId, String id) {
+        List<CatalogProduct> values =
+                jdbcTemplate.query(
+                        "select "
+                                + SELECT_COLUMNS
+                                + " from catalog_products product where product.id = ? "
+                                + "and coalesce(product.organization_id, '') = ?",
+                        JdbcCatalogRepository::mapProduct,
+                        id,
+                        organizationId);
+        return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, "
+                        + "user_agent, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static CatalogProduct mapProduct(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new CatalogProduct(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("sku"),
+                resultSet.getString("name"),
+                resultSet.getString("description"),
+                resultSet.getLong("price_minor"),
+                resultSet.getString("currency"),
+                resultSet.getString("status"),
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static void requireMutation(int changed) {
+        if (changed != 1) {
+            throw conflict(null);
+        }
+    }
+
+    private static Instant instant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static String scope(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static CatalogException notFound() {
+        return new CatalogException(
+                CatalogException.Kind.NOT_FOUND, "catalog product was not found");
+    }
+
+    private static CatalogException conflict(Throwable cause) {
+        CatalogException exception =
+                new CatalogException(
+                        CatalogException.Kind.CONFLICT,
+                        "catalog product changed or conflicts with an existing SKU");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+}

@@ -84,7 +84,7 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Shared Nuxt 4 storefront foundation for Go, Java, and Python with SSR, a server-only backend boundary, deterministic locks, safe failures, and complete frontend quality gates.
 - [x] Portable `commerce-catalog` 0.1 domain and transport contract with canonical SKUs, minor-unit money, publication state, optimistic concurrency, audit, tenancy, and keyset pagination.
 - [x] Go `commerce-catalog` 0.1 reference implementation for PostgreSQL and MySQL with shared Vue administration and Nuxt public list/detail pages.
-- [ ] Java `commerce-catalog` 0.1 parity for PostgreSQL and MySQL.
+- [x] Java `commerce-catalog` 0.1 parity for PostgreSQL and MySQL with the shared Vue administration and Nuxt public catalog.
 - [ ] Python `commerce-catalog` 0.1 parity for PostgreSQL and MySQL.
 - [ ] Customer accounts and membership lifecycle.
 - [ ] CRM contacts, organizations, activities, and pipeline.

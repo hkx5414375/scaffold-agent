@@ -63,6 +63,29 @@ func TestNewDataEscapesFreeFormDisplayMetadata(t *testing.T) {
 	}
 }
 
+func TestNuxtConfigurationProtectsOnlyLongDynamicDescriptions(t *testing.T) {
+	t.Parallel()
+
+	short, err := Render(
+		"templates/nuxt.config.ts.tmpl",
+		NewData("shop-service", "Catalog Store"),
+	)
+	if err != nil {
+		t.Fatalf("Render(short configuration) error = %v", err)
+	}
+	long, err := Render(
+		"templates/nuxt.config.ts.tmpl",
+		NewData("shop-service", "Generated Java Catalog Storefront"),
+	)
+	if err != nil {
+		t.Fatalf("Render(long configuration) error = %v", err)
+	}
+	if strings.Contains(string(short), "prettier-ignore") ||
+		!strings.Contains(string(long), "// prettier-ignore\n          content:") {
+		t.Fatalf("dynamic description formatting guard is not scoped correctly")
+	}
+}
+
 func TestCatalogCompositionPreservesUnselectedFoundation(t *testing.T) {
 	t.Parallel()
 

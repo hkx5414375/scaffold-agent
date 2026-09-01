@@ -1,0 +1,40 @@
+package {{.PackageName}}.catalog;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface CatalogRepository {
+
+    void create(CatalogProduct product, AuditEvent auditEvent);
+
+    Optional<CatalogProduct> get(String organizationId, String id);
+
+    Optional<CatalogProduct> getPublic(String organizationId, String id);
+
+    PageResult list(
+            String organizationId,
+            String status,
+            String cursor,
+            int limit,
+            boolean publicRead);
+
+    CatalogProduct update(CatalogProduct product, AuditEvent auditEvent);
+
+    CatalogProduct transition(Transition transition, AuditEvent auditEvent);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult(List<CatalogProduct> items, String nextCursor) {}
+
+    record Transition(
+            String organizationId,
+            String id,
+            long expectedVersion,
+            String fromStatus,
+            String toStatus,
+            Instant updatedAt) {}
+}

@@ -167,6 +167,23 @@ transition commits the request, one immutable event, and one audit event in the
 same transaction. A decision records evidence only and never mutates the business
 subject implicitly.
 {{end}}
+{{if .Catalog}}
+
+## Commerce catalog
+
+The catalog capability generates a product domain independently from Blueprint
+CRUD modules. Administration routes under `/api/v1/catalog/products` require
+separate read and write permissions. Anonymous routes under
+`/api/v1/storefront/products` return active products only and hide products owned
+by inactive organizations.
+
+SKU and currency values normalize to upper case. Prices use the currency's
+smallest unit and cross JSON as decimal strings with optimistic versions. Products
+move only from `draft` to `active` to terminal `archived`; every create, update,
+publish, or archive operation commits its audit event in the same transaction.
+Tenant-enabled storefront requests require `X-Organization-ID`; the generated
+Nuxt proxy reads it from server-only `SCAFFOLD_ORGANIZATION_ID`.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

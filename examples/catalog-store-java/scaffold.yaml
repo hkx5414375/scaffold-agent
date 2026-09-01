@@ -1,0 +1,19 @@
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: catalog-store-java
+  display_name: Catalog Store Java
+spec:
+  stack:
+    backend: java
+    admin_ui: element-plus
+    storefront: nuxt
+  database:
+    engine: postgresql
+  auth:
+    modes: [session, token]
+  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: commerce-catalog
+      version: 0.1.0
