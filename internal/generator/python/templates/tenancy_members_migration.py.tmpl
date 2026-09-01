@@ -1,0 +1,98 @@
+"""Add organization invitations and member administration permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000060_tenancy_members"
+down_revision: str | None = "000050_tenancy"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create invitation storage and role permissions."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    op.bulk_insert(
+        permissions,
+        [
+            {"code": "tenancy:members:read", "description": "Read organization members"},
+            {
+                "code": "tenancy:members:manage",
+                "description": "Invite, update, and remove organization members",
+            },
+        ],
+    )
+    op.bulk_insert(
+        role_permissions,
+        [
+            {"role_code": "admin", "permission_code": "tenancy:members:read"},
+            {"role_code": "admin", "permission_code": "tenancy:members:manage"},
+            {"role_code": "user", "permission_code": "tenancy:members:read"},
+        ],
+    )
+    op.create_table(
+        "organization_invitations",
+        sa.Column("id", sa.String(length=191), nullable=False),
+        sa.Column("organization_id", sa.String(length=191), nullable=False),
+        sa.Column("email", sa.String(length=254), nullable=False),
+        sa.Column("role_code", sa.String(length=32), nullable=False),
+        sa.Column("token_hash", sa.String(length=64), nullable=False),
+        sa.Column("invited_by", sa.String(length=191), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("accepted_by", sa.String(length=191), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(["organization_id"], ["organizations.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(["role_code"], ["identity_roles.code"]),
+        sa.ForeignKeyConstraint(["invited_by"], ["identity_users.id"]),
+        sa.ForeignKeyConstraint(["accepted_by"], ["identity_users.id"]),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("token_hash", name="uq_organization_invitations_token_hash"),
+    )
+    op.create_index(
+        "ix_organization_invitations_organization_created",
+        "organization_invitations",
+        ["organization_id", "created_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_organization_invitations_email_expires",
+        "organization_invitations",
+        ["email", "expires_at"],
+        unique=False,
+    )
+
+
+def downgrade() -> None:
+    """Remove member administration storage and permissions."""
+    op.drop_index(
+        "ix_organization_invitations_email_expires",
+        table_name="organization_invitations",
+    )
+    op.drop_index(
+        "ix_organization_invitations_organization_created",
+        table_name="organization_invitations",
+    )
+    op.drop_table("organization_invitations")
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    codes = ["tenancy:members:read", "tenancy:members:manage"]
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

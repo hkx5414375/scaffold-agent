@@ -22,13 +22,14 @@ import (
 )
 
 const (
-	backend        = "python"
-	baseOwner      = "python-service"
-	baseVersion    = "0.1.0"
-	crudOwner      = "python-crud"
-	crudVersion    = "0.1.0"
-	tenancyOwner   = "organization-tenancy"
-	tenancyVersion = "0.1.0"
+	backend               = "python"
+	baseOwner             = "python-service"
+	baseVersion           = "0.1.0"
+	crudOwner             = "python-crud"
+	crudVersion           = "0.1.0"
+	tenancyOwner          = "organization-tenancy"
+	tenancyVersion        = "0.1.0"
+	tenancyMembersVersion = "0.2.0"
 )
 
 //go:embed all:templates
@@ -66,6 +67,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Organization creation, membership-scoped RBAC, and tenant data isolation.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: tenancyOwner, Version: tenancyMembersVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Organization tenancy with email-bound invitations and member administration.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -200,6 +211,16 @@ var tenancyTemplates = map[string]string{
 	"tests/test_tenancy_database.py":                   "templates/test_tenancy_database.py.tmpl",
 }
 
+var tenancyMemberTemplates = map[string]string{
+	"src/package/tenancy/member_http.py":                       "templates/tenancy_member_http.py.tmpl",
+	"src/package/tenancy/member_models.py":                     "templates/tenancy_member_models.py.tmpl",
+	"src/package/tenancy/member_repository.py":                 "templates/tenancy_member_repository.py.tmpl",
+	"src/package/tenancy/member_service.py":                    "templates/tenancy_member_service.py.tmpl",
+	"src/package/migration/versions/000060_tenancy_members.py": "templates/tenancy_members_migration.py.tmpl",
+	"tests/test_tenancy_members.py":                            "templates/test_tenancy_members.py.tmpl",
+	"tests/test_tenancy_members_database.py":                   "templates/test_tenancy_members_database.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -252,9 +273,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 	}
 	tenancyEnabled := false
+	tenancyMembersEnabled := false
+	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
 			tenancyEnabled = true
+			selectedTenancyVersion = pack.Metadata.Version
+			tenancyMembersEnabled = pack.Metadata.Version == tenancyMembersVersion
 		}
 	}
 	if len(project.Spec.Modules) > 1 {
@@ -277,8 +302,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		BusinessBeforeTenancy: business != nil && business.PackageName < "tenancy",
 		Admin:                 adminEnabled,
 		Tenancy:               tenancyEnabled,
+		TenancyMembers:        tenancyMembersEnabled,
 	}
-	targets := make(map[string]renderTarget, len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+2)
+	targets := make(
+		map[string]renderTarget,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+2,
+	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
 	}
@@ -316,6 +345,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if tenancyMembersEnabled {
+		for path, templatePath := range tenancyMemberTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    tenancyOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -325,6 +362,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if business != nil {
 			targets["web/admin/src/views/BusinessView.vue"] = renderTarget{
 				Template: adminui.BusinessViewTemplate, Owner: adminui.Owner, SharedAdmin: true,
+			}
+		}
+		if tenancyMembersEnabled {
+			targets["web/admin/src/views/MembersView.vue"] = renderTarget{
+				Template:    "templates/src/views/MembersView.vue",
+				Owner:       tenancyOwner,
+				SharedAdmin: true,
 			}
 		}
 	}
@@ -360,7 +404,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		capabilityLock[adminui.Owner] = adminui.Version
 	}
 	if tenancyEnabled {
-		capabilityLock[tenancyOwner] = tenancyVersion
+		capabilityLock[tenancyOwner] = selectedTenancyVersion
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,

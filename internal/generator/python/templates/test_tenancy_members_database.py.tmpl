@@ -1,0 +1,190 @@
+"""Organization member repository contracts for SQLite and the selected database."""
+
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    roles,
+    users,
+)
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.tenancy.member_models import organization_invitations
+from {{.PackageName}}.tenancy.member_repository import SQLAlchemyTenancyMemberRepository
+from {{.PackageName}}.tenancy.member_service import (
+    MemberError,
+    MemberErrorKind,
+    TenancyMemberService,
+)
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+
+
+def _seed_user(engine: Engine, user_id: str, email: str, now: datetime) -> None:
+    with engine.begin() as connection:
+        for code, display_name in (("admin", "Administrator"), ("user", "User")):
+            if connection.execute(select(roles.c.code).where(roles.c.code == code)).first() is None:
+                connection.execute(insert(roles).values(code=code, display_name=display_name))
+        connection.execute(
+            insert(users).values(
+                id=user_id,
+                email=email,
+                password_hash="unused",
+                role="admin",
+                disabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+
+def _actor(user_id: str, email: str, organization_id: str | None = None) -> Principal:
+    return Principal(
+        user_id=user_id,
+        email=email,
+        role="admin",
+        method="token",
+        organization_id=organization_id,
+    )
+
+
+def _demote(
+    service: TenancyMemberService,
+    actor: Principal,
+    user_id: str,
+) -> MemberErrorKind | None:
+    try:
+        service.change_role(user_id, "user", actor)
+    except MemberError as error:
+        return error.kind
+    return None
+
+
+def _repository_contract(engine: Engine, concurrent: bool) -> None:
+    suffix = uuid4().hex
+    first_id = "admin-" + suffix
+    second_id = "member-" + suffix
+    first_email = suffix + "-admin@example.com"
+    second_email = suffix + "-member@example.com"
+    now = datetime.now(UTC)
+    _seed_user(engine, first_id, first_email, now)
+    _seed_user(engine, second_id, second_email, now)
+    first_actor = _actor(first_id, first_email)
+    second_actor = _actor(second_id, second_email)
+    organization = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now).create(
+        "Members " + suffix,
+        first_actor,
+    )
+    scoped_first = first_actor.model_copy(update={"organization_id": organization.id})
+    scoped_second = second_actor.model_copy(update={"organization_id": organization.id})
+    service = TenancyMemberService(
+        SQLAlchemyTenancyMemberRepository(engine),
+        lambda: now,
+        lambda: "invitation-" + suffix,
+    )
+
+    invitation = service.invite(second_email.upper(), "admin", scoped_first)
+    with engine.connect() as connection:
+        stored_hash = connection.execute(
+            select(organization_invitations.c.token_hash).where(
+                organization_invitations.c.id == invitation.id
+            )
+        ).scalar_one()
+    assert len(stored_hash) == 64
+    assert stored_hash != invitation.acceptance_token
+    with pytest.raises(MemberError) as duplicate:
+        service.invite(second_email, "admin", scoped_first)
+    assert duplicate.value.kind == MemberErrorKind.CONFLICT
+    with pytest.raises(MemberError) as wrong_email:
+        service.accept(invitation.acceptance_token, first_actor)
+    assert wrong_email.value.kind == MemberErrorKind.INVITATION_INVALID
+
+    accepted = service.accept(invitation.acceptance_token, second_actor)
+    assert accepted.role == "admin"
+    with pytest.raises(MemberError) as reused:
+        service.accept(invitation.acceptance_token, second_actor)
+    assert reused.value.kind == MemberErrorKind.INVITATION_INVALID
+    assert len([item for item in service.list(scoped_first).items if item.role == "admin"]) == 2
+
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(_demote, service, scoped_first, first_id)
+            second = executor.submit(_demote, service, scoped_second, second_id)
+            outcomes = [first.result(timeout=20), second.result(timeout=20)]
+        assert outcomes.count(None) == 1
+        assert outcomes.count(MemberErrorKind.LAST_ADMINISTRATOR) == 1
+    else:
+        assert _demote(service, scoped_first, first_id) is None
+        assert _demote(service, scoped_second, second_id) == MemberErrorKind.LAST_ADMINISTRATOR
+
+    members = service.list(scoped_first).items
+    administrator = next(item for item in members if item.role == "admin")
+    ordinary = next(item for item in members if item.role == "user")
+    with pytest.raises(MemberError) as final_administrator:
+        service.remove(administrator.user_id, scoped_first)
+    assert final_administrator.value.kind == MemberErrorKind.LAST_ADMINISTRATOR
+    service.remove(ordinary.user_id, scoped_first)
+    with pytest.raises(MemberError) as missing:
+        service.change_role("missing", "user", scoped_first)
+    assert missing.value.kind == MemberErrorKind.NOT_FOUND
+
+    with engine.connect() as connection:
+        audit_rows = connection.execute(
+            select(audit_events.c.action, audit_events.c.outcome).where(
+                audit_events.c.user_id.in_([first_id, second_id])
+            )
+        ).all()
+    assert any(outcome == "succeeded" for _action, outcome in audit_rows)
+    assert any(outcome == "denied" for _action, outcome in audit_rows)
+
+    with engine.begin() as connection:
+        connection.execute(
+            delete(organization_invitations).where(
+                organization_invitations.c.organization_id == organization.id
+            )
+        )
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(
+            delete(audit_events).where(audit_events.c.user_id.in_([first_id, second_id]))
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+        connection.execute(delete(users).where(users.c.id.in_([first_id, second_id])))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine, concurrent=False)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine, concurrent=True)
+    finally:
+        engine.dispose()

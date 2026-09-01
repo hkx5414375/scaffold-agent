@@ -1,0 +1,373 @@
+"""Transactional organization member and invitation persistence."""
+
+from dataclasses import replace
+from datetime import datetime
+from typing import Protocol, cast
+
+from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy.engine import Connection, Engine, RowMapping
+
+from {{.PackageName}}.identity.models import AuditEvent, users
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.tenancy.member_models import (
+    InvitationRecord,
+    OrganizationMember,
+    organization_invitations,
+)
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+
+
+class MemberNotFound(Exception):
+    """Organization or member does not exist in the requested scope."""
+
+
+class MemberConflict(Exception):
+    """Member or active invitation already exists."""
+
+
+class LastAdministrator(Exception):
+    """Mutation would remove the final organization administrator."""
+
+
+class InvitationInvalid(Exception):
+    """Invitation credential is invalid, expired, accepted, or email-mismatched."""
+
+
+class TenancyMemberRepository(Protocol):
+    """Persistence seam for security-sensitive member use cases."""
+
+    def list_members(self, organization_id: str) -> list[OrganizationMember]: ...
+
+    def create_invitation(self, invitation: InvitationRecord, audit: AuditEvent) -> None: ...
+
+    def accept_invitation(
+        self,
+        token_hash: str,
+        email: str,
+        user_id: str,
+        accepted_at: datetime,
+        audit: AuditEvent,
+    ) -> OrganizationMember: ...
+
+    def change_member_role(
+        self,
+        organization_id: str,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> OrganizationMember: ...
+
+    def remove_member(
+        self,
+        organization_id: str,
+        user_id: str,
+        audit: AuditEvent,
+    ) -> None: ...
+
+
+class SQLAlchemyTenancyMemberRepository:
+    """SQLAlchemy adapter using organization row locks for administrator safety."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def list_members(self, organization_id: str) -> list[OrganizationMember]:
+        statement = (
+            select(
+                organization_memberships.c.organization_id,
+                users.c.id.label("user_id"),
+                users.c.email,
+                organization_memberships.c.role_code,
+                organization_memberships.c.created_at,
+            )
+            .select_from(
+                organization_memberships.join(
+                    users, users.c.id == organization_memberships.c.user_id
+                )
+            )
+            .where(organization_memberships.c.organization_id == organization_id)
+            .order_by(users.c.email, users.c.id)
+        )
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return [_map_member(row) for row in rows]
+
+    def create_invitation(self, invitation: InvitationRecord, audit: AuditEvent) -> None:
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            if not _lock_organization(connection, invitation.organization_id):
+                error = MemberNotFound(invitation.organization_id)
+            elif _has_member_email(connection, invitation.organization_id, invitation.email) or (
+                _has_active_invitation(
+                    connection,
+                    invitation.organization_id,
+                    invitation.email,
+                    invitation.created_at,
+                )
+            ):
+                error = MemberConflict(invitation.email)
+            else:
+                connection.execute(
+                    insert(organization_invitations).values(
+                        id=invitation.id,
+                        organization_id=invitation.organization_id,
+                        email=invitation.email,
+                        role_code=invitation.role,
+                        token_hash=invitation.token_hash,
+                        invited_by=invitation.invited_by,
+                        expires_at=invitation.expires_at,
+                        accepted_at=None,
+                        accepted_by=None,
+                        created_at=invitation.created_at,
+                    )
+                )
+                append_audit(connection, audit)
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        if error is not None:
+            raise error
+
+    def accept_invitation(
+        self,
+        token_hash: str,
+        email: str,
+        user_id: str,
+        accepted_at: datetime,
+        audit: AuditEvent,
+    ) -> OrganizationMember:
+        result: OrganizationMember | None = None
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            invitation = (
+                connection.execute(
+                    select(
+                        organization_invitations.c.id,
+                        organization_invitations.c.organization_id,
+                        organization_invitations.c.role_code,
+                    )
+                    .where(
+                        organization_invitations.c.token_hash == token_hash,
+                        organization_invitations.c.email == email,
+                        organization_invitations.c.accepted_at.is_(None),
+                        organization_invitations.c.expires_at > accepted_at,
+                    )
+                    .with_for_update()
+                )
+                .mappings()
+                .first()
+            )
+            if invitation is None or not _lock_organization(
+                connection, str(invitation["organization_id"])
+            ):
+                error = InvitationInvalid(token_hash)
+            elif _membership_exists(connection, str(invitation["organization_id"]), user_id):
+                error = MemberConflict(user_id)
+            else:
+                organization_id = str(invitation["organization_id"])
+                role = str(invitation["role_code"])
+                connection.execute(
+                    insert(organization_memberships).values(
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        role_code=role,
+                        created_at=accepted_at,
+                    )
+                )
+                connection.execute(
+                    update(organization_invitations)
+                    .where(organization_invitations.c.id == str(invitation["id"]))
+                    .values(accepted_at=accepted_at, accepted_by=user_id)
+                )
+                targeted = replace(audit, target=organization_id)
+                append_audit(connection, targeted)
+                result = OrganizationMember(
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    email=email,
+                    role=role,
+                    joined_at=accepted_at,
+                )
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        if error is not None:
+            raise error
+        if result is None:
+            raise RuntimeError("accepted invitation did not produce a membership")
+        return result
+
+    def change_member_role(
+        self,
+        organization_id: str,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> OrganizationMember:
+        result: OrganizationMember | None = None
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            if not _lock_organization(connection, organization_id):
+                error = MemberNotFound(organization_id)
+            else:
+                member = _member_for_update(connection, organization_id, user_id)
+                if member is None:
+                    error = MemberNotFound(user_id)
+                elif (
+                    str(member["role_code"]) == "admin"
+                    and role != "admin"
+                    and _administrator_count(connection, organization_id) <= 1
+                ):
+                    error = LastAdministrator(organization_id)
+                else:
+                    connection.execute(
+                        update(organization_memberships)
+                        .where(
+                            organization_memberships.c.organization_id == organization_id,
+                            organization_memberships.c.user_id == user_id,
+                        )
+                        .values(role_code=role)
+                    )
+                    append_audit(connection, audit)
+                    result = OrganizationMember(
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        email=str(member["email"]),
+                        role=role,
+                        joined_at=cast(datetime, member["created_at"]),
+                    )
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        if error is not None:
+            raise error
+        if result is None:
+            raise RuntimeError("member role change did not produce a membership")
+        return result
+
+    def remove_member(
+        self,
+        organization_id: str,
+        user_id: str,
+        audit: AuditEvent,
+    ) -> None:
+        error: Exception | None = None
+        with self._engine.begin() as connection:
+            if not _lock_organization(connection, organization_id):
+                error = MemberNotFound(organization_id)
+            else:
+                member = _member_for_update(connection, organization_id, user_id)
+                if member is None:
+                    error = MemberNotFound(user_id)
+                elif str(member["role_code"]) == "admin" and (
+                    _administrator_count(connection, organization_id) <= 1
+                ):
+                    error = LastAdministrator(organization_id)
+                else:
+                    connection.execute(
+                        delete(organization_memberships).where(
+                            organization_memberships.c.organization_id == organization_id,
+                            organization_memberships.c.user_id == user_id,
+                        )
+                    )
+                    append_audit(connection, audit)
+            if error is not None:
+                append_audit(connection, _denied(audit))
+        if error is not None:
+            raise error
+
+
+def _lock_organization(connection: Connection, organization_id: str) -> bool:
+    return (
+        connection.execute(
+            select(organizations.c.id)
+            .where(organizations.c.id == organization_id)
+            .with_for_update()
+        ).first()
+        is not None
+    )
+
+
+def _has_member_email(connection: Connection, organization_id: str, email: str) -> bool:
+    statement = (
+        select(func.count())
+        .select_from(
+            organization_memberships.join(users, users.c.id == organization_memberships.c.user_id)
+        )
+        .where(
+            organization_memberships.c.organization_id == organization_id,
+            users.c.email == email,
+        )
+    )
+    return connection.execute(statement).scalar_one() > 0
+
+
+def _has_active_invitation(
+    connection: Connection,
+    organization_id: str,
+    email: str,
+    now: datetime,
+) -> bool:
+    statement = (
+        select(func.count())
+        .select_from(organization_invitations)
+        .where(
+            organization_invitations.c.organization_id == organization_id,
+            organization_invitations.c.email == email,
+            organization_invitations.c.accepted_at.is_(None),
+            organization_invitations.c.expires_at > now,
+        )
+    )
+    return connection.execute(statement).scalar_one() > 0
+
+
+def _membership_exists(connection: Connection, organization_id: str, user_id: str) -> bool:
+    statement = select(organization_memberships.c.user_id).where(
+        organization_memberships.c.organization_id == organization_id,
+        organization_memberships.c.user_id == user_id,
+    )
+    return connection.execute(statement).first() is not None
+
+
+def _member_for_update(
+    connection: Connection, organization_id: str, user_id: str
+) -> RowMapping | None:
+    statement = (
+        select(
+            organization_memberships.c.role_code,
+            organization_memberships.c.created_at,
+            users.c.email,
+        )
+        .select_from(
+            organization_memberships.join(users, users.c.id == organization_memberships.c.user_id)
+        )
+        .where(
+            organization_memberships.c.organization_id == organization_id,
+            organization_memberships.c.user_id == user_id,
+        )
+        .with_for_update()
+    )
+    return connection.execute(statement).mappings().first()
+
+
+def _administrator_count(connection: Connection, organization_id: str) -> int:
+    statement = (
+        select(func.count())
+        .select_from(organization_memberships)
+        .where(
+            organization_memberships.c.organization_id == organization_id,
+            organization_memberships.c.role_code == "admin",
+        )
+    )
+    return int(connection.execute(statement).scalar_one())
+
+
+def _map_member(row: RowMapping) -> OrganizationMember:
+    return OrganizationMember(
+        organization_id=str(row["organization_id"]),
+        user_id=str(row["user_id"]),
+        email=str(row["email"]),
+        role=str(row["role_code"]),
+        joined_at=cast(datetime, row["created_at"]),
+    )
+
+
+def _denied(audit: AuditEvent) -> AuditEvent:
+    return replace(audit, outcome="denied")

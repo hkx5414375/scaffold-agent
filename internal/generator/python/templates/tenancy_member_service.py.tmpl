@@ -1,0 +1,262 @@
+"""Organization invitations and member administration use cases."""
+
+import hashlib
+import re
+import secrets
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from uuid import uuid4
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.tenancy.member_models import (
+    InvitationRecord,
+    OrganizationInvitation,
+    OrganizationMember,
+    OrganizationMemberPage,
+)
+from {{.PackageName}}.tenancy.member_repository import (
+    InvitationInvalid,
+    LastAdministrator,
+    MemberConflict,
+    MemberNotFound,
+    TenancyMemberRepository,
+)
+
+INVITATION_LIFETIME = timedelta(hours=72)
+EMAIL_PATTERN = re.compile(
+    r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9]"
+    r"(?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+
+
+class MemberErrorKind(StrEnum):
+    """Stable member administration failure categories."""
+
+    INVALID_INPUT = "invalid_input"
+    NOT_FOUND = "not_found"
+    CONFLICT = "conflict"
+    LAST_ADMINISTRATOR = "last_administrator"
+    INVITATION_INVALID = "invitation_invalid"
+
+
+@dataclass(frozen=True, slots=True)
+class MemberError(Exception):
+    """Expected member failure safe for public transport mapping."""
+
+    kind: MemberErrorKind
+    message: str
+
+
+class TenancyMemberService:
+    """Member use cases independent from FastAPI and SQLAlchemy."""
+
+    def __init__(
+        self,
+        repository: TenancyMemberRepository,
+        clock: Callable[[], datetime] | None = None,
+        token_factory: Callable[[], str] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._token_factory = token_factory or (lambda: secrets.token_urlsafe(32))
+
+    def list(self, actor: Principal) -> OrganizationMemberPage:
+        """List members of the verified current organization."""
+        organization_id = _require_scoped_actor(actor)
+        return OrganizationMemberPage(items=self._repository.list_members(organization_id))
+
+    def invite(self, email: str, role: str, actor: Principal) -> OrganizationInvitation:
+        """Create one email-bound 72-hour invitation and return its raw token once."""
+        organization_id = _require_scoped_actor(actor)
+        normalized_email = _normalize_email(email)
+        normalized_role = _normalize_role(role)
+        now = self._clock()
+        raw_token = self._token_factory()
+        if not raw_token or len(raw_token) > 512:
+            raise RuntimeError("token factory returned an invalid credential")
+        invitation = OrganizationInvitation(
+            id=str(uuid4()),
+            organization_id=organization_id,
+            email=normalized_email,
+            role=normalized_role,
+            acceptance_token=raw_token,
+            expires_at=now + INVITATION_LIFETIME,
+            created_at=now,
+        )
+        try:
+            self._repository.create_invitation(
+                InvitationRecord(
+                    id=invitation.id,
+                    organization_id=organization_id,
+                    email=normalized_email,
+                    role=normalized_role,
+                    token_hash=token_digest(raw_token),
+                    invited_by=actor.user_id,
+                    expires_at=invitation.expires_at,
+                    created_at=now,
+                ),
+                _audit(
+                    actor.user_id,
+                    "tenancy.member.invite",
+                    organization_id + ":" + normalized_email,
+                    now,
+                ),
+            )
+        except MemberNotFound as error:
+            raise _member_not_found() from error
+        except MemberConflict as error:
+            raise MemberError(
+                MemberErrorKind.CONFLICT,
+                "member or active invitation already exists",
+            ) from error
+        return invitation
+
+    def accept(self, raw_token: str, actor: Principal) -> OrganizationMember:
+        """Accept an unexpired invitation bound to the authenticated email."""
+        _require_actor(actor)
+        normalized_token = raw_token.strip()
+        if not normalized_token or len(normalized_token) > 512:
+            raise _invitation_invalid()
+        try:
+            normalized_email = _normalize_email(actor.email)
+        except MemberError:
+            raise _invitation_invalid() from None
+        now = self._clock()
+        try:
+            return self._repository.accept_invitation(
+                token_digest(normalized_token),
+                normalized_email,
+                actor.user_id,
+                now,
+                _audit(actor.user_id, "tenancy.invitation.accept", "", now),
+            )
+        except InvitationInvalid as error:
+            raise _invitation_invalid() from error
+        except MemberConflict as error:
+            raise MemberError(
+                MemberErrorKind.CONFLICT,
+                "identity is already an organization member",
+            ) from error
+
+    def change_role(self, user_id: str, role: str, actor: Principal) -> OrganizationMember:
+        """Replace one member role while preserving an administrator."""
+        organization_id = _require_scoped_actor(actor)
+        normalized_user_id = _normalize_user_id(user_id)
+        normalized_role = _normalize_role(role)
+        try:
+            return self._repository.change_member_role(
+                organization_id,
+                normalized_user_id,
+                normalized_role,
+                _audit(
+                    actor.user_id,
+                    "tenancy.member.role.change",
+                    organization_id + ":" + normalized_user_id + ":" + normalized_role,
+                    self._clock(),
+                ),
+            )
+        except MemberNotFound as error:
+            raise _member_not_found() from error
+        except LastAdministrator as error:
+            raise _last_administrator() from error
+
+    def remove(self, user_id: str, actor: Principal) -> None:
+        """Remove one member while preserving an administrator."""
+        organization_id = _require_scoped_actor(actor)
+        normalized_user_id = _normalize_user_id(user_id)
+        try:
+            self._repository.remove_member(
+                organization_id,
+                normalized_user_id,
+                _audit(
+                    actor.user_id,
+                    "tenancy.member.remove",
+                    organization_id + ":" + normalized_user_id,
+                    self._clock(),
+                ),
+            )
+        except MemberNotFound as error:
+            raise _member_not_found() from error
+        except LastAdministrator as error:
+            raise _last_administrator() from error
+
+
+def token_digest(raw_token: str) -> str:
+    """Return the lowercase SHA-256 invitation digest."""
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _normalize_email(value: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) > 254 or EMAIL_PATTERN.fullmatch(normalized) is None:
+        raise MemberError(MemberErrorKind.INVALID_INPUT, "member email and role must be valid")
+    return normalized
+
+
+def _normalize_role(value: str) -> str:
+    normalized = value.strip()
+    if normalized not in {"admin", "user"}:
+        raise MemberError(MemberErrorKind.INVALID_INPUT, "member email and role must be valid")
+    return normalized
+
+
+def _normalize_user_id(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 191 or _has_control(normalized):
+        raise MemberError(
+            MemberErrorKind.INVALID_INPUT,
+            "organization member identifier must be valid",
+        )
+    return normalized
+
+
+def _require_scoped_actor(actor: Principal) -> str:
+    _require_actor(actor)
+    organization_id = actor.organization_id
+    if not organization_id or _has_control(organization_id):
+        raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+    return organization_id
+
+
+def _require_actor(actor: Principal) -> None:
+    if not actor.user_id or _has_control(actor.user_id):
+        raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+
+
+def _audit(user_id: str, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _member_not_found() -> MemberError:
+    return MemberError(MemberErrorKind.NOT_FOUND, "organization member was not found")
+
+
+def _last_administrator() -> MemberError:
+    return MemberError(
+        MemberErrorKind.LAST_ADMINISTRATOR,
+        "organization must retain an administrator",
+    )
+
+
+def _invitation_invalid() -> MemberError:
+    return MemberError(
+        MemberErrorKind.INVITATION_INVALID,
+        "invitation is invalid or expired",
+    )
+
+
+def _has_control(value: str) -> bool:
+    return any(not character.isprintable() for character in value)

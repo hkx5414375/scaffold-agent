@@ -1,0 +1,294 @@
+"""Organization member use-case and HTTP contract tests."""
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from {{.PackageName}}.errors import IdentityError, IdentityErrorKind, install_error_handlers
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+from {{.PackageName}}.tenancy.member_http import install_error_handlers as install_member_errors
+from {{.PackageName}}.tenancy.member_http import router
+from {{.PackageName}}.tenancy.member_models import (
+    InvitationRecord,
+    OrganizationInvitation,
+    OrganizationMember,
+    OrganizationMemberPage,
+)
+from {{.PackageName}}.tenancy.member_repository import (
+    InvitationInvalid,
+    LastAdministrator,
+    MemberConflict,
+    MemberNotFound,
+)
+from {{.PackageName}}.tenancy.member_service import (
+    MemberError,
+    MemberErrorKind,
+    TenancyMemberService,
+    token_digest,
+)
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+ADMIN = Principal(
+    user_id="admin-1",
+    email="admin@example.com",
+    role="admin",
+    method="token",
+    organization_id="organization-1",
+)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.invitation: InvitationRecord | None = None
+        self.failure: Exception | None = None
+        self.accepted: tuple[str, str, str] | None = None
+        self.member = OrganizationMember(
+            organization_id="organization-1",
+            user_id="member-1",
+            email="member@example.com",
+            role="user",
+            joined_at=NOW,
+        )
+
+    def list_members(self, organization_id: str) -> list[OrganizationMember]:
+        assert organization_id == "organization-1"
+        return [self.member]
+
+    def create_invitation(self, invitation: InvitationRecord, audit: AuditEvent) -> None:
+        del audit
+        if self.failure is not None:
+            raise self.failure
+        self.invitation = invitation
+
+    def accept_invitation(
+        self,
+        token_hash: str,
+        email: str,
+        user_id: str,
+        accepted_at: datetime,
+        audit: AuditEvent,
+    ) -> OrganizationMember:
+        del accepted_at, audit
+        if self.failure is not None:
+            raise self.failure
+        self.accepted = (token_hash, email, user_id)
+        return self.member.model_copy(update={"user_id": user_id, "email": email})
+
+    def change_member_role(
+        self,
+        organization_id: str,
+        user_id: str,
+        role: str,
+        audit: AuditEvent,
+    ) -> OrganizationMember:
+        del audit
+        if self.failure is not None:
+            raise self.failure
+        return self.member.model_copy(
+            update={"organization_id": organization_id, "user_id": user_id, "role": role}
+        )
+
+    def remove_member(
+        self,
+        organization_id: str,
+        user_id: str,
+        audit: AuditEvent,
+    ) -> None:
+        del organization_id, user_id, audit
+        if self.failure is not None:
+            raise self.failure
+
+
+def test_invitation_returns_raw_token_and_persists_only_digest() -> None:
+    repository = MemoryRepository()
+    service = TenancyMemberService(repository, lambda: NOW, lambda: "raw-secret")
+
+    invitation = service.invite(" Member@Example.com ", "user", ADMIN)
+
+    assert invitation.email == "member@example.com"
+    assert invitation.acceptance_token == "raw-secret"
+    assert invitation.expires_at == NOW + timedelta(hours=72)
+    assert repository.invitation is not None
+    assert repository.invitation.token_hash == token_digest("raw-secret")
+    assert "raw-secret" not in repository.invitation.token_hash
+
+
+def test_acceptance_uses_authenticated_email_and_safe_failures() -> None:
+    repository = MemoryRepository()
+    service = TenancyMemberService(repository, lambda: NOW, lambda: "raw-secret")
+    invited = ADMIN.model_copy(
+        update={"user_id": "member-1", "email": "MEMBER@example.com", "organization_id": None}
+    )
+
+    accepted = service.accept(" raw-secret ", invited)
+    assert accepted.user_id == "member-1"
+    assert repository.accepted == (
+        token_digest("raw-secret"),
+        "member@example.com",
+        "member-1",
+    )
+
+    for failure, expected in (
+        (InvitationInvalid(), MemberErrorKind.INVITATION_INVALID),
+        (MemberConflict(), MemberErrorKind.CONFLICT),
+    ):
+        repository.failure = failure
+        with pytest.raises(MemberError) as raised:
+            service.accept("raw-secret", invited)
+        assert raised.value.kind == expected
+
+    with pytest.raises(MemberError) as malformed:
+        service.accept("", invited)
+    with pytest.raises(MemberError) as wrong_email:
+        service.accept("raw-secret", invited.model_copy(update={"email": "invalid"}))
+    assert malformed.value.kind == MemberErrorKind.INVITATION_INVALID
+    assert wrong_email.value.kind == MemberErrorKind.INVITATION_INVALID
+
+
+def test_member_mutation_errors_are_stable() -> None:
+    repository = MemoryRepository()
+    service = TenancyMemberService(repository, lambda: NOW, lambda: "raw-secret")
+
+    assert service.list(ADMIN).items == [repository.member]
+    assert service.change_role("member-1", "admin", ADMIN).role == "admin"
+    service.remove("member-1", ADMIN)
+    for failure, expected in (
+        (MemberNotFound(), MemberErrorKind.NOT_FOUND),
+        (LastAdministrator(), MemberErrorKind.LAST_ADMINISTRATOR),
+    ):
+        repository.failure = failure
+        with pytest.raises(MemberError) as changed:
+            service.change_role("member-1", "user", ADMIN)
+        with pytest.raises(MemberError) as removed:
+            service.remove("member-1", ADMIN)
+        assert changed.value.kind == expected
+        assert removed.value.kind == expected
+    with pytest.raises(MemberError):
+        service.invite("invalid", "user", ADMIN)
+    with pytest.raises(MemberError):
+        service.invite("member@example.com", "owner", ADMIN)
+    with pytest.raises(MemberError):
+        service.change_role("\n", "user", ADMIN)
+    with pytest.raises(IdentityError):
+        service.list(ADMIN.model_copy(update={"organization_id": None}))
+
+
+class HttpIdentityService:
+    def authenticate(self, session_token: str, bearer_token: str) -> Principal:
+        del session_token
+        if bearer_token == "member-secret":
+            return ADMIN.model_copy(
+                update={
+                    "user_id": "member-1",
+                    "email": "member@example.com",
+                    "organization_id": None,
+                }
+            )
+        if bearer_token != "admin-secret":
+            raise IdentityError(IdentityErrorKind.INVALID_CREDENTIALS, "authentication is required")
+        return ADMIN.model_copy(update={"organization_id": None})
+
+
+class HttpTenancyService:
+    def authorize(
+        self,
+        actor: Principal,
+        organization_id: str,
+        permission: str,
+        ip_address: str,
+        user_agent: str,
+    ) -> Principal:
+        del permission, ip_address, user_agent
+        return actor.model_copy(update={"organization_id": organization_id, "role": "admin"})
+
+
+class HttpMemberService:
+    member = OrganizationMember(
+        organization_id="organization-1",
+        user_id="member-1",
+        email="member@example.com",
+        role="user",
+        joined_at=NOW,
+    )
+
+    def list(self, actor: Principal) -> OrganizationMemberPage:
+        del actor
+        return OrganizationMemberPage(items=[self.member])
+
+    def invite(self, email: str, role: str, actor: Principal) -> OrganizationInvitation:
+        del actor
+        return OrganizationInvitation(
+            id="invitation-1",
+            organization_id="organization-1",
+            email=email,
+            role=role,
+            acceptance_token="raw-secret",
+            expires_at=NOW + timedelta(hours=72),
+            created_at=NOW,
+        )
+
+    def accept(self, raw_token: str, actor: Principal) -> OrganizationMember:
+        del actor
+        if raw_token == "invalid":
+            raise MemberError(
+                MemberErrorKind.INVITATION_INVALID, "invitation is invalid or expired"
+            )
+        return self.member
+
+    def change_role(self, user_id: str, role: str, actor: Principal) -> OrganizationMember:
+        del actor
+        return self.member.model_copy(update={"user_id": user_id, "role": role})
+
+    def remove(self, user_id: str, actor: Principal) -> None:
+        del user_id, actor
+
+
+def test_http_member_contract_and_error_mapping() -> None:
+    application = FastAPI()
+    application.state.identity_service = HttpIdentityService()
+    application.state.tenancy_service = HttpTenancyService()
+    application.state.tenancy_member_service = HttpMemberService()
+    install_error_handlers(application)
+    install_member_errors(application)
+    application.include_router(router)
+    client = TestClient(
+        application,
+        headers={
+            "Authorization": "Bearer admin-secret",
+            "X-Organization-ID": "organization-1",
+        },
+    )
+
+    page = client.get("/api/v1/organizations/organization-1/members")
+    invitation = client.post(
+        "/api/v1/organizations/organization-1/invitations",
+        json={"email": "member@example.com", "role": "user"},
+    )
+    changed = client.patch(
+        "/api/v1/organizations/organization-1/members/member-1",
+        json={"role": "admin"},
+    )
+    removed = client.delete("/api/v1/organizations/organization-1/members/member-1")
+    accepted = TestClient(application).post(
+        "/api/v1/organization-invitations/accept",
+        headers={"Authorization": "Bearer member-secret"},
+        json={"token": "raw-secret"},
+    )
+    invalid = TestClient(application).post(
+        "/api/v1/organization-invitations/accept",
+        headers={"Authorization": "Bearer member-secret"},
+        json={"token": "invalid"},
+    )
+    mismatched = client.get("/api/v1/organizations/other/members")
+
+    assert page.json()["items"][0]["user_id"] == "member-1"
+    assert invitation.status_code == 201
+    assert invitation.json()["acceptance_token"] == "raw-secret"
+    assert changed.json()["role"] == "admin"
+    assert removed.status_code == 204
+    assert accepted.status_code == 200
+    assert invalid.status_code == 400
+    assert invalid.json()["code"] == "tenancy.invitation.invalid"
+    assert mismatched.status_code == 404

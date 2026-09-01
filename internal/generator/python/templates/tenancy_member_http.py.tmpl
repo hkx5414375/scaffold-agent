@@ -1,0 +1,140 @@
+"""FastAPI transport for organization member administration."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import current_principal, require_permission
+from {{.PackageName}}.identity.models import Principal
+from {{.PackageName}}.tenancy.member_models import (
+    OrganizationInvitation,
+    OrganizationInvitationAccept,
+    OrganizationInvitationWrite,
+    OrganizationMember,
+    OrganizationMemberPage,
+    OrganizationMemberRoleWrite,
+)
+from {{.PackageName}}.tenancy.member_service import (
+    MemberError,
+    MemberErrorKind,
+    TenancyMemberService,
+)
+
+router = APIRouter(tags=["organization-members"])
+
+
+def member_service(request: Request) -> TenancyMemberService:
+    """Resolve the process-scoped member service."""
+    service: TenancyMemberService = request.app.state.tenancy_member_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable member administration failure mappings."""
+
+    @app.exception_handler(MemberError)
+    async def member_error(_request: Request, error: MemberError) -> JSONResponse:
+        status, code = {
+            MemberErrorKind.INVALID_INPUT: (400, "request.invalid"),
+            MemberErrorKind.NOT_FOUND: (404, "tenancy.member.not_found"),
+            MemberErrorKind.CONFLICT: (409, "tenancy.member.conflict"),
+            MemberErrorKind.LAST_ADMINISTRATOR: (409, "tenancy.last_administrator"),
+            MemberErrorKind.INVITATION_INVALID: (400, "tenancy.invitation.invalid"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+def _matching_organization(organization_id: str, actor: Principal) -> None:
+    if actor.organization_id != organization_id.strip():
+        raise MemberError(MemberErrorKind.NOT_FOUND, "organization member was not found")
+
+
+@router.get(
+    "/api/v1/organizations/{organization_id}/members",
+    response_model=OrganizationMemberPage,
+)
+def list_members(
+    organization_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("tenancy:members:read", tenant_scoped=True)),
+    ],
+    service: Annotated[TenancyMemberService, Depends(member_service)],
+) -> OrganizationMemberPage:
+    """List current organization members."""
+    _matching_organization(organization_id, principal)
+    return service.list(principal)
+
+
+@router.post(
+    "/api/v1/organizations/{organization_id}/invitations",
+    response_model=OrganizationInvitation,
+    status_code=201,
+)
+def invite(
+    organization_id: str,
+    payload: OrganizationInvitationWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("tenancy:members:manage", tenant_scoped=True)),
+    ],
+    service: Annotated[TenancyMemberService, Depends(member_service)],
+) -> OrganizationInvitation:
+    """Create one email-bound invitation."""
+    _matching_organization(organization_id, principal)
+    return service.invite(payload.email, payload.role, principal)
+
+
+@router.post(
+    "/api/v1/organization-invitations/accept",
+    response_model=OrganizationMember,
+)
+def accept(
+    payload: OrganizationInvitationAccept,
+    principal: Annotated[Principal, Depends(current_principal)],
+    service: Annotated[TenancyMemberService, Depends(member_service)],
+) -> OrganizationMember:
+    """Accept one invitation using the authenticated email."""
+    return service.accept(payload.token, principal)
+
+
+@router.patch(
+    "/api/v1/organizations/{organization_id}/members/{user_id}",
+    response_model=OrganizationMember,
+)
+def change_role(
+    organization_id: str,
+    user_id: str,
+    payload: OrganizationMemberRoleWrite,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("tenancy:members:manage", tenant_scoped=True)),
+    ],
+    service: Annotated[TenancyMemberService, Depends(member_service)],
+) -> OrganizationMember:
+    """Replace one organization member role."""
+    _matching_organization(organization_id, principal)
+    return service.change_role(user_id, payload.role, principal)
+
+
+@router.delete(
+    "/api/v1/organizations/{organization_id}/members/{user_id}",
+    status_code=204,
+)
+def remove(
+    organization_id: str,
+    user_id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("tenancy:members:manage", tenant_scoped=True)),
+    ],
+    service: Annotated[TenancyMemberService, Depends(member_service)],
+) -> None:
+    """Remove one organization member."""
+    _matching_organization(organization_id, principal)
+    service.remove(user_id, principal)

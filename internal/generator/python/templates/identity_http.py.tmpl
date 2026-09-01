@@ -100,12 +100,12 @@ def require_permission(permission: str{{if .Tenancy}}, *, tenant_scoped: bool = 
             request: Request,
             principal: Annotated[Principal, Depends(current_principal)],
             tenancy: Annotated[TenancyService, Depends(tenancy_service)],
-            organization_id: Annotated[str | None, Header(alias="X-Organization-ID")] = None,
+            scoped_organization_id: Annotated[str | None, Header(alias="X-Organization-ID")] = None,
         ) -> Principal:
             ip_address, user_agent = client_context(request)
             return tenancy.authorize(
                 principal,
-                organization_id or "",
+                scoped_organization_id or "",
                 permission,
                 ip_address,
                 user_agent,

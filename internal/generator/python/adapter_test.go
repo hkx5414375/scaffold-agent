@@ -167,6 +167,75 @@ func TestGenerateOrganizationTenancyWithoutBusiness(t *testing.T) {
 	}
 }
 
+func TestGenerateOrganizationMemberAdministrationForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validBusinessProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: tenancyOwner, Version: tenancyMembersVersion,
+			}}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[tenancyOwner] != tenancyMembersVersion || len(generated.Outputs) != 74 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/tenancy/member_http.py",
+				"src/demo_service/tenancy/member_models.py",
+				"src/demo_service/tenancy/member_repository.py",
+				"src/demo_service/tenancy/member_service.py",
+				"src/demo_service/migration/versions/000060_tenancy_members.py",
+				"tests/test_tenancy_members.py",
+				"tests/test_tenancy_members_database.py",
+				"web/admin/src/views/MembersView.vue",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != tenancyOwner {
+					t.Errorf("Generate(%s) did not produce member-owned %s", database, path)
+				}
+			}
+			if !strings.Contains(string(outputContent(generated, "api/openapi.yaml")), "organization-invitations/accept") {
+				t.Errorf("Generate(%s) stable OpenAPI omits invitation acceptance", database)
+			}
+		})
+	}
+}
+
+func TestOrganizationMemberUpgradePreservesTenancyMigration(t *testing.T) {
+	t.Parallel()
+
+	baseline := validProject()
+	baseline.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyOwner, Version: tenancyVersion,
+	}}
+	upgraded := baseline
+	upgraded.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: tenancyOwner, Version: tenancyMembersVersion,
+	}}
+	baselineResult, err := New().Generate(context.Background(), baseline)
+	if err != nil {
+		t.Fatalf("Generate(baseline) error = %v", err)
+	}
+	upgradedResult, err := New().Generate(context.Background(), upgraded)
+	if err != nil {
+		t.Fatalf("Generate(upgraded) error = %v", err)
+	}
+	path := "src/demo_service/migration/versions/000050_tenancy.py"
+	if !reflect.DeepEqual(outputContent(baselineResult, path), outputContent(upgradedResult, path)) {
+		t.Fatal("organization member upgrade rewrote the 0.1.0 tenancy migration")
+	}
+	if len(upgradedResult.Outputs) != 44 {
+		t.Fatalf("Generate(upgraded) output count = %d, want 44", len(upgradedResult.Outputs))
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 

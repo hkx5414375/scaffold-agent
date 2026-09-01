@@ -13,46 +13,60 @@ import (
 )
 
 func TestPythonPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", false, false, false)
+	runGeneratedPythonReference(t, "postgresql", false, false, "")
 }
 
 func TestPythonMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", false, false, false)
+	runGeneratedPythonReference(t, "mysql", false, false, "")
 }
 
 func TestPythonPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", true, false, false)
+	runGeneratedPythonReference(t, "postgresql", true, false, "")
 }
 
 func TestPythonMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", true, false, false)
+	runGeneratedPythonReference(t, "mysql", true, false, "")
 }
 
 func TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", true, true, false)
+	runGeneratedPythonReference(t, "postgresql", true, true, "")
 }
 
 func TestPythonPostgreSQLTenantCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", true, false, true)
+	runGeneratedPythonReference(t, "postgresql", true, false, "0.1.0")
 }
 
 func TestPythonPostgreSQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", false, false, true)
+	runGeneratedPythonReference(t, "postgresql", false, false, "0.1.0")
 }
 
 func TestPythonMySQLTenancyPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", false, false, true)
+	runGeneratedPythonReference(t, "mysql", false, false, "0.1.0")
 }
 
 func TestPythonMySQLTenantCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", true, false, true)
+	runGeneratedPythonReference(t, "mysql", true, false, "0.1.0")
 }
 
 func TestPythonPostgreSQLTenantAdminPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", true, true, true)
+	runGeneratedPythonReference(t, "postgresql", true, true, "0.1.0")
 }
 
-func runGeneratedPythonReference(t *testing.T, database string, business, admin, tenancy bool) {
+func TestPythonPostgreSQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "postgresql", true, true, "0.2.0")
+}
+
+func TestPythonMySQLTenancyMembersPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "mysql", true, false, "0.2.0")
+}
+
+func runGeneratedPythonReference(
+	t *testing.T,
+	database string,
+	business bool,
+	admin bool,
+	organizationTenancyVersion string,
+) {
 	t.Helper()
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
@@ -86,11 +100,16 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if tenancy {
+	if organizationTenancyVersion != "" {
 		capabilities = `  capabilities:
     - name: organization-tenancy
-      version: 0.1.0
+      version: TENANCY_VERSION
 `
+		capabilities = strings.ReplaceAll(
+			capabilities,
+			"TENANCY_VERSION",
+			organizationTenancyVersion,
+		)
 	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
@@ -131,10 +150,16 @@ CAPABILITIES
 			wantChanges++
 		}
 	}
-	if tenancy {
+	if organizationTenancyVersion != "" {
 		wantChanges += 8
 		if business {
 			wantChanges++
+		}
+		if organizationTenancyVersion == "0.2.0" {
+			wantChanges += 7
+			if admin {
+				wantChanges++
+			}
 		}
 	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
@@ -146,7 +171,8 @@ CAPABILITIES
 	if admin && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
 		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
-	if tenancy && plannedData.CapabilityLock["organization-tenancy"] != "0.1.0" {
+	if organizationTenancyVersion != "" &&
+		plannedData.CapabilityLock["organization-tenancy"] != organizationTenancyVersion {
 		t.Fatalf("Plan() tenancy lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})

@@ -23,6 +23,13 @@ def test_application_and_stable_contract_expose_the_same_operations() -> None:
         ("/api/v1/organizations", "post"),
         ("/api/v1/organizations", "get"),
 {{- end}}
+{{- if .TenancyMembers}}
+        ("/api/v1/organizations/{organization_id}/members", "get"),
+        ("/api/v1/organizations/{organization_id}/invitations", "post"),
+        ("/api/v1/organization-invitations/accept", "post"),
+        ("/api/v1/organizations/{organization_id}/members/{user_id}", "patch"),
+        ("/api/v1/organizations/{organization_id}/members/{user_id}", "delete"),
+{{- end}}
 {{- if .Business}}
         ("{{.Business.RoutePath}}", "post"),
         ("{{.Business.RoutePath}}", "get"),

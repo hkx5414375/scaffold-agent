@@ -1,0 +1,106 @@
+"""Organization member and invitation records."""
+
+from dataclasses import dataclass
+from datetime import datetime
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field
+
+from {{.PackageName}}.identity.models import metadata
+
+organization_invitations = sa.Table(
+    "organization_invitations",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column("email", sa.String(254), nullable=False),
+    sa.Column("role_code", sa.String(32), sa.ForeignKey("identity_roles.code"), nullable=False),
+    sa.Column("token_hash", sa.String(64), nullable=False, unique=True),
+    sa.Column("invited_by", sa.String(191), sa.ForeignKey("identity_users.id"), nullable=False),
+    sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("accepted_by", sa.String(191), sa.ForeignKey("identity_users.id"), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+)
+sa.Index(
+    "ix_organization_invitations_organization_created",
+    organization_invitations.c.organization_id,
+    organization_invitations.c.created_at.desc(),
+)
+sa.Index(
+    "ix_organization_invitations_email_expires",
+    organization_invitations.c.email,
+    organization_invitations.c.expires_at.desc(),
+)
+
+
+class StrictModel(BaseModel):
+    """Reject fields absent from the member administration contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OrganizationMember(StrictModel):
+    """One identity membership inside an organization."""
+
+    organization_id: str
+    user_id: str
+    email: str
+    role: str
+    joined_at: datetime
+
+
+class OrganizationMemberPage(StrictModel):
+    """Complete current organization member snapshot."""
+
+    items: list[OrganizationMember]
+
+
+class OrganizationInvitation(StrictModel):
+    """Invitation with a raw acceptance token returned exactly once."""
+
+    id: str
+    organization_id: str
+    email: str
+    role: str
+    acceptance_token: str
+    expires_at: datetime
+    created_at: datetime
+
+
+class OrganizationInvitationWrite(StrictModel):
+    """Bounded invitation input."""
+
+    email: str = Field(min_length=3, max_length=254)
+    role: str = Field(pattern=r"^(admin|user)$")
+
+
+class OrganizationInvitationAccept(StrictModel):
+    """One-time invitation credential input."""
+
+    token: str = Field(min_length=1, max_length=512)
+
+
+class OrganizationMemberRoleWrite(StrictModel):
+    """Organization role replacement input."""
+
+    role: str = Field(pattern=r"^(admin|user)$")
+
+
+@dataclass(frozen=True, slots=True)
+class InvitationRecord:
+    """Digest-only invitation persisted by the repository."""
+
+    id: str
+    organization_id: str
+    email: str
+    role: str
+    token_hash: str
+    invited_by: str
+    expires_at: datetime
+    created_at: datetime

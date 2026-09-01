@@ -7,9 +7,15 @@ from sqlalchemy import Connection, engine_from_config, pool
 
 from {{.PackageName}}.identity.models import metadata
 {{- if .Tenancy}}
+{{- if .TenancyMembers}}
+from {{.PackageName}}.tenancy import member_models
+{{- end}}
 from {{.PackageName}}.tenancy import models as tenancy_models
 
 _tenancy_metadata = tenancy_models.organizations.metadata
+{{- if .TenancyMembers}}
+_member_metadata = member_models.organization_invitations.metadata
+{{- end}}
 {{- end}}
 
 configuration = context.config
