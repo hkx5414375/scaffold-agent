@@ -1,0 +1,38 @@
+insert into identity_permissions (code, description) values
+    ('catalog:products:read', 'Read catalog products'),
+    ('catalog:products:write', 'Create, update, publish, and archive catalog products')
+on duplicate key update code = code;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'catalog:products:read'),
+    ('admin', 'catalog:products:write')
+on duplicate key update role_code = role_code;
+
+create table catalog_products (
+    id varchar(191) primary key,
+{{- if .Tenancy}}
+    organization_id varchar(191) not null,
+{{- else}}
+    organization_id varchar(191) null,
+{{- end}}
+    sku varchar(64) not null,
+    name varchar(160) not null,
+    description text not null,
+    price_minor bigint not null,
+    currency varchar(3) not null,
+    status varchar(16) not null,
+    version bigint not null,
+    created_at datetime(6) not null,
+    updated_at datetime(6) not null,
+    catalog_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
+    constraint catalog_products_price_check check (price_minor >= 0),
+    constraint catalog_products_sku_check check (sku regexp binary '^[A-Z0-9][A-Z0-9._-]{0,63}$'),
+    constraint catalog_products_currency_check check (currency regexp '^[A-Z]{3}$'),
+    constraint catalog_products_status_check check (status in ('draft', 'active', 'archived')),
+    constraint catalog_products_version_check check (version > 0),
+{{- if .Tenancy}}
+    constraint catalog_products_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+{{- end}}
+    unique key catalog_products_scope_sku_unique (catalog_scope, sku),
+    index catalog_products_scope_status_idx (catalog_scope, status, id)
+) engine = InnoDB default character set utf8mb4 collate utf8mb4_0900_ai_ci;

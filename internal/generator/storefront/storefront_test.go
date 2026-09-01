@@ -62,3 +62,54 @@ func TestNewDataEscapesFreeFormDisplayMetadata(t *testing.T) {
 		t.Fatalf("rendered configuration did not JSON-escape display metadata:\n%s", configuration)
 	}
 }
+
+func TestCatalogCompositionPreservesUnselectedFoundation(t *testing.T) {
+	t.Parallel()
+
+	data := NewData("shop-service", "Shop Service")
+	application, err := Render("templates/app/app.vue", data)
+	if err != nil {
+		t.Fatalf("Render(application) error = %v", err)
+	}
+	configuration, err := Render("templates/nuxt.config.ts.tmpl", data)
+	if err != nil {
+		t.Fatalf("Render(configuration) error = %v", err)
+	}
+	readme, err := Render("templates/README.md.tmpl", data)
+	if err != nil {
+		t.Fatalf("Render(README) error = %v", err)
+	}
+	if strings.Contains(string(application), "Products") ||
+		!strings.Contains(string(application), "<NuxtLink to=\"/\">Home</NuxtLink>\n      </nav>") {
+		t.Fatalf("unselected catalog changed application shell:\n%s", application)
+	}
+	if strings.Contains(string(configuration), "organizationId") ||
+		strings.Contains(string(configuration), "catalog.css") ||
+		!strings.Contains(string(configuration), `css: ["~/assets/css/main.css"],`) {
+		t.Fatalf("unselected catalog changed Nuxt runtime configuration:\n%s", configuration)
+	}
+	if strings.Contains(string(readme), "SCAFFOLD_ORGANIZATION_ID") ||
+		strings.Contains(string(readme), "catalog capability") {
+		t.Fatalf("unselected catalog changed storefront documentation:\n%s", readme)
+	}
+
+	data.Catalog = true
+	data.Tenancy = true
+	configuration, err = Render("templates/nuxt.config.ts.tmpl", data)
+	if err != nil {
+		t.Fatalf("Render(catalog configuration) error = %v", err)
+	}
+	if !strings.Contains(string(configuration), "organizationId") ||
+		!strings.Contains(string(configuration), "catalog.css") {
+		t.Fatalf("selected catalog did not extend Nuxt configuration:\n%s", configuration)
+	}
+	for path, templatePath := range CatalogTemplates {
+		content, err := Render(templatePath, data)
+		if err != nil {
+			t.Fatalf("Render(%s) error = %v", path, err)
+		}
+		if strings.Contains(string(content), "[[") {
+			t.Errorf("Render(%s) left a template directive", path)
+		}
+	}
+}

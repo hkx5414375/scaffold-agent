@@ -271,6 +271,14 @@ func TestGoApprovalWorkflowsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testin
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", approvalsSelection, "", 55, false)
 }
 
+func TestGoTenantCommerceCatalogPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCatalogSelection, "0.3.0", 74, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantCommerceCatalogMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCatalogSelection, "0.3.0", 75, false)
+}
+
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
@@ -537,6 +545,13 @@ const approvalsSelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyCatalogSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: commerce-catalog
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -626,6 +641,9 @@ WORKFLOWS
 	}
 	if strings.Contains(capabilities, "approval-workflows") && plannedData.CapabilityLock["approval-workflows"] != "0.1.0" {
 		t.Fatalf("Plan() approval workflows lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "commerce-catalog") && plannedData.CapabilityLock["commerce-catalog"] != "0.1.0" {
+		t.Fatalf("Plan() commerce catalog lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

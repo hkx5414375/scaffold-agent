@@ -7,7 +7,8 @@
         <span>Storefront</span>
       </NuxtLink>
       <nav aria-label="Primary navigation">
-        <NuxtLink to="/">Home</NuxtLink>
+        <NuxtLink to="/">Home</NuxtLink>[[if .Catalog]]
+        <NuxtLink to="/products">Products</NuxtLink>[[end]]
       </nav>
     </header>
     <main>

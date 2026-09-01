@@ -1,0 +1,267 @@
+// Package postgres persists commerce catalog products in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/identity"
+)
+
+const cleanupTimeout = 5 * time.Second
+
+// Store is the PostgreSQL catalog repository.
+type Store struct {
+	pool *pgxpool.Pool
+}
+
+// New returns a PostgreSQL catalog store.
+func New(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
+}
+
+// Create atomically inserts a draft product and its audit event.
+func (store *Store) Create(ctx context.Context, value catalog.Product, audit identity.AuditEvent) error {
+	return store.mutate(ctx, func(transaction pgx.Tx) error {
+		_, err := transaction.Exec(ctx, `
+			insert into catalog_products (
+				id, organization_id, sku, name, description, price_minor,
+				currency, status, version, created_at, updated_at
+			) values (@id, @organization_id, @sku, @name, @description, @price_minor,
+				@currency, @status, @version, @created_at, @updated_at)`, pgx.NamedArgs{
+			"id": value.ID, "organization_id": nullableOrganization(value.OrganizationID),
+			"sku": value.SKU, "name": value.Name, "description": value.Description,
+			"price_minor": value.PriceMinor, "currency": value.Currency,
+			"status": value.Status, "version": value.Version,
+			"created_at": value.CreatedAt, "updated_at": value.UpdatedAt,
+		})
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+}
+
+// Get returns one product inside the selected organization scope.
+func (store *Store) Get(ctx context.Context, organizationID, id string) (catalog.Product, error) {
+	return scanProduct(store.pool.QueryRow(ctx, `
+		select id, coalesce(organization_id, ''), sku, name, description, price_minor,
+			currency, status, version, created_at, updated_at
+		from catalog_products
+		where id = $1 and coalesce(organization_id, '') = $2`, id, organizationID))
+}
+
+// GetPublic returns one active product and hides products of inactive organizations.
+func (store *Store) GetPublic(ctx context.Context, organizationID, id string) (catalog.Product, error) {
+	return scanProduct(store.pool.QueryRow(ctx, `
+		select product.id, coalesce(product.organization_id, ''), product.sku,
+			product.name, product.description, product.price_minor, product.currency,
+			product.status, product.version, product.created_at, product.updated_at
+		from catalog_products product
+{{- if .Tenancy}}
+		join organizations organization on organization.id = product.organization_id
+{{- end}}
+		where product.id = $1 and coalesce(product.organization_id, '') = $2
+			and product.status = 'active'
+{{- if .Tenancy}}
+			and organization.status = 'active'
+{{- end}}`, id, organizationID))
+}
+
+// List returns one bounded administration or public page.
+func (store *Store) List(
+	ctx context.Context,
+	organizationID string,
+	status catalog.Status,
+	cursor string,
+	limit int,
+	public bool,
+) ([]catalog.Product, string, error) {
+	rows, err := store.pool.Query(ctx, `
+		select product.id, coalesce(product.organization_id, ''), product.sku,
+			product.name, product.description, product.price_minor, product.currency,
+			product.status, product.version, product.created_at, product.updated_at
+		from catalog_products product
+{{- if .Tenancy}}
+		join organizations organization on organization.id = product.organization_id
+{{- end}}
+		where coalesce(product.organization_id, '') = $1
+			and ($2 = '' or product.status = $2)
+			and (not $3 or product.status = 'active')
+{{- if .Tenancy}}
+			and (not $3 or organization.status = 'active')
+{{- end}}
+			and ($4 = '' or product.id > $4)
+		order by product.id
+		limit $5`, organizationID, status, public, cursor, limit+1)
+	if err != nil {
+		return nil, "", fmt.Errorf("query catalog product page: %w", err)
+	}
+	defer rows.Close()
+	items := make([]catalog.Product, 0, limit)
+	for rows.Next() {
+		value, err := scanProduct(rows)
+		if err != nil {
+			return nil, "", err
+		}
+		items = append(items, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("read catalog product page: %w", err)
+	}
+	var nextCursor string
+	if len(items) > limit {
+		nextCursor = items[limit-1].ID
+		items = items[:limit]
+	}
+	return items, nextCursor, nil
+}
+
+// Update atomically replaces mutable values and retains the current state.
+func (store *Store) Update(ctx context.Context, value catalog.Product, audit identity.AuditEvent) (catalog.Product, error) {
+	var updated catalog.Product
+	err := store.mutate(ctx, func(transaction pgx.Tx) error {
+		row := transaction.QueryRow(ctx, `
+			update catalog_products set
+				sku = @sku, name = @name, description = @description,
+				price_minor = @price_minor, currency = @currency,
+				version = version + 1, updated_at = @updated_at
+			where id = @id and coalesce(organization_id, '') = @organization_id
+				and version = @version and status <> 'archived'
+			returning id, coalesce(organization_id, ''), sku, name, description,
+				price_minor, currency, status, version, created_at, updated_at`, pgx.NamedArgs{
+			"id": value.ID, "organization_id": value.OrganizationID,
+			"sku": value.SKU, "name": value.Name, "description": value.Description,
+			"price_minor": value.PriceMinor, "currency": value.Currency,
+			"version": value.Version, "updated_at": value.UpdatedAt,
+		})
+		var err error
+		updated, err = scanProduct(row)
+		if errors.Is(err, catalog.ErrNotFound) {
+			return catalog.ErrConflict
+		}
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+	if err != nil {
+		return catalog.Product{}, err
+	}
+	return updated, nil
+}
+
+// Transition atomically applies one exact publication state transition.
+func (store *Store) Transition(
+	ctx context.Context,
+	organizationID string,
+	id string,
+	version int64,
+	from catalog.Status,
+	to catalog.Status,
+	now time.Time,
+	audit identity.AuditEvent,
+) (catalog.Product, error) {
+	var updated catalog.Product
+	err := store.mutate(ctx, func(transaction pgx.Tx) error {
+		row := transaction.QueryRow(ctx, `
+			update catalog_products set status = $1, version = version + 1, updated_at = $2
+			where id = $3 and coalesce(organization_id, '') = $4 and version = $5 and status = $6
+			returning id, coalesce(organization_id, ''), sku, name, description,
+				price_minor, currency, status, version, created_at, updated_at`,
+			to, now, id, organizationID, version, from,
+		)
+		var err error
+		updated, err = scanProduct(row)
+		if errors.Is(err, catalog.ErrNotFound) {
+			return catalog.ErrConflict
+		}
+		if err != nil {
+			return persistenceError(err)
+		}
+		return appendAudit(ctx, transaction, audit)
+	})
+	if err != nil {
+		return catalog.Product{}, err
+	}
+	return updated, nil
+}
+
+func (store *Store) mutate(ctx context.Context, operation func(pgx.Tx) error) error {
+	transaction, err := store.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin catalog mutation: %w", err)
+	}
+	if err := operation(transaction); err != nil {
+		return rollback(transaction, err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit catalog mutation: %w", err)
+	}
+	return nil
+}
+
+func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {
+	_, err := transaction.Exec(ctx, `
+		insert into audit_events (id, user_id, action, outcome, target, ip_address, user_agent, created_at)
+		values ($1, nullif($2, ''), $3, $4, nullif($5, ''), nullif($6, ''), nullif($7, ''), $8)`,
+		event.ID, event.UserID, event.Action, event.Outcome, event.Target,
+		event.IPAddress, event.UserAgent, event.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append catalog audit event: %w", err)
+	}
+	return nil
+}
+
+func rollback(transaction pgx.Tx, cause error) error {
+	rollbackContext, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	if err := transaction.Rollback(rollbackContext); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+		return errors.Join(cause, fmt.Errorf("roll back catalog mutation: %w", err))
+	}
+	return cause
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanProduct(row rowScanner) (catalog.Product, error) {
+	var value catalog.Product
+	if err := row.Scan(
+		&value.ID, &value.OrganizationID, &value.SKU, &value.Name, &value.Description,
+		&value.PriceMinor, &value.Currency, &value.Status, &value.Version,
+		&value.CreatedAt, &value.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return catalog.Product{}, catalog.ErrNotFound
+		}
+		return catalog.Product{}, fmt.Errorf("scan catalog product: %w", err)
+	}
+	return value, nil
+}
+
+func nullableOrganization(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func persistenceError(err error) error {
+	var databaseError *pgconn.PgError
+	if errors.As(err, &databaseError) && databaseError.Code == "23505" {
+		return catalog.ErrConflict
+	}
+	return err
+}
+
+var _ catalog.Store = (*Store)(nil)

@@ -1,0 +1,242 @@
+package catalog
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+var catalogTestNow = time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+
+type memoryStore struct {
+	product Product
+	audits  []identity.AuditEvent
+	err     error
+}
+
+func (store *memoryStore) Create(_ context.Context, product Product, event identity.AuditEvent) error {
+	if store.err != nil {
+		return store.err
+	}
+	if store.product.ID != "" && store.product.SKU == product.SKU && store.product.OrganizationID == product.OrganizationID {
+		return ErrConflict
+	}
+	store.product = product
+	store.audits = append(store.audits, event)
+	return nil
+}
+
+func (store *memoryStore) Get(_ context.Context, organizationID, id string) (Product, error) {
+	if store.err != nil {
+		return Product{}, store.err
+	}
+	if store.product.ID != id || store.product.OrganizationID != organizationID {
+		return Product{}, ErrNotFound
+	}
+	return store.product, nil
+}
+
+func (store *memoryStore) GetPublic(_ context.Context, organizationID, id string) (Product, error) {
+	product, err := store.Get(context.Background(), organizationID, id)
+	if err != nil || product.Status != StatusActive {
+		return Product{}, ErrNotFound
+	}
+	return product, nil
+}
+
+func (store *memoryStore) List(
+	_ context.Context,
+	organizationID string,
+	status Status,
+	cursor string,
+	limit int,
+	public bool,
+) ([]Product, string, error) {
+	if store.err != nil {
+		return nil, "", store.err
+	}
+	if limit < 1 || cursor != "" {
+		return nil, "", ErrInvalidInput
+	}
+	product := store.product
+	if product.ID == "" || product.OrganizationID != organizationID ||
+		status != "" && product.Status != status || public && product.Status != StatusActive {
+		return []Product{}, "", nil
+	}
+	return []Product{product}, "", nil
+}
+
+func (store *memoryStore) Update(_ context.Context, product Product, event identity.AuditEvent) (Product, error) {
+	if store.err != nil {
+		return Product{}, store.err
+	}
+	if store.product.ID != product.ID || store.product.OrganizationID != product.OrganizationID ||
+		store.product.Version != product.Version || store.product.Status == StatusArchived {
+		return Product{}, ErrConflict
+	}
+	product.Status = store.product.Status
+	product.CreatedAt = store.product.CreatedAt
+	product.Version++
+	store.product = product
+	store.audits = append(store.audits, event)
+	return product, nil
+}
+
+func (store *memoryStore) Transition(
+	_ context.Context,
+	organizationID string,
+	id string,
+	version int64,
+	from Status,
+	to Status,
+	now time.Time,
+	event identity.AuditEvent,
+) (Product, error) {
+	if store.err != nil {
+		return Product{}, store.err
+	}
+	if store.product.ID != id || store.product.OrganizationID != organizationID ||
+		store.product.Version != version || store.product.Status != from {
+		return Product{}, ErrConflict
+	}
+	store.product.Status = to
+	store.product.Version++
+	store.product.UpdatedAt = now
+	store.audits = append(store.audits, event)
+	return store.product, nil
+}
+
+func catalogActor() identity.Principal {
+	return identity.Principal{
+		UserID: "administrator-1", Email: "admin@example.com", Role: "admin", Method: "token",
+{{- if .Tenancy}}
+		OrganizationID: "organization-1",
+{{- end}}
+	}
+}
+
+func newCatalogService(store Store) *Service {
+	service := NewService(store)
+	service.now = func() time.Time { return catalogTestNow }
+	return service
+}
+
+func validCatalogWrite() WriteInput {
+	return WriteInput{
+		SKU: " sku-100 ", Name: " Field notebook ", Description: " recycled paper ",
+		PriceMinor: 1299, Currency: " usd ",
+	}
+}
+
+func TestCreatePublishUpdateArchiveAndPublicVisibility(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{}
+	service := newCatalogService(store)
+	actor := catalogActor()
+	created, err := service.Create(context.Background(), validCatalogWrite(), actor)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.SKU != "SKU-100" || created.Name != "Field notebook" ||
+		created.Currency != "USD" || created.Status != StatusDraft || created.Version != 1 {
+		t.Fatalf("Create() = %#v", created)
+	}
+	if page, err := service.ListPublic(context.Background(), created.OrganizationID, "", 20); err != nil || len(page.Items) != 0 {
+		t.Fatalf("ListPublic(draft) = %#v, %v", page, err)
+	}
+	published, err := service.Publish(context.Background(), created.ID, TransitionInput{Version: 1}, actor)
+	if err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if page, err := service.ListPublic(context.Background(), created.OrganizationID, "", 20); err != nil ||
+		len(page.Items) != 1 || page.Items[0].Status != StatusActive {
+		t.Fatalf("ListPublic(active) = %#v, %v", page, err)
+	}
+	if product, err := service.GetPublic(context.Background(), created.OrganizationID, created.ID); err != nil || product.ID != created.ID {
+		t.Fatalf("GetPublic(active) = %#v, %v", product, err)
+	}
+	write := validCatalogWrite()
+	write.PriceMinor = 1399
+	updated, err := service.Update(context.Background(), created.ID, UpdateInput{WriteInput: write, Version: published.Version}, actor)
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.PriceMinor != 1399 || updated.Status != StatusActive || updated.Version != 3 {
+		t.Fatalf("Update() = %#v", updated)
+	}
+	archived, err := service.Archive(context.Background(), created.ID, TransitionInput{Version: updated.Version}, actor)
+	if err != nil {
+		t.Fatalf("Archive() error = %v", err)
+	}
+	if archived.Status != StatusArchived || archived.Version != 4 {
+		t.Fatalf("Archive() = %#v", archived)
+	}
+	if _, err := service.Publish(context.Background(), created.ID, TransitionInput{Version: archived.Version}, actor); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Publish(archived) error = %v, want conflict", err)
+	}
+	if page, err := service.ListPublic(context.Background(), created.OrganizationID, "", 20); err != nil || len(page.Items) != 0 {
+		t.Fatalf("ListPublic(archived) = %#v, %v", page, err)
+	}
+	if _, err := service.GetPublic(context.Background(), created.OrganizationID, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetPublic(archived) error = %v, want not found", err)
+	}
+	wantActions := []string{
+		"catalog:products:create", "catalog:products:publish",
+		"catalog:products:update", "catalog:products:archive",
+	}
+	if len(store.audits) != len(wantActions) {
+		t.Fatalf("audit count = %d, want %d", len(store.audits), len(wantActions))
+	}
+	for index, action := range wantActions {
+		if store.audits[index].Action != action || store.audits[index].Target != created.ID {
+			t.Errorf("audit[%d] = %#v", index, store.audits[index])
+		}
+	}
+}
+
+func TestCatalogRejectsInvalidMoneyIdentityFiltersAndVersions(t *testing.T) {
+	t.Parallel()
+
+	service := newCatalogService(&memoryStore{})
+	actor := catalogActor()
+	tests := []struct {
+		name      string
+		operation func() error
+	}{
+		{name: "SKU", operation: func() error { value := validCatalogWrite(); value.SKU = "bad sku"; _, err := service.Create(context.Background(), value, actor); return err }},
+		{name: "name", operation: func() error { value := validCatalogWrite(); value.Name = "\n"; _, err := service.Create(context.Background(), value, actor); return err }},
+		{name: "price", operation: func() error { value := validCatalogWrite(); value.PriceMinor = -1; _, err := service.Create(context.Background(), value, actor); return err }},
+		{name: "currency", operation: func() error { value := validCatalogWrite(); value.Currency = "US"; _, err := service.Create(context.Background(), value, actor); return err }},
+		{name: "status", operation: func() error { _, err := service.List(context.Background(), "unknown", "", 20, actor); return err }},
+		{name: "cursor", operation: func() error { _, err := service.List(context.Background(), "", "x\n", 20, actor); return err }},
+		{name: "limit", operation: func() error { _, err := service.List(context.Background(), "", "", 101, actor); return err }},
+		{name: "version", operation: func() error { _, err := service.Publish(context.Background(), "product-1", TransitionInput{}, actor); return err }},
+	}
+	for _, test := range tests {
+		if err := test.operation(); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%s error = %v, want invalid input", test.name, err)
+		}
+	}
+	actor.UserID = ""
+	if _, err := service.Create(context.Background(), validCatalogWrite(), actor); !errors.Is(err, identity.ErrInvalidCredentials) {
+		t.Fatalf("Create(invalid actor) error = %v", err)
+	}
+}
+
+func TestCatalogPreservesStoreFailureCategories(t *testing.T) {
+	t.Parallel()
+
+	store := &memoryStore{err: ErrConflict}
+	service := newCatalogService(store)
+	if _, err := service.Create(context.Background(), validCatalogWrite(), catalogActor()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Create() error = %v, want wrapped conflict", err)
+	}
+	store.err = ErrNotFound
+	if _, err := service.Get(context.Background(), "missing", catalogActor()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get() error = %v, want wrapped not found", err)
+	}
+}

@@ -24,6 +24,8 @@ type Data struct {
 	DisplayNameHTML string
 	DisplayNameJSON string
 	DescriptionJSON string
+	Catalog         bool
+	Tenancy         bool
 }
 
 // NewData normalizes optional project display metadata for shared templates.
@@ -72,6 +74,19 @@ var BaseTemplates = map[string]string{
 	"web/storefront/server/utils/backend.ts":             "templates/server/utils/backend.ts",
 	"web/storefront/shared/types/storefront.ts":          "templates/shared/types/storefront.ts",
 	"web/storefront/test/backend.test.ts":                "templates/test/backend.test.ts",
+}
+
+// CatalogTemplates maps the composable public product catalog outputs.
+var CatalogTemplates = map[string]string{
+	"web/storefront/app/assets/css/catalog.css":                 "templates/app/assets/css/catalog.css",
+	"web/storefront/app/pages/products/index.vue":               "templates/app/pages/products/index.vue",
+	"web/storefront/app/pages/products/[id].vue":                "templates/app/pages/products/[id].vue",
+	"web/storefront/server/api/storefront/products.get.ts":      "templates/server/api/storefront/products.get.ts",
+	"web/storefront/server/api/storefront/products/[id].get.ts": "templates/server/api/storefront/products/[id].get.ts",
+	"web/storefront/server/utils/catalog.ts":                    "templates/server/utils/catalog.ts",
+	"web/storefront/shared/types/catalog.ts":                    "templates/shared/types/catalog.ts",
+	"web/storefront/app/utils/catalog.ts":                       "templates/app/utils/catalog.ts",
+	"web/storefront/test/catalog.test.ts":                       "templates/test/catalog.test.ts",
 }
 
 // Render executes one shared template against a backend-neutral data shape.

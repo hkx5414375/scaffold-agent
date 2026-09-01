@@ -260,6 +260,7 @@ type templateData struct {
 	Observability    bool
 	CSVTransfer      bool
 	Approvals        bool
+	Catalog          bool
 	MigrationCount   int
 }
 

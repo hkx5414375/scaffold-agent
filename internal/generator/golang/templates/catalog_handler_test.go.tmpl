@@ -1,0 +1,112 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/identity"
+)
+
+type catalogHTTPStore struct {
+	product catalog.Product
+}
+
+func (store *catalogHTTPStore) Create(_ context.Context, product catalog.Product, _ identity.AuditEvent) error {
+	store.product = product
+	return nil
+}
+
+func (store *catalogHTTPStore) Get(_ context.Context, organizationID, id string) (catalog.Product, error) {
+	if store.product.ID != id || store.product.OrganizationID != organizationID {
+		return catalog.Product{}, catalog.ErrNotFound
+	}
+	return store.product, nil
+}
+
+func (store *catalogHTTPStore) GetPublic(ctx context.Context, organizationID, id string) (catalog.Product, error) {
+	value, err := store.Get(ctx, organizationID, id)
+	if err != nil || value.Status != catalog.StatusActive {
+		return catalog.Product{}, catalog.ErrNotFound
+	}
+	return value, nil
+}
+
+func (store *catalogHTTPStore) List(
+	_ context.Context, organizationID string, _ catalog.Status, _ string, _ int, public bool,
+) ([]catalog.Product, string, error) {
+	if store.product.OrganizationID != organizationID || public && store.product.Status != catalog.StatusActive {
+		return []catalog.Product{}, "", nil
+	}
+	return []catalog.Product{store.product}, "", nil
+}
+
+func (store *catalogHTTPStore) Update(_ context.Context, product catalog.Product, _ identity.AuditEvent) (catalog.Product, error) {
+	store.product = product
+	return product, nil
+}
+
+func (store *catalogHTTPStore) Transition(
+	_ context.Context, _ string, _ string, _ int64, _ catalog.Status, to catalog.Status,
+	_ time.Time, _ identity.AuditEvent,
+) (catalog.Product, error) {
+	store.product.Status = to
+	return store.product, nil
+}
+
+func TestPublicCatalogRoutesExposeOnlyPublishedProducts(t *testing.T) {
+	t.Parallel()
+
+	store := &catalogHTTPStore{product: catalog.Product{
+		ID: "product-1", SKU: "SKU-1", Name: "Notebook", PriceMinor: 1299,
+		Currency: "USD", Status: catalog.StatusActive, Version: 2,
+{{- if .Tenancy}}
+		OrganizationID: "organization-1",
+{{- end}}
+	}}
+	handler := New(catalog.NewService(store))
+	mux := http.NewServeMux()
+	handler.RegisterPublic(mux)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/storefront/products?limit=20", nil)
+{{- if .Tenancy}}
+	request.Header.Set(organizationHeaderName, "organization-1")
+{{- end}}
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var page catalog.Page
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || len(page.Items) != 1 {
+		t.Fatalf("list response = %#v, %v", page, err)
+	}
+
+	store.product.Status = catalog.StatusDraft
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "product-1") {
+		t.Fatalf("draft list status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestCreateCatalogProductUsesDecimalJSONStrings(t *testing.T) {
+	t.Parallel()
+
+	store := &catalogHTTPStore{}
+	handler := New(catalog.NewService(store))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/catalog/products", strings.NewReader(
+		`{"sku":"sku-1","name":"Notebook","price_minor":"1299","currency":"usd"}`,
+	))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	actor := identity.Principal{UserID: "administrator-1", Role: "admin"{{if .Tenancy}}, OrganizationID: "organization-1"{{end}}}
+	handler.create(response, request, actor)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"price_minor":"1299"`) {
+		t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+	}
+}

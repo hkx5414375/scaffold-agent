@@ -43,6 +43,10 @@ atomic create-only imports, audited exports, and separate permissions.
 It also contains `approval-workflows` with tenant-scoped subject validation,
 separate submitter and reviewer permissions, optimistic transitions, and immutable events.
 {{end}}
+{{if .Catalog}}
+It also contains `commerce-catalog` with canonical SKUs, integer minor-unit
+prices, audited publication, optimistic concurrency, and active-only public reads.
+{{end}}
 
 ## Requirements
 
@@ -162,6 +166,16 @@ runtime secret store; queued message bodies are sensitive database content.
 - `POST /api/v1/approvals/{id}/approve`
 - `POST /api/v1/approvals/{id}/reject`
 {{end}}
+{{if .Catalog}}
+- `POST /api/v1/catalog/products`
+- `GET /api/v1/catalog/products`
+- `GET /api/v1/catalog/products/{id}`
+- `PUT /api/v1/catalog/products/{id}`
+- `POST /api/v1/catalog/products/{id}/publish`
+- `POST /api/v1/catalog/products/{id}/archive`
+- `GET /api/v1/storefront/products`
+- `GET /api/v1/storefront/products/{id}`
+{{end}}
 {{if .Business}}
 - `POST {{.Business.RoutePath}}`
 - `GET {{.Business.RoutePath}}`
@@ -211,6 +225,15 @@ cannot approve or reject that request, and only the requester can cancel it.
 Approve, reject, and cancel calls require the current decimal-string `version`;
 successful transitions atomically append immutable history and a security audit.
 The workflow records decisions but deliberately does not mutate the subject.
+{{end}}
+{{if .Catalog}}
+
+Catalog products begin as drafts, can be published once, and can be archived
+permanently from draft or active state. SKU uniqueness is scoped to the current
+organization. Prices and optimistic versions are decimal strings in JSON, so
+browser clients do not lose `int64` precision. Public routes require no login but
+return active products only; tenant projects require `X-Organization-ID` and hide
+products while that organization is inactive.
 {{end}}
 {{if .Admin}}
 ## Administration UI

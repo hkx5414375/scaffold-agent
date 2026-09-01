@@ -24,6 +24,11 @@ import (
 	approvalshttp "{{.ModulePath}}/internal/approvals/httpapi"
 	approvalsdatabase "{{.ModulePath}}/internal/approvals/{{.Database.PackageName}}"
 {{- end}}
+{{- if .Catalog}}
+	"{{.ModulePath}}/internal/catalog"
+	cataloghttp "{{.ModulePath}}/internal/catalog/httpapi"
+	catalogdatabase "{{.ModulePath}}/internal/catalog/{{.Database.PackageName}}"
+{{- end}}
 {{- if .Files}}
 	"{{.ModulePath}}/internal/files"
 	fileshttp "{{.ModulePath}}/internal/files/httpapi"
@@ -120,6 +125,10 @@ func run() error {
 	approvalService := approvals.NewService(approvalsdatabase.New(pool))
 	approvalAPI := approvalshttp.New(approvalService)
 {{- end}}
+{{- if .Catalog}}
+	catalogService := catalog.NewService(catalogdatabase.New(pool))
+	catalogAPI := cataloghttp.New(catalogService)
+{{- end}}
 {{- if .Tenancy}}
 	tenancyStore := tenancydatabase.New(pool)
 	tenancyService := tenancy.NewService(tenancyStore)
@@ -150,6 +159,9 @@ func run() error {
 {{- end}}
 {{- if .Files}}
 		fileAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .Catalog}}
+		catalogAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .JobAdmin}}
 		jobAdminAPI.Register(mux, identityAPI)

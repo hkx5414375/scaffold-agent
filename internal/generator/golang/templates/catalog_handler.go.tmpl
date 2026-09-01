@@ -1,0 +1,187 @@
+// Package httpapi exposes the commerce catalog through administrative and public routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const (
+	defaultPageLimit        = 20
+	organizationHeaderName = "X-Organization-ID"
+)
+
+// Handler maps catalog use cases to HTTP.
+type Handler struct {
+	service *catalog.Service
+}
+
+// New returns a catalog HTTP adapter.
+func New(service *catalog.Service) *Handler {
+	return &Handler{service: service}
+}
+
+// Register adds permission-protected administration and anonymous public routes.
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	handler.RegisterAdmin(mux, security)
+	handler.RegisterPublic(mux)
+}
+
+// RegisterAdmin adds product management routes.
+func (handler *Handler) RegisterAdmin(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("POST /api/v1/catalog/products", security.Authorized("catalog:products:write", handler.create))
+	mux.HandleFunc("GET /api/v1/catalog/products", security.Authorized("catalog:products:read", handler.list))
+	mux.HandleFunc("GET /api/v1/catalog/products/{id}", security.Authorized("catalog:products:read", handler.get))
+	mux.HandleFunc("PUT /api/v1/catalog/products/{id}", security.Authorized("catalog:products:write", handler.update))
+	mux.HandleFunc("POST /api/v1/catalog/products/{id}/publish", security.Authorized("catalog:products:write", handler.publish))
+	mux.HandleFunc("POST /api/v1/catalog/products/{id}/archive", security.Authorized("catalog:products:write", handler.archive))
+}
+
+// RegisterPublic adds read-only storefront routes without an administrator identity.
+func (handler *Handler) RegisterPublic(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/storefront/products", handler.listPublic)
+	mux.HandleFunc("GET /api/v1/storefront/products/{id}", handler.getPublic)
+}
+
+func (handler *Handler) create(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input catalog.WriteInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := handler.service.Create(request.Context(), input, actor)
+	if err != nil {
+		handleError(response, "create catalog product", err)
+		return
+	}
+	httpjson.Write(response, http.StatusCreated, value)
+}
+
+func (handler *Handler) get(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.Get(request.Context(), request.PathValue("id"), actor)
+	if err != nil {
+		handleError(response, "get catalog product", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) list(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	page, err := handler.service.List(
+		request.Context(), catalog.Status(request.URL.Query().Get("status")),
+		request.URL.Query().Get("cursor"), limit, actor,
+	)
+	if err != nil {
+		handleError(response, "list catalog products", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) update(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input catalog.UpdateInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := handler.service.Update(request.Context(), request.PathValue("id"), input, actor)
+	if err != nil {
+		handleError(response, "update catalog product", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) publish(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transition(response, request, actor, handler.service.Publish, "publish catalog product")
+}
+
+func (handler *Handler) archive(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.transition(response, request, actor, handler.service.Archive, "archive catalog product")
+}
+
+func (handler *Handler) transition(
+	response http.ResponseWriter,
+	request *http.Request,
+	actor identity.Principal,
+	operation func(context.Context, string, catalog.TransitionInput, identity.Principal) (catalog.Product, error),
+	operationName string,
+) {
+	var input catalog.TransitionInput
+	if err := httpjson.Decode(response, request, &input); err != nil {
+		httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error())
+		return
+	}
+	value, err := operation(request.Context(), request.PathValue("id"), input, actor)
+	if err != nil {
+		handleError(response, operationName, err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func (handler *Handler) listPublic(response http.ResponseWriter, request *http.Request) {
+	limit, ok := pageLimit(response, request)
+	if !ok {
+		return
+	}
+	page, err := handler.service.ListPublic(
+		request.Context(), request.Header.Get(organizationHeaderName),
+		request.URL.Query().Get("cursor"), limit,
+	)
+	if err != nil {
+		handleError(response, "list public catalog products", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, page)
+}
+
+func (handler *Handler) getPublic(response http.ResponseWriter, request *http.Request) {
+	value, err := handler.service.GetPublic(
+		request.Context(), request.Header.Get(organizationHeaderName), request.PathValue("id"),
+	)
+	if err != nil {
+		handleError(response, "get public catalog product", err)
+		return
+	}
+	httpjson.Write(response, http.StatusOK, value)
+}
+
+func pageLimit(response http.ResponseWriter, request *http.Request) (int, bool) {
+	limit := defaultPageLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer")
+			return 0, false
+		}
+		limit = parsed
+	}
+	return limit, true
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, catalog.ErrInvalidInput):
+		httpjson.WriteError(response, http.StatusBadRequest, "catalog.invalid", "catalog product data is invalid")
+	case errors.Is(err, catalog.ErrNotFound):
+		httpjson.WriteError(response, http.StatusNotFound, "catalog.not_found", "catalog product was not found")
+	case errors.Is(err, catalog.ErrConflict):
+		httpjson.WriteError(response, http.StatusConflict, "catalog.conflict", "catalog product changed or conflicts with an existing SKU")
+	default:
+		slog.Error(operation, "error", err)
+		httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

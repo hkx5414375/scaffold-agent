@@ -7,11 +7,16 @@ cart, checkout, order, account, and marketing capability packs extend.
 ## Runtime
 
 - Node.js 24.11 or newer
-- `SCAFFOLD_API_BASE_URL`: server-only backend base URL; defaults to `http://127.0.0.1:8080`
+- `SCAFFOLD_API_BASE_URL`: server-only backend base URL; defaults to `http://127.0.0.1:8080`[[if and .Catalog .Tenancy]]
+- `SCAFFOLD_ORGANIZATION_ID`: required server-only organization identifier for public catalog reads[[end]]
 
 The browser calls `GET /api/storefront/status`. Nuxt calls the generated backend
 `GET /readyz` with a two-second deadline and never exposes its address or failure
-details to the browser.
+details to the browser.[[if .Catalog]]
+
+The catalog capability adds server-rendered product list and detail pages. The
+browser still calls only same-origin Nuxt endpoints; Nuxt validates pagination
+and identifiers before forwarding bounded requests to the generated backend.[[end]]
 
 ## Commands
 

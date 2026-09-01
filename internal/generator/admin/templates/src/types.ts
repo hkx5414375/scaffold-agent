@@ -123,6 +123,37 @@ export interface ApprovalPage {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .Catalog}}
+
+export type CatalogStatus = "draft" | "active" | "archived";
+
+export interface CatalogProduct {
+  id: string;
+  organization_id?: string;
+  sku: string;
+  name: string;
+  description?: string;
+  price_minor: string;
+  currency: string;
+  status: CatalogStatus;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CatalogWrite {
+  sku: string;
+  name: string;
+  description?: string;
+  price_minor: string;
+  currency: string;
+}
+
+export interface CatalogPage {
+  items: CatalogProduct[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

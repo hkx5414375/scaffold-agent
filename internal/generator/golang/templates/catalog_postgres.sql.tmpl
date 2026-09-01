@@ -1,0 +1,33 @@
+insert into identity_permissions (code, description) values
+    ('catalog:products:read', 'Read catalog products'),
+    ('catalog:products:write', 'Create, update, publish, and archive catalog products')
+on conflict (code) do nothing;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'catalog:products:read'),
+    ('admin', 'catalog:products:write')
+on conflict (role_code, permission_code) do nothing;
+
+create table catalog_products (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    sku varchar(64) not null check (sku ~ '^[A-Z0-9][A-Z0-9._-]{0,63}$'),
+    name varchar(160) not null,
+    description text not null default '',
+    price_minor bigint not null check (price_minor >= 0),
+    currency varchar(3) not null check (currency ~ '^[A-Z]{3}$'),
+    status varchar(16) not null check (status in ('draft', 'active', 'archived')),
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+
+{{if .Tenancy}}create unique index catalog_products_scope_sku_unique on catalog_products (organization_id, sku);
+create index catalog_products_scope_status_idx on catalog_products (organization_id, status, id);
+{{else}}create unique index catalog_products_sku_unique on catalog_products (sku);
+create index catalog_products_status_idx on catalog_products (status, id);
+{{end}}

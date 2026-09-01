@@ -26,6 +26,10 @@ import (
 	"{{.ModulePath}}/internal/approvals"
 	approvalspostgres "{{.ModulePath}}/internal/approvals/postgres"
 	{{- end}}
+	{{- if .Catalog}}
+	"{{.ModulePath}}/internal/catalog"
+	catalogpostgres "{{.ModulePath}}/internal/catalog/postgres"
+	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
 	{{- if .Cache}}
@@ -247,6 +251,82 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 		t.Fatalf("denied member audit count = %d, %v, want 1", deniedMemberAudit, err)
 	}
 {{- end}}
+{{- end}}
+
+{{- if .Catalog}}
+	for _, permission := range []string{"catalog:products:read", "catalog:products:write"} {
+		allowed, err := identityStore.HasPermission(ctx, "admin", permission)
+		if err != nil || !allowed {
+			t.Fatalf("HasPermission(admin, %s) = %t, %v", permission, allowed, err)
+		}
+		allowed, err = identityStore.HasPermission(ctx, "user", permission)
+		if err != nil || allowed {
+			t.Fatalf("HasPermission(user, %s) = %t, %v, want denied", permission, allowed, err)
+		}
+	}
+	catalogStore := catalogpostgres.New(pool)
+	rolledBackProduct := catalog.Product{
+		ID: "catalog-rolled-back", OrganizationID: organizationID, SKU: "ROLLBACK-1",
+		Name: "Rolled back", PriceMinor: 1, Currency: "USD", Status: catalog.StatusDraft,
+		Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := catalogStore.Create(ctx, rolledBackProduct, duplicateAudit); err == nil {
+		t.Fatal("catalog Create(duplicate audit) error = nil, want transaction failure")
+	}
+	if _, err := catalogStore.Get(ctx, organizationID, rolledBackProduct.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("catalog Get(rolled-back) error = %v, want ErrNotFound", err)
+	}
+	catalogService := catalog.NewService(catalogStore)
+	catalogActor := identity.Principal{UserID: user.ID, Email: user.Email, Role: "admin", OrganizationID: organizationID}
+	product, err := catalogService.Create(ctx, catalog.WriteInput{
+		SKU: " sku-100 ", Name: " Field notebook ", Description: " Recycled paper ",
+		PriceMinor: 1299, Currency: " usd ",
+	}, catalogActor)
+	if err != nil || product.SKU != "SKU-100" || product.Status != catalog.StatusDraft {
+		t.Fatalf("catalog Create() = %#v, %v", product, err)
+	}
+	if _, err := catalogService.Create(ctx, catalog.WriteInput{
+		SKU: "SKU-100", Name: "Duplicate", PriceMinor: 1, Currency: "USD",
+	}, catalogActor); !errors.Is(err, catalog.ErrConflict) {
+		t.Fatalf("catalog Create(duplicate SKU) error = %v, want ErrConflict", err)
+	}
+	product, err = catalogService.Publish(ctx, product.ID, catalog.TransitionInput{Version: product.Version}, catalogActor)
+	if err != nil || product.Status != catalog.StatusActive || product.Version != 2 {
+		t.Fatalf("catalog Publish() = %#v, %v", product, err)
+	}
+	if publicProduct, err := catalogService.GetPublic(ctx, organizationID, product.ID); err != nil || publicProduct.ID != product.ID {
+		t.Fatalf("catalog GetPublic() = %#v, %v", publicProduct, err)
+	}
+{{- if .TenancyLifecycle}}
+	if _, err := lifecycle.Deactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("catalog Deactivate() error = %v", err)
+	}
+	if _, err := catalogService.GetPublic(ctx, organizationID, product.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("catalog GetPublic(inactive organization) error = %v, want ErrNotFound", err)
+	}
+	if _, err := lifecycle.Reactivate(ctx, organizationID, ownerPrincipal); err != nil {
+		t.Fatalf("catalog Reactivate() error = %v", err)
+	}
+{{- end}}
+	product, err = catalogService.Update(ctx, product.ID, catalog.UpdateInput{
+		WriteInput: catalog.WriteInput{SKU: product.SKU, Name: product.Name, Description: product.Description, PriceMinor: 1399, Currency: product.Currency},
+		Version: product.Version,
+	}, catalogActor)
+	if err != nil || product.PriceMinor != 1399 || product.Version != 3 {
+		t.Fatalf("catalog Update() = %#v, %v", product, err)
+	}
+	if _, err := catalogService.Update(ctx, product.ID, catalog.UpdateInput{
+		WriteInput: catalog.WriteInput{SKU: product.SKU, Name: product.Name, PriceMinor: 1, Currency: product.Currency}, Version: 2,
+	}, catalogActor); !errors.Is(err, catalog.ErrConflict) {
+		t.Fatalf("catalog Update(stale) error = %v, want ErrConflict", err)
+	}
+	product, err = catalogService.Archive(ctx, product.ID, catalog.TransitionInput{Version: product.Version}, catalogActor)
+	if err != nil || product.Status != catalog.StatusArchived || product.Version != 4 {
+		t.Fatalf("catalog Archive() = %#v, %v", product, err)
+	}
+	if _, err := catalogService.GetPublic(ctx, organizationID, product.ID); !errors.Is(err, catalog.ErrNotFound) {
+		t.Fatalf("catalog GetPublic(archived) error = %v, want ErrNotFound", err)
+	}
 {{- end}}
 
 {{- if .Files}}

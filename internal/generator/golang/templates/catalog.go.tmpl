@@ -1,0 +1,355 @@
+// Package catalog owns the portable commerce product catalog.
+package catalog
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumNameLength        = 160
+	maximumDescriptionLength = 4000
+	maximumCursorLength      = 191
+)
+
+var (
+	// ErrNotFound means the scoped product does not exist.
+	ErrNotFound = errors.New("catalog product not found")
+	// ErrConflict means a SKU, state, or optimistic version conflicts.
+	ErrConflict = errors.New("catalog product conflicts with current state")
+	// ErrInvalidInput means the request cannot form a portable product.
+	ErrInvalidInput = errors.New("catalog product input is invalid")
+	skuPattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9._-]{0,63}$`)
+	currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
+)
+
+// Status is the portable product publication state.
+type Status string
+
+const (
+	// StatusDraft is visible only to administrators.
+	StatusDraft Status = "draft"
+	// StatusActive is visible through the public catalog.
+	StatusActive Status = "active"
+	// StatusArchived is an immutable terminal record.
+	StatusArchived Status = "archived"
+)
+
+// Product is one priced catalog item.
+type Product struct {
+	ID             string    `json:"id"`
+	OrganizationID string    `json:"organization_id,omitempty"`
+	SKU            string    `json:"sku"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description,omitempty"`
+	PriceMinor     int64     `json:"price_minor,string"`
+	Currency       string    `json:"currency"`
+	Status         Status    `json:"status"`
+	Version        int64     `json:"version,string"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// WriteInput is the full mutable product representation.
+type WriteInput struct {
+	SKU         string `json:"sku"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	PriceMinor  int64  `json:"price_minor,string"`
+	Currency    string `json:"currency"`
+}
+
+// UpdateInput adds the current optimistic version.
+type UpdateInput struct {
+	WriteInput
+	Version int64 `json:"version,string"`
+}
+
+// TransitionInput supplies the current version for publication changes.
+type TransitionInput struct {
+	Version int64 `json:"version,string"`
+}
+
+// Page is one bounded keyset product page.
+type Page struct {
+	Items      []Product `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+}
+
+// Store is the atomic catalog persistence boundary.
+type Store interface {
+	Create(context.Context, Product, identity.AuditEvent) error
+	Get(context.Context, string, string) (Product, error)
+	GetPublic(context.Context, string, string) (Product, error)
+	List(context.Context, string, Status, string, int, bool) ([]Product, string, error)
+	Update(context.Context, Product, identity.AuditEvent) (Product, error)
+	Transition(context.Context, string, string, int64, Status, Status, time.Time, identity.AuditEvent) (Product, error)
+}
+
+// Service implements catalog rules independently from transport and SQL.
+type Service struct {
+	store Store
+	now   func() time.Time
+}
+
+// NewService returns a catalog application service.
+func NewService(store Store) *Service {
+	return &Service{store: store, now: time.Now}
+}
+
+// Create validates and persists one draft product and audit event.
+func (service *Service) Create(ctx context.Context, input WriteInput, actor identity.Principal) (Product, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Product{}, err
+	}
+	normalized, err := normalizeWrite(input)
+	if err != nil {
+		return Product{}, err
+	}
+	now := service.now().UTC()
+	product := Product{
+		ID: rand.Text(), OrganizationID: organizationID, SKU: normalized.SKU,
+		Name: normalized.Name, Description: normalized.Description,
+		PriceMinor: normalized.PriceMinor, Currency: normalized.Currency,
+		Status: StatusDraft, Version: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := service.store.Create(ctx, product, audit(actor, "catalog:products:create", product.ID, now)); err != nil {
+		return Product{}, fmt.Errorf("create catalog product: %w", err)
+	}
+	return product, nil
+}
+
+// Get returns one scoped product for administration.
+func (service *Service) Get(ctx context.Context, id string, actor identity.Principal) (Product, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Product{}, err
+	}
+	id, err = identifier(id)
+	if err != nil {
+		return Product{}, err
+	}
+	product, err := service.store.Get(ctx, organizationID, id)
+	if err != nil {
+		return Product{}, fmt.Errorf("get catalog product: %w", err)
+	}
+	return product, nil
+}
+
+// GetPublic returns one active product from an explicit public scope.
+func (service *Service) GetPublic(ctx context.Context, organizationID, id string) (Product, error) {
+	organizationID, err := publicScope(organizationID)
+	if err != nil {
+		return Product{}, err
+	}
+	id, err = identifier(id)
+	if err != nil {
+		return Product{}, err
+	}
+	product, err := service.store.GetPublic(ctx, organizationID, id)
+	if err != nil {
+		return Product{}, fmt.Errorf("get public catalog product: %w", err)
+	}
+	return product, nil
+}
+
+// List returns products for administration, optionally filtered by status.
+func (service *Service) List(ctx context.Context, status Status, cursor string, limit int, actor identity.Principal) (Page, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Page{}, err
+	}
+	return service.list(ctx, organizationID, status, cursor, limit, false)
+}
+
+// ListPublic returns only active products for one explicit public scope.
+func (service *Service) ListPublic(ctx context.Context, organizationID, cursor string, limit int) (Page, error) {
+	organizationID, err := publicScope(organizationID)
+	if err != nil {
+		return Page{}, err
+	}
+	return service.list(ctx, organizationID, StatusActive, cursor, limit, true)
+}
+
+// Update replaces mutable fields while retaining publication state.
+func (service *Service) Update(ctx context.Context, id string, input UpdateInput, actor identity.Principal) (Product, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Product{}, err
+	}
+	id, err = identifier(id)
+	if err != nil || input.Version < 1 {
+		return Product{}, ErrInvalidInput
+	}
+	normalized, err := normalizeWrite(input.WriteInput)
+	if err != nil {
+		return Product{}, err
+	}
+	now := service.now().UTC()
+	product := Product{
+		ID: id, OrganizationID: organizationID, SKU: normalized.SKU,
+		Name: normalized.Name, Description: normalized.Description,
+		PriceMinor: normalized.PriceMinor, Currency: normalized.Currency,
+		Version: input.Version, UpdatedAt: now,
+	}
+	updated, err := service.store.Update(ctx, product, audit(actor, "catalog:products:update", id, now))
+	if err != nil {
+		return Product{}, fmt.Errorf("update catalog product: %w", err)
+	}
+	return updated, nil
+}
+
+// Publish makes one current draft visible to public catalog readers.
+func (service *Service) Publish(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Product, error) {
+	return service.transition(ctx, id, input.Version, StatusDraft, StatusActive, "catalog:products:publish", actor)
+}
+
+// Archive makes one draft or active product permanently unavailable.
+func (service *Service) Archive(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Product, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Product{}, err
+	}
+	id, err = identifier(id)
+	if err != nil || input.Version < 1 {
+		return Product{}, ErrInvalidInput
+	}
+	current, err := service.store.Get(ctx, organizationID, id)
+	if err != nil {
+		return Product{}, fmt.Errorf("get catalog product for archive: %w", err)
+	}
+	if current.Status != StatusDraft && current.Status != StatusActive {
+		return Product{}, ErrConflict
+	}
+	now := service.now().UTC()
+	updated, err := service.store.Transition(
+		ctx, organizationID, id, input.Version, current.Status, StatusArchived, now,
+		audit(actor, "catalog:products:archive", id, now),
+	)
+	if err != nil {
+		return Product{}, fmt.Errorf("archive catalog product: %w", err)
+	}
+	return updated, nil
+}
+
+func (service *Service) transition(
+	ctx context.Context,
+	id string,
+	version int64,
+	from Status,
+	to Status,
+	action string,
+	actor identity.Principal,
+) (Product, error) {
+	organizationID, err := administrationScope(actor)
+	if err != nil {
+		return Product{}, err
+	}
+	id, err = identifier(id)
+	if err != nil || version < 1 {
+		return Product{}, ErrInvalidInput
+	}
+	now := service.now().UTC()
+	updated, err := service.store.Transition(
+		ctx, organizationID, id, version, from, to, now,
+		audit(actor, action, id, now),
+	)
+	if err != nil {
+		return Product{}, fmt.Errorf("transition catalog product: %w", err)
+	}
+	return updated, nil
+}
+
+func (service *Service) list(
+	ctx context.Context,
+	organizationID string,
+	status Status,
+	cursor string,
+	limit int,
+	public bool,
+) (Page, error) {
+	cursor = strings.TrimSpace(cursor)
+	if limit < 1 || limit > 100 || len(cursor) > maximumCursorLength || !printable(cursor) {
+		return Page{}, ErrInvalidInput
+	}
+	if status != "" && status != StatusDraft && status != StatusActive && status != StatusArchived {
+		return Page{}, ErrInvalidInput
+	}
+	items, nextCursor, err := service.store.List(ctx, organizationID, status, cursor, limit, public)
+	if err != nil {
+		return Page{}, fmt.Errorf("list catalog products: %w", err)
+	}
+	return Page{Items: items, NextCursor: nextCursor}, nil
+}
+
+func normalizeWrite(input WriteInput) (WriteInput, error) {
+	input.SKU = strings.ToUpper(strings.TrimSpace(input.SKU))
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	if !skuPattern.MatchString(input.SKU) ||
+		input.Name == "" || utf8.RuneCountInString(input.Name) > maximumNameLength || !printable(input.Name) ||
+		utf8.RuneCountInString(input.Description) > maximumDescriptionLength || !printable(input.Description) ||
+		input.PriceMinor < 0 || !currencyPattern.MatchString(input.Currency) {
+		return WriteInput{}, ErrInvalidInput
+	}
+	return input, nil
+}
+
+func administrationScope(actor identity.Principal) (string, error) {
+	if actor.UserID == "" || len(actor.UserID) > maximumCursorLength || !printable(actor.UserID) {
+		return "", identity.ErrInvalidCredentials
+	}
+{{- if .Tenancy}}
+	organizationID := strings.TrimSpace(actor.OrganizationID)
+	if organizationID == "" || len(organizationID) > maximumCursorLength || !printable(organizationID) {
+		return "", identity.ErrInvalidCredentials
+	}
+	return organizationID, nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func publicScope(organizationID string) (string, error) {
+	organizationID = strings.TrimSpace(organizationID)
+{{- if .Tenancy}}
+	if organizationID == "" || len(organizationID) > maximumCursorLength || !printable(organizationID) {
+		return "", ErrInvalidInput
+	}
+{{- else}}
+	if organizationID != "" {
+		return "", ErrInvalidInput
+	}
+{{- end}}
+	return organizationID, nil
+}
+
+func identifier(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maximumCursorLength || !printable(value) {
+		return "", ErrInvalidInput
+	}
+	return value, nil
+}
+
+func printable(value string) bool {
+	return strings.IndexFunc(value, func(character rune) bool { return !unicode.IsGraphic(character) }) < 0
+}
+
+func audit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{
+		ID: rand.Text(), UserID: actor.UserID, Action: action,
+		Outcome: "succeeded", Target: target, CreatedAt: now,
+	}
+}

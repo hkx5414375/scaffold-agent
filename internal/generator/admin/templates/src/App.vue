@@ -18,6 +18,9 @@ import JobsView from "./views/JobsView.vue";
 {{- if .Approvals}}
 import ApprovalsView from "./views/ApprovalsView.vue";
 {{- end}}
+{{- if .Catalog}}
+import CatalogView from "./views/CatalogView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -195,9 +198,22 @@ async function acceptInvitation(): Promise<void> {
           <ApprovalsView :key="session.currentOrganizationId" />
         </el-tab-pane>
 {{- end}}
+{{- if .Catalog}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="Catalog"
+          name="catalog"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
+        <el-tab-pane label="Catalog" name="catalog">
+{{- end}}
+          <CatalogView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
-{{- if or .Files .JobAdmin .Approvals}}
+{{- if or .Files .JobAdmin .Approvals .Catalog}}
 {{- if .Tenancy}}
       <el-tabs v-else class="workspace-tabs">
 {{- else}}
@@ -225,6 +241,11 @@ async function acceptInvitation(): Promise<void> {
 {{- if .Approvals}}
         <el-tab-pane label="Approvals" name="approvals">
           <ApprovalsView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
+        </el-tab-pane>
+{{- end}}
+{{- if .Catalog}}
+        <el-tab-pane label="Catalog" name="catalog">
+          <CatalogView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
         </el-tab-pane>
 {{- end}}
       </el-tabs>

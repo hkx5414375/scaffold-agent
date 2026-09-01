@@ -223,6 +223,7 @@ type templateData struct {
 	JobAdmin              bool
 	Observability         bool
 	Approvals             bool
+	Catalog               bool
 	CSVTransfer           bool
 }
 

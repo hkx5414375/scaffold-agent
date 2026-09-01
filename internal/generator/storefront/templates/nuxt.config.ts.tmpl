@@ -1,10 +1,11 @@
 export default defineNuxtConfig({
   compatibilityDate: "2026-09-01",
-  css: ["~/assets/css/main.css"],
+  css: ["~/assets/css/main.css"[[if .Catalog]], "~/assets/css/catalog.css"[[end]]],
   devtools: { enabled: false },
   modules: ["@nuxt/eslint"],
   runtimeConfig: {
-    apiBaseUrl: process.env.SCAFFOLD_API_BASE_URL || "http://127.0.0.1:8080",
+    apiBaseUrl: process.env.SCAFFOLD_API_BASE_URL || "http://127.0.0.1:8080",[[if .Catalog]]
+    organizationId: process.env.SCAFFOLD_ORGANIZATION_ID || "",[[end]]
   },
   app: {
     head: {

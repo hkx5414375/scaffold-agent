@@ -51,6 +51,8 @@ const (
 	csvTransferVersion      = "0.1.0"
 	approvalsCapability     = "approval-workflows"
 	approvalsVersion        = "0.1.0"
+	catalogCapability       = "commerce-catalog"
+	catalogVersion          = "0.1.0"
 )
 
 //go:embed all:templates
@@ -119,6 +121,9 @@ type databaseTemplateSet struct {
 	ApprovalsStorePath                string
 	ApprovalsStoreTemplate            string
 	ApprovalsMigrationTemplate        string
+	CatalogStorePath                  string
+	CatalogStoreTemplate              string
+	CatalogMigrationTemplate          string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -164,6 +169,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		ApprovalsStorePath:                "internal/approvals/postgres/store.go",
 		ApprovalsStoreTemplate:            "templates/approvals_postgres_store.go.tmpl",
 		ApprovalsMigrationTemplate:        "templates/approvals_postgres.sql.tmpl",
+		CatalogStorePath:                  "internal/catalog/postgres/store.go",
+		CatalogStoreTemplate:              "templates/catalog_postgres_store.go.tmpl",
+		CatalogMigrationTemplate:          "templates/catalog_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -208,6 +216,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		ApprovalsStorePath:                "internal/approvals/mysql/store.go",
 		ApprovalsStoreTemplate:            "templates/approvals_mysql_store.go.tmpl",
 		ApprovalsMigrationTemplate:        "templates/approvals_mysql.sql.tmpl",
+		CatalogStorePath:                  "internal/catalog/mysql/store.go",
+		CatalogStoreTemplate:              "templates/catalog_mysql_store.go.tmpl",
+		CatalogMigrationTemplate:          "templates/catalog_mysql.sql.tmpl",
 	},
 }
 
@@ -324,6 +335,16 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: catalogCapability, Version: catalogVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable product catalog with audited publication and public storefront reads",
+			Backends:    []string{"go"},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -405,6 +426,13 @@ var approvalsTemplates = map[string]string{
 	"internal/approvals/httpapi/handler_test.go": "templates/approvals_handler_test.go.tmpl",
 }
 
+var catalogTemplates = map[string]string{
+	"internal/catalog/catalog.go":              "templates/catalog.go.tmpl",
+	"internal/catalog/catalog_test.go":         "templates/catalog_test.go.tmpl",
+	"internal/catalog/httpapi/handler.go":      "templates/catalog_handler.go.tmpl",
+	"internal/catalog/httpapi/handler_test.go": "templates/catalog_handler_test.go.tmpl",
+}
+
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -456,6 +484,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	observabilityEnabled := false
 	csvTransferEnabled := false
 	approvalsEnabled := false
+	catalogEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -491,6 +520,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == approvalsCapability {
 			approvalsEnabled = true
 		}
+		if pack.Metadata.Name == catalogCapability {
+			catalogEnabled = true
+		}
+	}
+	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, errors.New("commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0")
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine, approvalsEnabled)
 	if err != nil {
@@ -519,6 +554,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Observability:    observabilityEnabled,
 		CSVTransfer:      csvTransferEnabled,
 		Approvals:        approvalsEnabled,
+		Catalog:          catalogEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -549,6 +585,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if approvalsEnabled {
+		data.MigrationCount++
+	}
+	if catalogEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+len(storefrontui.BaseTemplates)+1)
@@ -738,6 +777,33 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if catalogEnabled {
+		for path, templatePath := range catalogTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: catalogCapability}
+		}
+		targets[database.CatalogStorePath] = renderTarget{
+			TemplatePath: database.CatalogStoreTemplate,
+			Owner:        catalogCapability,
+		}
+		targets["internal/platform/migrate/migrations/000260_commerce_catalog.sql"] = renderTarget{
+			TemplatePath: database.CatalogMigrationTemplate,
+			Owner:        catalogCapability,
+		}
+		if adminEnabled {
+			targets["web/admin/src/views/CatalogView.vue"] = renderTarget{
+				TemplatePath: "templates/src/views/CatalogView.vue.tmpl",
+				Owner:        catalogCapability,
+				SharedAdmin:  true,
+			}
+		}
+		if storefrontEnabled {
+			for path, templatePath := range storefrontui.CatalogTemplates {
+				targets[path] = renderTarget{
+					TemplatePath: templatePath, Owner: catalogCapability, SharedStorefront: true,
+				}
+			}
+		}
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -754,9 +820,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if target.SharedAdmin {
 			content, err = adminui.Render(target.TemplatePath, data)
 		} else if target.SharedStorefront {
+			storefrontData := storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName)
+			storefrontData.Catalog = catalogEnabled
+			storefrontData.Tenancy = tenancyEnabled
 			content, err = storefrontui.Render(
 				target.TemplatePath,
-				storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName),
+				storefrontData,
 			)
 		} else {
 			content, err = render(target.TemplatePath, data)
@@ -816,6 +885,7 @@ type templateData struct {
 	Observability    bool
 	CSVTransfer      bool
 	Approvals        bool
+	Catalog          bool
 	MigrationCount   int
 }
 

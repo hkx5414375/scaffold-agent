@@ -789,6 +789,98 @@ func TestGenerateApprovalWorkflowsRequiresBusinessEntityAndExactWorkflow(t *test
 	}
 }
 
+func TestGenerateCommerceCatalogAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, engine := range []string{"postgresql", "mysql"} {
+		engine := engine
+		t.Run(engine, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = engine
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyCapability, Version: tenancyLifecycleVersion},
+				{Name: catalogCapability, Version: catalogVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if generated.CapabilityLock[catalogCapability] != catalogVersion {
+				t.Fatalf("Generate() capability lock = %#v", generated.CapabilityLock)
+			}
+			storePath := "internal/catalog/" + databaseTemplates[engine].Data.PackageName + "/store.go"
+			for _, path := range []string{
+				"internal/catalog/catalog.go",
+				"internal/catalog/catalog_test.go",
+				"internal/catalog/httpapi/handler.go",
+				"internal/catalog/httpapi/handler_test.go",
+				storePath,
+				"internal/platform/migrate/migrations/000260_commerce_catalog.sql",
+				"web/admin/src/views/CatalogView.vue",
+				"web/storefront/app/pages/products/index.vue",
+				"web/storefront/app/pages/products/[id].vue",
+				"web/storefront/server/api/storefront/products.get.ts",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != catalogCapability {
+					t.Errorf("Generate() catalog output %s is missing or has the wrong owner", path)
+				}
+			}
+			for _, output := range generated.Outputs {
+				if !strings.HasSuffix(output.Path, ".go") {
+					continue
+				}
+				formatted, err := format.Source(output.Content)
+				if err != nil {
+					t.Fatalf("generated %q is invalid Go: %v\n%s", output.Path, err, output.Content)
+				}
+				if !bytes.Equal(formatted, output.Content) {
+					t.Fatalf("generated %q is not gofmt formatted", output.Path)
+				}
+			}
+			mainSource := string(outputContent(generated, "cmd/server/main.go"))
+			if !strings.Contains(mainSource, "catalogAPI.Register") {
+				t.Fatal("Generate() did not wire catalog routes")
+			}
+			openAPI := outputContent(generated, "api/openapi.yaml")
+			var document struct {
+				Paths map[string]any `yaml:"paths"`
+			}
+			if err := yaml.Unmarshal(openAPI, &document); err != nil {
+				t.Fatalf("generated catalog OpenAPI is invalid YAML: %v\n%s", err, openAPI)
+			}
+			for _, path := range []string{
+				"/api/v1/catalog/products", "/api/v1/catalog/products/{id}/publish",
+				"/api/v1/storefront/products", "/api/v1/storefront/products/{id}",
+			} {
+				if document.Paths[path] == nil {
+					t.Errorf("generated catalog OpenAPI is missing %s", path)
+				}
+			}
+			storefrontConfig := string(outputContent(generated, "web/storefront/nuxt.config.ts"))
+			if !strings.Contains(storefrontConfig, "SCAFFOLD_ORGANIZATION_ID") {
+				t.Fatal("Generate() did not keep tenant storefront scope server-only")
+			}
+		})
+	}
+}
+
+func TestCommerceCatalogRequiresLifecycleTenancyWhenScoped(t *testing.T) {
+	t.Parallel()
+
+	project := validProject()
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyCapability, Version: tenancyMembersVersion},
+		{Name: catalogCapability, Version: catalogVersion},
+	}
+	if _, err := New().Generate(context.Background(), project); err == nil ||
+		!strings.Contains(err.Error(), "requires organization-tenancy 0.3.0") {
+		t.Fatalf("Generate() error = %v, want lifecycle tenancy requirement", err)
+	}
+}
+
 func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	t.Parallel()
 

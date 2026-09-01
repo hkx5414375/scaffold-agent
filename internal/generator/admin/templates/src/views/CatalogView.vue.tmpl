@@ -1,0 +1,229 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, reactive, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import type { CatalogPage, CatalogProduct, CatalogStatus, CatalogWrite } from "../types";
+
+const resourcePath = "/api/v1/catalog/products";
+const rows = ref<CatalogProduct[]>([]);
+const loading = ref(false);
+const saving = ref(false);
+const dialogOpen = ref(false);
+const editing = ref<CatalogProduct | null>(null);
+const filter = ref<CatalogStatus | "">("");
+const currentCursor = ref("");
+const nextCursor = ref("");
+const cursorHistory = ref<string[]>([]);
+const form = reactive<CatalogWrite>(emptyWrite());
+
+onMounted(() => loadPage(""));
+
+function emptyWrite(): CatalogWrite {
+  return { sku: "", name: "", description: "", price_minor: "0", currency: "USD" };
+}
+
+async function loadPage(cursor: string): Promise<void> {
+  loading.value = true;
+  try {
+    const query = new URLSearchParams({ limit: "20" });
+    if (cursor) query.set("cursor", cursor);
+    if (filter.value) query.set("status", filter.value);
+    const page = await request<CatalogPage>(`${resourcePath}?${query}`);
+    rows.value = page.items;
+    currentCursor.value = cursor;
+    nextCursor.value = page.next_cursor ?? "";
+  } catch (error) {
+    showError(error, "Products could not be loaded");
+  } finally {
+    loading.value = false;
+  }
+}
+
+function openCreate(): void {
+  editing.value = null;
+  Object.assign(form, emptyWrite());
+  dialogOpen.value = true;
+}
+
+function openEdit(product: CatalogProduct): void {
+  editing.value = product;
+  Object.assign(form, {
+    sku: product.sku,
+    name: product.name,
+    description: product.description ?? "",
+    price_minor: product.price_minor,
+    currency: product.currency,
+  });
+  dialogOpen.value = true;
+}
+
+async function save(): Promise<void> {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    const payload = editing.value ? { ...form, version: editing.value.version } : { ...form };
+    await request<CatalogProduct>(
+      editing.value ? `${resourcePath}/${editing.value.id}` : resourcePath,
+      {
+        method: editing.value ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      },
+    );
+    dialogOpen.value = false;
+    ElMessage.success(editing.value ? "Product updated" : "Draft product created");
+    await loadPage(currentCursor.value);
+  } catch (error) {
+    showError(error, "Product could not be saved");
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function transition(product: CatalogProduct, action: "publish" | "archive"): Promise<void> {
+  if (action === "archive") {
+    try {
+      await ElMessageBox.confirm("Archived products cannot be restored.", "Archive product", {
+        type: "warning",
+        confirmButtonText: "Archive",
+      });
+    } catch {
+      return;
+    }
+  }
+  try {
+    await request<CatalogProduct>(`${resourcePath}/${product.id}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: product.version }),
+    });
+    ElMessage.success(action === "publish" ? "Product published" : "Product archived");
+    await loadPage(currentCursor.value);
+  } catch (error) {
+    showError(error, `Product could not be ${action === "publish" ? "published" : "archived"}`);
+  }
+}
+
+async function nextPage(): Promise<void> {
+  if (!nextCursor.value) return;
+  cursorHistory.value.push(currentCursor.value);
+  await loadPage(nextCursor.value);
+}
+
+async function previousPage(): Promise<void> {
+  const cursor = cursorHistory.value.pop();
+  if (cursor === undefined) return;
+  await loadPage(cursor);
+}
+
+function resetFilter(): void {
+  cursorHistory.value = [];
+  void loadPage("");
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section>
+    <div class="page-heading">
+      <div>
+        <p class="eyebrow">Commerce</p>
+        <h1>Product catalog</h1>
+      </div>
+      <div class="table-actions">
+        <el-select
+          v-model="filter"
+          aria-label="Publication status"
+          clearable
+          placeholder="All statuses"
+          @change="resetFilter"
+        >
+          <el-option label="Draft" value="draft" />
+          <el-option label="Active" value="active" />
+          <el-option label="Archived" value="archived" />
+        </el-select>
+        <el-button type="primary" @click="openCreate">Create product</el-button>
+      </div>
+    </div>
+
+    <el-card shadow="never">
+      <el-table v-loading="loading" :data="rows" row-key="id">
+        <el-table-column label="SKU" prop="sku" min-width="130" />
+        <el-table-column label="Name" prop="name" min-width="180" />
+        <el-table-column label="Price (minor)" prop="price_minor" min-width="130" />
+        <el-table-column label="Currency" prop="currency" width="100" />
+        <el-table-column label="Status" width="110">
+          <template #default="scope"
+            ><el-tag effect="plain">{{ "{{" }} scope.row.status {{ "}}" }}</el-tag></template
+          >
+        </el-table-column>
+        <el-table-column label="Actions" width="230" fixed="right">
+          <template #default="scope">
+            <div class="table-actions">
+              <el-button
+                v-if="scope.row.status !== 'archived'"
+                link
+                type="primary"
+                @click="openEdit(scope.row)"
+                >Edit</el-button
+              >
+              <el-button
+                v-if="scope.row.status === 'draft'"
+                link
+                type="success"
+                @click="transition(scope.row, 'publish')"
+                >Publish</el-button
+              >
+              <el-button
+                v-if="scope.row.status !== 'archived'"
+                link
+                type="danger"
+                @click="transition(scope.row, 'archive')"
+                >Archive</el-button
+              >
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="pagination-actions">
+        <el-button :disabled="cursorHistory.length === 0" @click="previousPage">Previous</el-button>
+        <el-button :disabled="!nextCursor" @click="nextPage">Next</el-button>
+      </div>
+    </el-card>
+
+    <el-dialog
+      v-model="dialogOpen"
+      :title="editing ? 'Edit product' : 'Create product'"
+      width="min(600px, 92vw)"
+    >
+      <el-form label-position="top">
+        <el-form-item label="SKU" required
+          ><el-input v-model="form.sku" maxlength="64"
+        /></el-form-item>
+        <el-form-item label="Name" required
+          ><el-input v-model="form.name" maxlength="160"
+        /></el-form-item>
+        <el-form-item label="Description"
+          ><el-input
+            v-model="form.description"
+            :rows="4"
+            maxlength="4000"
+            show-word-limit
+            type="textarea"
+        /></el-form-item>
+        <el-form-item label="Price in minor units" required
+          ><el-input v-model="form.price_minor" inputmode="numeric"
+        /></el-form-item>
+        <el-form-item label="ISO currency" required
+          ><el-input v-model="form.currency" maxlength="3"
+        /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialogOpen = false">Cancel</el-button>
+        <el-button type="primary" :loading="saving" @click="save">Save</el-button>
+      </template>
+    </el-dialog>
+  </section>
+</template>

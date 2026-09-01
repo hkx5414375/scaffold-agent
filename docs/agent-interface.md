@@ -147,6 +147,18 @@ Agents should extend this owned foundation through later storefront capability
 outputs instead of replacing its runtime boundary or placing credentials in
 public runtime configuration, browser storage, or client components.
 
+Selecting `commerce-catalog` version `0.1.0` currently requires the Go adapter
+and generates a product domain, PostgreSQL or MySQL persistence, OpenAPI, and
+administration/public HTTP routes independently from Blueprint CRUD modules. If
+`organization-tenancy` is also selected, it must be version `0.3.0` so public
+reads can hide inactive organizations. Products normalize SKUs and currencies to
+upper case, keep prices and versions as decimal JSON strings, and move only from
+`draft` to `active` to terminal `archived`. Every mutation and its audit event
+commit together. Public routes return active products only. With `storefront:
+nuxt`, Nuxt adds SSR list/detail pages and forwards the server-only
+`SCAFFOLD_ORGANIZATION_ID`; agents must not move tenant selection or backend
+addresses into browser-visible configuration.
+
 ## STDIO protocol
 
 Run the server with:
