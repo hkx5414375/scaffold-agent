@@ -16,8 +16,17 @@ $env:BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
 $env:BOOTSTRAP_ADMIN_PASSWORD = "replace-with-at-least-12-characters"
 $env:COOKIE_SECURE = "false"
 uv sync --frozen --all-groups
-uv run uvicorn {{.PackageName}}.main:app --reload
+uv run uvicorn {{.PackageName}}.main:app --reload --port 8080
 ```
+{{if .Admin}}
+另开一个终端启动共享管理端：
+
+```powershell
+cd web/admin
+npm ci
+npm run dev
+```
+{{end}}
 
 启动过程会在接受 HTTP 流量前执行 Alembic 迁移。管理员引导配置必须同时提供邮箱和密码；已有同邮箱管理员不会被覆盖密码或降级权限。
 

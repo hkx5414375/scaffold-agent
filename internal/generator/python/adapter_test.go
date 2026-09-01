@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 	"go.yaml.in/yaml/v3"
 )
@@ -67,7 +68,7 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 		mutate func(*spec.Project)
 		want   string
 	}{
-		{name: "admin", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "element-plus" }, want: "administration UI"},
+		{name: "admin", mutate: func(project *spec.Project) { project.Spec.Stack.AdminUI = "unsupported" }, want: "Element Plus"},
 		{name: "storefront", mutate: func(project *spec.Project) { project.Spec.Stack.Storefront = "nuxt" }, want: "storefront"},
 		{name: "auth", mutate: func(project *spec.Project) { project.Spec.Auth.Modes = []string{"session"} }, want: "both session and token"},
 		{name: "capability", mutate: func(project *spec.Project) {
@@ -88,6 +89,30 @@ func TestGenerateRejectsIncompleteSelections(t *testing.T) {
 				t.Fatalf("Generate() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestGenerateSharedAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validBusinessProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if generated.CapabilityLock[adminui.Owner] != adminui.Version || len(generated.Outputs) != 57 {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	for _, path := range []string{
+		"web/admin/package-lock.json",
+		"web/admin/src/App.vue",
+		"web/admin/src/types.ts",
+		"web/admin/src/views/BusinessView.vue",
+	} {
+		if outputContent(generated, path) == nil {
+			t.Errorf("Generate() did not produce %s", path)
+		}
 	}
 }
 

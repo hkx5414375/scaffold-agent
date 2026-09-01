@@ -212,7 +212,7 @@ def test_http_identity_contract_and_safe_error_mapping() -> None:
     assert login.status_code == 200
     assert "HttpOnly" in login.headers["set-cookie"]
     assert "SameSite=lax" in login.headers["set-cookie"]
-    assert current.json()["method"] == "token"
+    assert current.json()["principal"]["method"] == "token"
     assert token.status_code == 201
     assert token.json() == {"token": "new-api-secret"}
     assert logout.status_code == 204

@@ -6,7 +6,7 @@ metadata:
 spec:
   stack:
     backend: python
-    admin_ui: none
+    admin_ui: element-plus
     storefront: none
   database:
     engine: postgresql

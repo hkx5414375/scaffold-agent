@@ -16,6 +16,7 @@ import (
 
 	"github.com/hkx5414375/scaffold-agent/internal/change"
 	"github.com/hkx5414375/scaffold-agent/internal/generator"
+	adminui "github.com/hkx5414375/scaffold-agent/internal/generator/admin"
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 )
 
@@ -65,16 +66,25 @@ var pythonKeywords = map[string]struct{}{
 }
 
 type templateData struct {
-	ProjectName string
-	PackageName string
-	Database    databaseData
-	Business    *businessData
+	ProjectName      string
+	PackageName      string
+	Database         databaseData
+	Business         *businessData
+	Admin            bool
+	Tenancy          bool
+	TenancyMembers   bool
+	TenancyLifecycle bool
+	Files            bool
+	JobAdmin         bool
+	Approvals        bool
+	CSVTransfer      bool
 }
 
 type businessData struct {
 	ModuleName       string
 	EntityName       string
 	EntityClass      string
+	EntityType       string
 	PackageName      string
 	TableName        string
 	IndexName        string
@@ -91,27 +101,32 @@ type businessData struct {
 }
 
 type businessField struct {
-	Name           string
-	PythonType     string
-	SQLAlchemyType string
-	Required       bool
-	Unique         bool
-	UniqueName     string
-	StringLike     bool
-	MaximumLength  int
-	Int64          bool
-	DateTime       bool
-	SampleOne      string
-	SampleTwo      string
-	JSONSampleOne  string
-	OpenAPIType    string
-	OpenAPIFormat  string
-	OpenAPIPattern string
+	Name              string
+	PythonType        string
+	SQLAlchemyType    string
+	Required          bool
+	Unique            bool
+	UniqueName        string
+	StringLike        bool
+	MaximumLength     int
+	Int64             bool
+	DateTime          bool
+	SampleOne         string
+	SampleTwo         string
+	JSONSampleOne     string
+	OpenAPIType       string
+	OpenAPIFormat     string
+	OpenAPIPattern    string
+	GoName            string
+	TypeScriptType    string
+	TypeScriptDefault string
+	InputKind         string
 }
 
 type renderTarget struct {
-	Template string
-	Owner    string
+	Template    string
+	Owner       string
+	SharedAdmin bool
 }
 
 var baseTemplates = map[string]string{
@@ -181,8 +196,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if !supported {
 		return generator.Result{}, fmt.Errorf("the Python adapter supports only PostgreSQL and MySQL")
 	}
-	if enabled(project.Spec.Stack.AdminUI) {
-		return generator.Result{}, fmt.Errorf("the Python foundation does not generate an administration UI yet")
+	adminEnabled := enabled(project.Spec.Stack.AdminUI)
+	if adminEnabled && project.Spec.Stack.AdminUI != "element-plus" {
+		return generator.Result{}, fmt.Errorf("the Python adapter supports only the Element Plus administration UI")
 	}
 	if enabled(project.Spec.Stack.Storefront) {
 		return generator.Result{}, fmt.Errorf("the Python adapter does not generate a storefront yet")
@@ -210,6 +226,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		PackageName: pythonIdentifier(project.Metadata.Name),
 		Database:    database,
 		Business:    business,
+		Admin:       adminEnabled,
 	}
 	targets := make(map[string]renderTarget, len(baseTemplates)+len(businessTemplates)+1)
 	for path, templatePath := range baseTemplates {
@@ -227,6 +244,18 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets[path] = renderTarget{Template: templatePath, Owner: crudOwner}
 		}
 	}
+	if adminEnabled {
+		for path, templatePath := range adminui.BaseTemplates {
+			targets[path] = renderTarget{
+				Template: templatePath, Owner: adminui.Owner, SharedAdmin: true,
+			}
+		}
+		if business != nil {
+			targets["web/admin/src/views/BusinessView.vue"] = renderTarget{
+				Template: adminui.BusinessViewTemplate, Owner: adminui.Owner, SharedAdmin: true,
+			}
+		}
+	}
 
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
@@ -239,7 +268,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			return generator.Result{}, err
 		}
 		target := targets[path]
-		content, err := render(target.Template, data)
+		var content []byte
+		var err error
+		if target.SharedAdmin {
+			content, err = adminui.Render(target.Template, data)
+		} else {
+			content, err = render(target.Template, data)
+		}
 		if err != nil {
 			return generator.Result{}, fmt.Errorf("render %q: %w", path, err)
 		}
@@ -248,6 +283,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	capabilityLock := map[string]string{baseOwner: baseVersion}
 	if business != nil {
 		capabilityLock[crudOwner] = crudVersion
+	}
+	if adminEnabled {
+		capabilityLock[adminui.Owner] = adminui.Version
 	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
@@ -314,6 +352,7 @@ func buildBusiness(module spec.Module, databaseEngine string) (*businessData, er
 			return nil, fmt.Errorf("MySQL text field %q cannot use the portable unique constraint", field.Name)
 		}
 		fieldData.Name = field.Name
+		fieldData.GoName = upperCamel(field.Name)
 		fieldData.Required = field.Required
 		fieldData.Unique = field.Unique
 		fieldData.UniqueName = compactIdentifier("uq", tableName, field.Name)
@@ -328,6 +367,7 @@ func buildBusiness(module spec.Module, databaseEngine string) (*businessData, er
 	}
 	return &businessData{
 		ModuleName: module.Name, EntityName: entity.Name, EntityClass: upperCamel(entity.Name),
+		EntityType:  upperCamel(entity.Name),
 		PackageName: module.Name, TableName: tableName,
 		IndexName:        compactIdentifier("ix", tableName, "created_at_id"),
 		VersionCheckName: compactIdentifier("ck", tableName, "version_positive"),
@@ -341,15 +381,15 @@ func buildBusiness(module spec.Module, databaseEngine string) (*businessData, er
 func pythonBusinessField(fieldType string) (businessField, bool) {
 	switch fieldType {
 	case "string":
-		return businessField{PythonType: "str", SQLAlchemyType: "sa.String(255)", StringLike: true, MaximumLength: 255, SampleOne: `"first"`, SampleTwo: `"second"`, JSONSampleOne: `"first"`, OpenAPIType: "string"}, true
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.String(255)", StringLike: true, MaximumLength: 255, SampleOne: `"first"`, SampleTwo: `"second"`, JSONSampleOne: `"first"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "text"}, true
 	case "text":
-		return businessField{PythonType: "str", SQLAlchemyType: "sa.Text()", StringLike: true, MaximumLength: 4000, SampleOne: `"first text"`, SampleTwo: `"second text"`, JSONSampleOne: `"first text"`, OpenAPIType: "string"}, true
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.Text()", StringLike: true, MaximumLength: 4000, SampleOne: `"first text"`, SampleTwo: `"second text"`, JSONSampleOne: `"first text"`, OpenAPIType: "string", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "textarea"}, true
 	case "bool":
-		return businessField{PythonType: "bool", SQLAlchemyType: "sa.Boolean()", SampleOne: "True", SampleTwo: "False", JSONSampleOne: "true", OpenAPIType: "boolean"}, true
+		return businessField{PythonType: "bool", SQLAlchemyType: "sa.Boolean()", SampleOne: "True", SampleTwo: "False", JSONSampleOne: "true", OpenAPIType: "boolean", TypeScriptType: "boolean", TypeScriptDefault: "false", InputKind: "boolean"}, true
 	case "int64":
-		return businessField{PythonType: "str", SQLAlchemyType: "sa.BigInteger()", Int64: true, SampleOne: `"1"`, SampleTwo: `"2"`, JSONSampleOne: `"1"`, OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`}, true
+		return businessField{PythonType: "str", SQLAlchemyType: "sa.BigInteger()", Int64: true, SampleOne: `"1"`, SampleTwo: `"2"`, JSONSampleOne: `"1"`, OpenAPIType: "string", OpenAPIPattern: `"^-?[0-9]+$"`, TypeScriptType: "string", TypeScriptDefault: `"0"`, InputKind: "text"}, true
 	case "datetime":
-		return businessField{PythonType: "datetime", SQLAlchemyType: "sa.DateTime(timezone=True)", DateTime: true, SampleOne: `datetime(2026, 9, 1, tzinfo=UTC)`, SampleTwo: `datetime(2026, 9, 2, tzinfo=UTC)`, JSONSampleOne: `"2026-09-01T00:00:00Z"`, OpenAPIType: "string", OpenAPIFormat: "date-time"}, true
+		return businessField{PythonType: "datetime", SQLAlchemyType: "sa.DateTime(timezone=True)", DateTime: true, SampleOne: `datetime(2026, 9, 1, tzinfo=UTC)`, SampleTwo: `datetime(2026, 9, 2, tzinfo=UTC)`, JSONSampleOne: `"2026-09-01T00:00:00Z"`, OpenAPIType: "string", OpenAPIFormat: "date-time", TypeScriptType: "string", TypeScriptDefault: `""`, InputKind: "datetime"}, true
 	default:
 		return businessField{}, false
 	}

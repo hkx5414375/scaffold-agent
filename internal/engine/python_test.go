@@ -13,22 +13,26 @@ import (
 )
 
 func TestPythonPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", false)
+	runGeneratedPythonReference(t, "postgresql", false, false)
 }
 
 func TestPythonMySQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", false)
+	runGeneratedPythonReference(t, "mysql", false, false)
 }
 
 func TestPythonPostgreSQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "postgresql", true)
+	runGeneratedPythonReference(t, "postgresql", true, false)
 }
 
 func TestPythonMySQLCRUDPlanApplyVerifyEndToEnd(t *testing.T) {
-	runGeneratedPythonReference(t, "mysql", true)
+	runGeneratedPythonReference(t, "mysql", true, false)
 }
 
-func runGeneratedPythonReference(t *testing.T, database string, business bool) {
+func TestPythonPostgreSQLAdminPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReference(t, "postgresql", true, true)
+}
+
+func runGeneratedPythonReference(t *testing.T, database string, business, admin bool) {
 	t.Helper()
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
@@ -46,7 +50,7 @@ metadata:
 spec:
   stack:
     backend: python
-    admin_ui: none
+    admin_ui: ADMIN_UI
     storefront: none
   database:
     engine: DATABASE_ENGINE
@@ -55,6 +59,11 @@ spec:
 MODULES
 `
 	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	adminUI := "none"
+	if admin {
+		adminUI = "element-plus"
+	}
+	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	modules := ""
 	if business {
 		modules = `  modules:
@@ -87,11 +96,20 @@ MODULES
 	if business {
 		wantChanges = 38
 	}
+	if admin {
+		wantChanges += 19
+		if business {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
 	if business && plannedData.CapabilityLock["python-crud"] != "0.1.0" {
 		t.Fatalf("Plan() CRUD lock = %#v", plannedData.CapabilityLock)
+	}
+	if admin && plannedData.CapabilityLock["vue-admin"] != "0.2.0" {
+		t.Fatalf("Plan() administration lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {
@@ -120,6 +138,24 @@ MODULES
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("generated %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+			}
+		}
+	}
+	if admin && os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+		adminRoot := filepath.Join(root, "web", "admin")
+		commands := [][]string{
+			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},
+			{"npm", "run", "lint"},
+			{"npm", "test"},
+			{"npm", "run", "build"},
+			{"npm", "run", "format:check"},
+		}
+		for _, arguments := range commands {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = adminRoot
+			output, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated admin %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
 			}
 		}
 	}
