@@ -1,0 +1,434 @@
+package {{.PackageName}}.customeraccounts;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+import tools.jackson.databind.PropertyNamingStrategies;
+import tools.jackson.databind.json.JsonMapper;
+
+class CustomerAccountServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final String FIRST_PASSWORD = "correct horse battery staple";
+    private static final String SECOND_PASSWORD = "another correct password";
+
+    @Test
+    void supportsCustomerSelfServiceAndAdministrationLifecycle() {
+        FakeRepository repository = new FakeRepository();
+        PasswordHasher hasher = new PasswordHasher();
+        CustomerAccountService service = service(repository, hasher);
+
+        CustomerAccountService.AuthenticationResult registered =
+                service.register(
+                        organizationId(),
+                        new CustomerAccountService.RegisterInput(
+                                " Customer@Example.com ", FIRST_PASSWORD, " Customer One "),
+                        "127.0.0.1",
+                        "unit-test");
+        assertThat(registered.customer().email()).isEqualTo("customer@example.com");
+        assertThat(registered.customer().displayName()).isEqualTo("Customer One");
+        assertThat(service.authenticate(organizationId(), registered.token()).id())
+                .isEqualTo(registered.customer().id());
+
+        CustomerAccount profiled =
+                service.updateProfile(
+                        registered.customer(),
+                        new CustomerAccountService.ProfileInput("Customer Two", 1L),
+                        "127.0.0.1",
+                        "unit-test");
+        CustomerAccount passwordChanged =
+                service.changePassword(
+                        profiled,
+                        new CustomerAccountService.PasswordInput(
+                                FIRST_PASSWORD, SECOND_PASSWORD, 2L),
+                        "127.0.0.1",
+                        "unit-test");
+        assertThat(profiled.version()).isEqualTo(2L);
+        assertThat(passwordChanged.version()).isEqualTo(3L);
+        assertThat(hasher.verify(passwordChanged.passwordHash(), SECOND_PASSWORD)).isTrue();
+        assertKind(
+                () -> service.authenticate(organizationId(), registered.token()),
+                CustomerAccountException.Kind.INVALID_CREDENTIALS);
+
+        CustomerAccountService.AuthenticationResult loggedIn =
+                service.login(
+                        organizationId(),
+                        new CustomerAccountService.LoginInput(
+                                "customer@example.com", SECOND_PASSWORD),
+                        "127.0.0.1",
+                        "unit-test");
+        CustomerAccount suspended =
+                service.suspend(
+                        loggedIn.customer().id(),
+                        new CustomerAccountService.TransitionInput(3L),
+                        actor());
+        assertThat(suspended.status()).isEqualTo(CustomerAccountService.SUSPENDED);
+        assertKind(
+                () -> service.authenticate(organizationId(), loggedIn.token()),
+                CustomerAccountException.Kind.INVALID_CREDENTIALS);
+        assertKind(
+                () ->
+                        service.login(
+                                organizationId(),
+                                new CustomerAccountService.LoginInput(
+                                        "customer@example.com", SECOND_PASSWORD),
+                                "127.0.0.1",
+                                "unit-test"),
+                CustomerAccountException.Kind.INVALID_CREDENTIALS);
+
+        CustomerAccount active =
+                service.reactivate(
+                        suspended.id(),
+                        new CustomerAccountService.TransitionInput(4L),
+                        actor());
+        CustomerAccountService.AuthenticationResult finalLogin =
+                service.login(
+                        organizationId(),
+                        new CustomerAccountService.LoginInput(
+                                "customer@example.com", SECOND_PASSWORD),
+                        "127.0.0.1",
+                        "unit-test");
+        CustomerAccount closed =
+                service.close(
+                        finalLogin.customer(),
+                        new CustomerAccountService.TransitionInput(active.version()),
+                        "127.0.0.1",
+                        "unit-test");
+        assertThat(closed.status()).isEqualTo(CustomerAccountService.CLOSED);
+        assertThat(repository.audits)
+                .extracting(AuditEvent::action)
+                .contains(
+                        "customer.register",
+                        "customer.profile.update",
+                        "customer.password.change",
+                        "customers:accounts:suspend",
+                        "customers:accounts:reactivate",
+                        "customer.close");
+    }
+
+    @Test
+    void rejectsDuplicateStaleUnsafeAndCrossScopeOperations() {
+        FakeRepository repository = new FakeRepository();
+        CustomerAccountService service = service(repository, new PasswordHasher());
+        CustomerAccount customer =
+                service.register(
+                                organizationId(),
+                                new CustomerAccountService.RegisterInput(
+                                        "customer@example.com", FIRST_PASSWORD, "Customer"),
+                                "",
+                                "")
+                        .customer();
+
+        assertKind(
+                () ->
+                        service.register(
+                                organizationId(),
+                                new CustomerAccountService.RegisterInput(
+                                        "CUSTOMER@example.com", FIRST_PASSWORD, "Duplicate"),
+                                "",
+                                ""),
+                CustomerAccountException.Kind.CONFLICT);
+        assertKind(
+                () ->
+                        service.updateProfile(
+                                customer,
+                                new CustomerAccountService.ProfileInput("Stale", 2L),
+                                "",
+                                ""),
+                CustomerAccountException.Kind.CONFLICT);
+        assertKind(
+                () ->
+                        service.login(
+                                organizationId(),
+                                new CustomerAccountService.LoginInput(
+                                        "missing@example.com", FIRST_PASSWORD),
+                                "",
+                                ""),
+                CustomerAccountException.Kind.INVALID_CREDENTIALS);
+        assertKind(
+                () -> service.list("unknown", "", 20, actor()),
+                CustomerAccountException.Kind.INVALID);
+{{- if .Tenancy}}
+        assertKind(
+                () -> service.get(customer.id(), otherActor()),
+                CustomerAccountException.Kind.NOT_FOUND);
+{{- end}}
+    }
+
+    @Test
+    void keepsPasswordHashesPrivateAndUsesDecimalStringVersions() throws Exception {
+        JsonMapper mapper =
+                JsonMapper.builder()
+                        .findAndAddModules()
+                        .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+                        .build();
+        CustomerAccount account =
+                new CustomerAccount(
+                        "customer-1",
+{{- if .Tenancy}}
+                        organizationId(),
+{{- else}}
+                        null,
+{{- end}}
+                        "customer@example.com",
+                        "private-password-hash",
+                        "Customer",
+                        CustomerAccountService.ACTIVE,
+                        3L,
+                        NOW,
+                        NOW);
+
+        String json = mapper.writeValueAsString(account);
+        assertThat(json).contains("\"version\":\"3\"");
+        assertThat(json).doesNotContain("password_hash", "private-password-hash");
+        CustomerAccountService.ProfileInput input =
+                mapper.readValue(
+                        "{\"display_name\":\"Updated\",\"version\":\"3\"}",
+                        CustomerAccountService.ProfileInput.class);
+        assertThat(input.version()).isEqualTo(3L);
+    }
+
+    private static CustomerAccountService service(
+            FakeRepository repository, PasswordHasher hasher) {
+        return new CustomerAccountService(
+                repository,
+                hasher,
+                new TokenCodec(),
+                Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static void assertKind(
+            Runnable operation, CustomerAccountException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CustomerAccountException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+    private static Principal actor() {
+        return new Principal(
+                "admin-1",
+                "admin@example.com",
+                "admin",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+{{- if .Tenancy}}
+    private static Principal otherActor() {
+        return new Principal(
+                "admin-2",
+                "other@example.com",
+                "admin",
+                "session",
+                "organization-2");
+    }
+
+{{- end}}
+    private static String organizationId() {
+{{- if .Tenancy}}
+        return "organization-1";
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static final class FakeRepository implements CustomerAccountRepository {
+
+        private final Map<String, CustomerAccount> accounts = new HashMap<>();
+        private final Map<String, String> sessions = new HashMap<>();
+        private final List<AuditEvent> audits = new ArrayList<>();
+
+        @Override
+        public void register(
+                CustomerAccount account,
+                String tokenHash,
+                Instant expiresAt,
+                AuditEvent auditEvent) {
+            boolean duplicate =
+                    accounts.values().stream()
+                            .anyMatch(
+                                    existing ->
+                                            scope(existing).equals(scope(account))
+                                                    && existing.email().equals(account.email()));
+            if (duplicate) {
+                throw conflict();
+            }
+            accounts.put(account.id(), account);
+            sessions.put(tokenHash, account.id());
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public Optional<CustomerAccount> findByEmail(String organizationId, String email) {
+            return accounts.values().stream()
+                    .filter(
+                            account ->
+                                    scope(account).equals(organizationId)
+                                            && account.email().equals(email))
+                    .findFirst();
+        }
+
+        @Override
+        public void createSession(
+                String tokenHash,
+                String customerId,
+                Instant expiresAt,
+                AuditEvent auditEvent) {
+            sessions.put(tokenHash, customerId);
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public Optional<CustomerAccount> findBySession(
+                String organizationId, String tokenHash, Instant now) {
+            String customerId = sessions.get(tokenHash);
+            if (customerId == null) {
+                return Optional.empty();
+            }
+            return get(organizationId, customerId);
+        }
+
+        @Override
+        public void deleteSession(String tokenHash, AuditEvent auditEvent) {
+            if (sessions.remove(tokenHash) != null) {
+                audits.add(auditEvent);
+            }
+        }
+
+        @Override
+        public void appendAudit(AuditEvent auditEvent) {
+            audits.add(auditEvent);
+        }
+
+        @Override
+        public CustomerAccount updateProfile(Mutation mutation, AuditEvent auditEvent) {
+            CustomerAccount current = require(mutation);
+            CustomerAccount updated =
+                    replace(
+                            current,
+                            mutation.replacement(),
+                            current.passwordHash(),
+                            current.status(),
+                            mutation.updatedAt());
+            accounts.put(updated.id(), updated);
+            audits.add(auditEvent);
+            return updated;
+        }
+
+        @Override
+        public CustomerAccount changePassword(Mutation mutation, AuditEvent auditEvent) {
+            CustomerAccount current = require(mutation);
+            CustomerAccount updated =
+                    replace(
+                            current,
+                            current.displayName(),
+                            mutation.replacement(),
+                            current.status(),
+                            mutation.updatedAt());
+            accounts.put(updated.id(), updated);
+            revoke(updated.id());
+            audits.add(auditEvent);
+            return updated;
+        }
+
+        @Override
+        public Optional<CustomerAccount> get(String organizationId, String id) {
+            CustomerAccount account = accounts.get(id);
+            return account != null && scope(account).equals(organizationId)
+                    ? Optional.of(account)
+                    : Optional.empty();
+        }
+
+        @Override
+        public PageResult list(
+                String organizationId, String status, String cursor, int limit) {
+            List<CustomerAccount> values =
+                    accounts.values().stream()
+                            .filter(account -> scope(account).equals(organizationId))
+                            .filter(account -> status.isEmpty() || account.status().equals(status))
+                            .filter(account -> cursor.isEmpty() || account.id().compareTo(cursor) > 0)
+                            .sorted((left, right) -> left.id().compareTo(right.id()))
+                            .limit(limit)
+                            .toList();
+            return new PageResult(values, "");
+        }
+
+        @Override
+        public CustomerAccount transition(Transition transition, AuditEvent auditEvent) {
+            CustomerAccount current = accounts.get(transition.id());
+            if (current == null
+                    || !scope(current).equals(transition.organizationId())
+                    || current.version() != transition.expectedVersion()
+                    || !current.status().equals(transition.fromStatus())) {
+                throw conflict();
+            }
+            CustomerAccount updated =
+                    replace(
+                            current,
+                            current.displayName(),
+                            current.passwordHash(),
+                            transition.toStatus(),
+                            transition.updatedAt());
+            accounts.put(updated.id(), updated);
+            revoke(updated.id());
+            audits.add(auditEvent);
+            return updated;
+        }
+
+        private CustomerAccount require(Mutation mutation) {
+            CustomerAccount current = accounts.get(mutation.id());
+            if (current == null
+                    || !scope(current).equals(mutation.organizationId())
+                    || current.version() != mutation.expectedVersion()
+                    || !CustomerAccountService.ACTIVE.equals(current.status())) {
+                throw conflict();
+            }
+            return current;
+        }
+
+        private void revoke(String customerId) {
+            sessions.entrySet().removeIf(entry -> entry.getValue().equals(customerId));
+        }
+
+        private static CustomerAccount replace(
+                CustomerAccount current,
+                String displayName,
+                String passwordHash,
+                String status,
+                Instant updatedAt) {
+            return new CustomerAccount(
+                    current.id(),
+                    current.organizationId(),
+                    current.email(),
+                    passwordHash,
+                    displayName,
+                    status,
+                    current.version() + 1,
+                    current.createdAt(),
+                    updatedAt);
+        }
+
+        private static String scope(CustomerAccount account) {
+            return account.organizationId() == null ? "" : account.organizationId();
+        }
+
+        private static CustomerAccountException conflict() {
+            return new CustomerAccountException(
+                    CustomerAccountException.Kind.CONFLICT,
+                    "customer account conflicts");
+        }
+    }
+}

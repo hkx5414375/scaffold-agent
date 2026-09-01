@@ -1,0 +1,22 @@
+package {{.PackageName}}.customeraccounts;
+
+public final class CustomerAccountException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        INVALID_CREDENTIALS,
+        NOT_FOUND,
+        CONFLICT
+    }
+
+    private final Kind kind;
+
+    public CustomerAccountException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

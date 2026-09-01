@@ -1,0 +1,64 @@
+package {{.PackageName}}.customeraccounts;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.TokenCodec;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+
+class CustomerAccountControllerTest {
+
+    @Test
+    void returnsDedicatedSecureCookieAndClearsItOnLogout() {
+        CustomerAccountRepository repository = mock(CustomerAccountRepository.class);
+        CustomerAccountService service =
+                new CustomerAccountService(repository, new PasswordHasher(), new TokenCodec());
+        CustomerAccountController controller = new CustomerAccountController(service, true);
+        MockHttpServletRequest registerRequest = new MockHttpServletRequest();
+        registerRequest.setRemoteAddr("127.0.0.1");
+        registerRequest.addHeader("User-Agent", "controller-test");
+        MockHttpServletResponse registerResponse = new MockHttpServletResponse();
+
+        controller.register(
+                organizationId(),
+                new CustomerAccountService.RegisterInput(
+                        "customer@example.com",
+                        "correct horse battery staple",
+                        "Customer"),
+                registerRequest,
+                registerResponse);
+
+        String issued = registerResponse.getHeader(HttpHeaders.SET_COOKIE);
+        assertThat(issued)
+                .contains(CustomerAccountController.CUSTOMER_SESSION_COOKIE + "=")
+                .contains("Path=/")
+                .contains("Max-Age=2592000")
+                .contains("Secure")
+                .contains("HttpOnly")
+                .contains("SameSite=Lax");
+        verify(repository).register(any(), any(), any(), any());
+
+        MockHttpServletResponse logoutResponse = new MockHttpServletResponse();
+        controller.logout(
+                organizationId(), new MockHttpServletRequest(), logoutResponse);
+        assertThat(logoutResponse.getHeader(HttpHeaders.SET_COOKIE))
+                .contains(CustomerAccountController.CUSTOMER_SESSION_COOKIE + "=")
+                .contains("Max-Age=0")
+                .contains("HttpOnly")
+                .contains("SameSite=Lax");
+    }
+
+    private static String organizationId() {
+{{- if .Tenancy}}
+        return "organization-1";
+{{- else}}
+        return "";
+{{- end}}
+    }
+}

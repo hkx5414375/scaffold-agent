@@ -1315,8 +1315,299 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
 {{- end}}
+{{- if .CustomerAccounts}}
+  /api/v1/storefront/account/register:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: registerCustomerAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerRegistration"
+      responses:
+        "201":
+          description: Customer registered and customer-only session cookie created
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/storefront/account/login:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: loginCustomerAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerLogin"
+      responses:
+        "200":
+          description: Customer authenticated with a customer-only session cookie
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/storefront/account/logout:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: logoutCustomerAccount
+      security:
+        - customerSessionCookie: []
+      responses:
+        "204":
+          description: Customer session revoked or already absent
+  /api/v1/storefront/account/me:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getCurrentCustomerAccount
+      security:
+        - customerSessionCookie: []
+      responses:
+        "200":
+          description: Current customer account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerEnvelope"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/storefront/account/profile:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    put:
+      operationId: updateCurrentCustomerProfile
+      security:
+        - customerSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerProfileUpdate"
+      responses:
+        "200":
+          description: Updated customer profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/storefront/account/password:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    put:
+      operationId: changeCurrentCustomerPassword
+      security:
+        - customerSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerPasswordChange"
+      responses:
+        "200":
+          description: Password changed and all customer sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerPasswordChanged"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/storefront/account/close:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: closeCurrentCustomerAccount
+      security:
+        - customerSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerTransition"
+      responses:
+        "200":
+          description: Customer account closed permanently and all sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/customers:
+{{- if .Tenancy}}
+    parameters:
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: listCustomerAccounts
+      x-required-permission: customers:accounts:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+        - $ref: "#/components/parameters/CustomerStatus"
+        - $ref: "#/components/parameters/PageCursor"
+        - $ref: "#/components/parameters/PageLimit"
+      responses:
+        "200":
+          description: Bounded customer account page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/customers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    get:
+      operationId: getCustomerAccount
+      x-required-permission: customers:accounts:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: One scoped customer account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerAccount"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/customers/{id}/suspend:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: suspendCustomerAccount
+      x-required-permission: customers:accounts:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerTransition"
+      responses:
+        "200":
+          description: Customer suspended and all sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerAccount"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/customers/{id}/reactivate:
+    parameters:
+      - $ref: "#/components/parameters/CustomerId"
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: reactivateCustomerAccount
+      x-required-permission: customers:accounts:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CustomerTransition"
+      responses:
+        "200":
+          description: Customer reactivated without restoring prior sessions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerAccount"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{- end}}
 components:
-{{- if or .Tenancy .Approvals .Catalog}}
+{{- if or .Tenancy .Approvals .Catalog .CustomerAccounts}}
   parameters:
 {{- if .Approvals}}
     ApprovalStatus:
@@ -1350,7 +1641,23 @@ components:
         minLength: 1
         maxLength: 191
 {{- end}}
-{{- if or .Approvals .Catalog}}
+{{- if .CustomerAccounts}}
+    CustomerStatus:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [active, suspended, closed]
+    CustomerId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 191
+{{- end}}
+{{- if or .Approvals .Catalog .CustomerAccounts}}
     PageCursor:
       name: cursor
       in: query
@@ -1403,6 +1710,12 @@ components:
     bearerToken:
       type: http
       scheme: bearer
+{{- if .CustomerAccounts}}
+    customerSessionCookie:
+      type: apiKey
+      in: cookie
+      name: scaffold_customer_session
+{{- end}}
   responses:
     ErrorResponse:
       description: Stable API error
@@ -2099,6 +2412,137 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/PublicCatalogProduct"
+        next_cursor:
+          type: string
+{{- end}}
+{{- if .CustomerAccounts}}
+    CustomerAccount:
+      type: object
+      additionalProperties: false
+      required: [id, email, display_name, status, version, created_at, updated_at{{if .Tenancy}}, organization_id{{end}}]
+      properties:
+        id:
+          type: string
+{{- if .Tenancy}}
+        organization_id:
+          type: string
+{{- end}}
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        status:
+          type: string
+          enum: [active, suspended, closed]
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CustomerEnvelope:
+      type: object
+      additionalProperties: false
+      required: [customer]
+      properties:
+        customer:
+          $ref: "#/components/schemas/CustomerAccount"
+    CustomerRegistration:
+      type: object
+      additionalProperties: false
+      required: [email, password, display_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 1024
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 160
+    CustomerLogin:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+    CustomerProfileUpdate:
+      type: object
+      additionalProperties: false
+      required: [display_name, version]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 160
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+    CustomerPasswordChange:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password, version]
+      properties:
+        current_password:
+          type: string
+          format: password
+          minLength: 1
+          maxLength: 1024
+        new_password:
+          type: string
+          format: password
+          minLength: 12
+          maxLength: 1024
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+    CustomerPasswordChanged:
+      allOf:
+        - $ref: "#/components/schemas/CustomerEnvelope"
+        - type: object
+          required: [reauthentication_required]
+          properties:
+            reauthentication_required:
+              type: boolean
+              const: true
+    CustomerTransition:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+    CustomerPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/CustomerAccount"
         next_cursor:
           type: string
 {{- end}}

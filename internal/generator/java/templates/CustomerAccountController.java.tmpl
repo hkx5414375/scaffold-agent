@@ -1,0 +1,224 @@
+package {{.PackageName}}.customeraccounts;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseCookie;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public final class CustomerAccountController {
+
+    static final String CUSTOMER_SESSION_COOKIE = "scaffold_customer_session";
+
+    private static final String ORGANIZATION_HEADER = "X-Organization-ID";
+    private static final String SELF_PATH = "/api/v1/storefront/account";
+    private static final String ADMIN_PATH = "/api/v1/customers";
+    private static final Duration SESSION_LIFETIME = Duration.ofDays(30);
+
+    private final CustomerAccountService service;
+    private final boolean secureCookies;
+
+    public CustomerAccountController(
+            CustomerAccountService service,
+            @Value("${scaffold.cookie-secure:true}") boolean secureCookies) {
+        this.service = service;
+        this.secureCookies = secureCookies;
+    }
+
+    @PostMapping(SELF_PATH + "/register")
+    public ResponseEntity<Map<String, CustomerAccount>> register(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CustomerAccountService.RegisterInput input,
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        CustomerAccountService.AuthenticationResult result =
+                service.register(
+                        organizationId,
+                        input,
+                        request.getRemoteAddr(),
+                        request.getHeader("User-Agent"));
+        response.addHeader(HttpHeaders.SET_COOKIE, sessionCookie(result.token(), SESSION_LIFETIME));
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(Map.of("customer", result.customer()));
+    }
+
+    @PostMapping(SELF_PATH + "/login")
+    public Map<String, CustomerAccount> login(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CustomerAccountService.LoginInput input,
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        CustomerAccountService.AuthenticationResult result =
+                service.login(
+                        organizationId,
+                        input,
+                        request.getRemoteAddr(),
+                        request.getHeader("User-Agent"));
+        response.addHeader(HttpHeaders.SET_COOKIE, sessionCookie(result.token(), SESSION_LIFETIME));
+        return Map.of("customer", result.customer());
+    }
+
+    @PostMapping(SELF_PATH + "/logout")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void logout(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        service.logout(
+                organizationId,
+                sessionToken(request.getCookies()),
+                request.getRemoteAddr(),
+                request.getHeader("User-Agent"));
+        clearSession(response);
+    }
+
+    @GetMapping(SELF_PATH + "/me")
+    public Map<String, CustomerAccount> me(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            HttpServletRequest request) {
+        return Map.of("customer", currentCustomer(organizationId, request));
+    }
+
+    @PutMapping(SELF_PATH + "/profile")
+    public Map<String, CustomerAccount> updateProfile(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CustomerAccountService.ProfileInput input,
+            HttpServletRequest request) {
+        CustomerAccount account = currentCustomer(organizationId, request);
+        CustomerAccount updated =
+                service.updateProfile(
+                        account,
+                        input,
+                        request.getRemoteAddr(),
+                        request.getHeader("User-Agent"));
+        return Map.of("customer", updated);
+    }
+
+    @PutMapping(SELF_PATH + "/password")
+    public Map<String, Object> changePassword(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CustomerAccountService.PasswordInput input,
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        CustomerAccount account = currentCustomer(organizationId, request);
+        CustomerAccount updated =
+                service.changePassword(
+                        account,
+                        input,
+                        request.getRemoteAddr(),
+                        request.getHeader("User-Agent"));
+        clearSession(response);
+        return Map.of("customer", updated, "reauthentication_required", true);
+    }
+
+    @PostMapping(SELF_PATH + "/close")
+    public Map<String, CustomerAccount> close(
+            @RequestHeader(value = ORGANIZATION_HEADER, defaultValue = "")
+                    String organizationId,
+            @RequestBody CustomerAccountService.TransitionInput input,
+            HttpServletRequest request,
+            HttpServletResponse response) {
+        CustomerAccount account = currentCustomer(organizationId, request);
+        CustomerAccount updated =
+                service.close(
+                        account,
+                        input,
+                        request.getRemoteAddr(),
+                        request.getHeader("User-Agent"));
+        clearSession(response);
+        return Map.of("customer", updated);
+    }
+
+    @GetMapping(ADMIN_PATH)
+    @RequirePermission(value = "customers:accounts:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CustomerAccountService.Page list(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.list(status, cursor, limit, actor);
+    }
+
+    @GetMapping(ADMIN_PATH + "/{id}")
+    @RequirePermission(value = "customers:accounts:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CustomerAccount get(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.get(id, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/{id}/suspend")
+    @RequirePermission(value = "customers:accounts:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CustomerAccount suspend(
+            @PathVariable String id,
+            @RequestBody CustomerAccountService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.suspend(id, input, actor);
+    }
+
+    @PostMapping(ADMIN_PATH + "/{id}/reactivate")
+    @RequirePermission(value = "customers:accounts:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public CustomerAccount reactivate(
+            @PathVariable String id,
+            @RequestBody CustomerAccountService.TransitionInput input,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.reactivate(id, input, actor);
+    }
+
+    private CustomerAccount currentCustomer(
+            String organizationId, HttpServletRequest request) {
+        return service.authenticate(organizationId, sessionToken(request.getCookies()));
+    }
+
+    private void clearSession(HttpServletResponse response) {
+        response.addHeader(HttpHeaders.SET_COOKIE, sessionCookie("", Duration.ZERO));
+    }
+
+    private String sessionCookie(String value, Duration maximumAge) {
+        return ResponseCookie.from(CUSTOMER_SESSION_COOKIE, value)
+                .httpOnly(true)
+                .secure(secureCookies)
+                .sameSite("Lax")
+                .path("/")
+                .maxAge(maximumAge)
+                .build()
+                .toString();
+    }
+
+    private static String sessionToken(Cookie[] cookies) {
+        if (cookies == null) {
+            return "";
+        }
+        return Arrays.stream(cookies)
+                .filter(cookie -> CUSTOMER_SESSION_COOKIE.equals(cookie.getName()))
+                .map(Cookie::getValue)
+                .findFirst()
+                .orElse("");
+    }
+}

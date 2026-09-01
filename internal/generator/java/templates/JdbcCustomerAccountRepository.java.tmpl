@@ -1,0 +1,375 @@
+package {{.PackageName}}.customeraccounts;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcCustomerAccountRepository implements CustomerAccountRepository {
+
+    private static final String SELECT_COLUMNS =
+            "account.id, account.organization_id, account.email, account.password_hash, "
+                    + "account.display_name, account.status, account.version, "
+                    + "account.created_at, account.updated_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcCustomerAccountRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public void register(
+            CustomerAccount account,
+            String tokenHash,
+            Instant expiresAt,
+            AuditEvent auditEvent) {
+        try {
+            transactionTemplate.executeWithoutResult(
+                    status -> {
+                        int changed =
+                                jdbcTemplate.update(
+{{- if .Tenancy}}
+                                        "insert into customer_accounts "
+                                                + "(id, organization_id, email, password_hash, "
+                                                + "display_name, status, version, created_at, updated_at) "
+                                                + "select ?, ?, ?, ?, ?, ?, ?, ?, ? from organizations "
+                                                + "where id = ? and status = 'active'",
+                                        account.id(),
+                                        account.organizationId(),
+                                        account.email(),
+                                        account.passwordHash(),
+                                        account.displayName(),
+                                        account.status(),
+                                        account.version(),
+                                        Timestamp.from(account.createdAt()),
+                                        Timestamp.from(account.updatedAt()),
+                                        account.organizationId());
+{{- else}}
+                                        "insert into customer_accounts "
+                                                + "(id, organization_id, email, password_hash, "
+                                                + "display_name, status, version, created_at, updated_at) "
+                                                + "values (?, null, ?, ?, ?, ?, ?, ?, ?)",
+                                        account.id(),
+                                        account.email(),
+                                        account.passwordHash(),
+                                        account.displayName(),
+                                        account.status(),
+                                        account.version(),
+                                        Timestamp.from(account.createdAt()),
+                                        Timestamp.from(account.updatedAt()));
+{{- end}}
+                        if (changed != 1) {
+                            throw notFound();
+                        }
+                        insertSession(tokenHash, account.id(), expiresAt, account.createdAt());
+                        appendAuditInternal(auditEvent);
+                    });
+        } catch (DataIntegrityViolationException exception) {
+            throw conflict(exception);
+        }
+    }
+
+    @Override
+    public Optional<CustomerAccount> findByEmail(String organizationId, String email) {
+        List<CustomerAccount> values =
+                jdbcTemplate.query(
+                        "select "
+                                + SELECT_COLUMNS
+                                + " from customer_accounts account "
+{{- if .Tenancy}}
+                                + "join organizations organization "
+                                + "on organization.id = account.organization_id "
+{{- end}}
+                                + "where coalesce(account.organization_id, '') = ? "
+                                + "and account.email = ? "
+{{- if .Tenancy}}
+                                + "and organization.status = 'active'"
+{{- else}}
+                                + ""
+{{- end}},
+                        JdbcCustomerAccountRepository::mapAccount,
+                        organizationId,
+                        email);
+        return first(values);
+    }
+
+    @Override
+    public void createSession(
+            String tokenHash,
+            String customerId,
+            Instant expiresAt,
+            AuditEvent auditEvent) {
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    insertSession(tokenHash, customerId, expiresAt, auditEvent.createdAt());
+                    appendAuditInternal(auditEvent);
+                });
+    }
+
+    @Override
+    public Optional<CustomerAccount> findBySession(
+            String organizationId, String tokenHash, Instant now) {
+        List<CustomerAccount> values =
+                jdbcTemplate.query(
+                        "select "
+                                + SELECT_COLUMNS
+                                + " from customer_sessions session "
+                                + "join customer_accounts account on account.id = session.customer_id "
+{{- if .Tenancy}}
+                                + "join organizations organization "
+                                + "on organization.id = account.organization_id "
+{{- end}}
+                                + "where session.token_hash = ? and session.expires_at > ? "
+                                + "and coalesce(account.organization_id, '') = ? "
+                                + "and account.status = 'active' "
+{{- if .Tenancy}}
+                                + "and organization.status = 'active'"
+{{- else}}
+                                + ""
+{{- end}},
+                        JdbcCustomerAccountRepository::mapAccount,
+                        tokenHash,
+                        Timestamp.from(now),
+                        organizationId);
+        return first(values);
+    }
+
+    @Override
+    public void deleteSession(String tokenHash, AuditEvent auditEvent) {
+        transactionTemplate.executeWithoutResult(
+                status -> {
+                    int changed =
+                            jdbcTemplate.update(
+                                    "delete from customer_sessions where token_hash = ?",
+                                    tokenHash);
+                    if (changed == 1) {
+                        appendAuditInternal(auditEvent);
+                    }
+                });
+    }
+
+    @Override
+    public void appendAudit(AuditEvent auditEvent) {
+        appendAuditInternal(auditEvent);
+    }
+
+    @Override
+    public CustomerAccount updateProfile(Mutation mutation, AuditEvent auditEvent) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            int changed =
+                                    jdbcTemplate.update(
+                                            "update customer_accounts set display_name = ?, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? "
+                                                    + "and coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = 'active'",
+                                            mutation.replacement(),
+                                            Timestamp.from(mutation.updatedAt()),
+                                            mutation.id(),
+                                            mutation.organizationId(),
+                                            mutation.expectedVersion());
+                            requireMutation(changed);
+                            appendAuditInternal(auditEvent);
+                            return requireAccount(mutation.organizationId(), mutation.id());
+                        }));
+    }
+
+    @Override
+    public CustomerAccount changePassword(Mutation mutation, AuditEvent auditEvent) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            int changed =
+                                    jdbcTemplate.update(
+                                            "update customer_accounts set password_hash = ?, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? "
+                                                    + "and coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = 'active'",
+                                            mutation.replacement(),
+                                            Timestamp.from(mutation.updatedAt()),
+                                            mutation.id(),
+                                            mutation.organizationId(),
+                                            mutation.expectedVersion());
+                            requireMutation(changed);
+                            revokeSessions(mutation.id());
+                            appendAuditInternal(auditEvent);
+                            return requireAccount(mutation.organizationId(), mutation.id());
+                        }));
+    }
+
+    @Override
+    public Optional<CustomerAccount> get(String organizationId, String id) {
+        return getInternal(organizationId, id);
+    }
+
+    @Override
+    public PageResult list(String organizationId, String status, String cursor, int limit) {
+        List<CustomerAccount> values =
+                new ArrayList<>(
+                        jdbcTemplate.query(
+                                "select "
+                                        + SELECT_COLUMNS
+                                        + " from customer_accounts account "
+                                        + "where coalesce(account.organization_id, '') = ? "
+                                        + "and (? = '' or account.status = ?) "
+                                        + "and (? = '' or account.id > ?) "
+                                        + "order by account.id limit ?",
+                                JdbcCustomerAccountRepository::mapAccount,
+                                organizationId,
+                                status,
+                                status,
+                                cursor,
+                                cursor,
+                                limit + 1));
+        String nextCursor = "";
+        if (values.size() > limit) {
+            nextCursor = values.get(limit - 1).id();
+            values = new ArrayList<>(values.subList(0, limit));
+        }
+        return new PageResult(List.copyOf(values), nextCursor);
+    }
+
+    @Override
+    public CustomerAccount transition(Transition transition, AuditEvent auditEvent) {
+        return Objects.requireNonNull(
+                transactionTemplate.execute(
+                        status -> {
+                            int changed =
+                                    jdbcTemplate.update(
+                                            "update customer_accounts set status = ?, "
+                                                    + "version = version + 1, updated_at = ? "
+                                                    + "where id = ? "
+                                                    + "and coalesce(organization_id, '') = ? "
+                                                    + "and version = ? and status = ?",
+                                            transition.toStatus(),
+                                            Timestamp.from(transition.updatedAt()),
+                                            transition.id(),
+                                            transition.organizationId(),
+                                            transition.expectedVersion(),
+                                            transition.fromStatus());
+                            requireMutation(changed);
+                            revokeSessions(transition.id());
+                            appendAuditInternal(auditEvent);
+                            return requireAccount(transition.organizationId(), transition.id());
+                        }));
+    }
+
+    private Optional<CustomerAccount> getInternal(String organizationId, String id) {
+        List<CustomerAccount> values =
+                jdbcTemplate.query(
+                        "select "
+                                + SELECT_COLUMNS
+                                + " from customer_accounts account where account.id = ? "
+                                + "and coalesce(account.organization_id, '') = ?",
+                        JdbcCustomerAccountRepository::mapAccount,
+                        id,
+                        organizationId);
+        return first(values);
+    }
+
+    private CustomerAccount requireAccount(String organizationId, String id) {
+        return getInternal(organizationId, id)
+                .orElseThrow(JdbcCustomerAccountRepository::notFound);
+    }
+
+    private void insertSession(
+            String tokenHash, String customerId, Instant expiresAt, Instant createdAt) {
+        jdbcTemplate.update(
+                "insert into customer_sessions "
+                        + "(token_hash, customer_id, expires_at, created_at) values (?, ?, ?, ?)",
+                tokenHash,
+                customerId,
+                Timestamp.from(expiresAt),
+                Timestamp.from(createdAt));
+    }
+
+    private void revokeSessions(String customerId) {
+        jdbcTemplate.update(
+                "delete from customer_sessions where customer_id = ?", customerId);
+    }
+
+    private void appendAuditInternal(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, "
+                        + "user_agent, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                emptyToNull(event.userId()),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static CustomerAccount mapAccount(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new CustomerAccount(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("email"),
+                resultSet.getString("password_hash"),
+                resultSet.getString("display_name"),
+                resultSet.getString("status"),
+                resultSet.getLong("version"),
+                instant(resultSet.getTimestamp("created_at")),
+                instant(resultSet.getTimestamp("updated_at")));
+    }
+
+    private static Optional<CustomerAccount> first(List<CustomerAccount> values) {
+        return values.isEmpty() ? Optional.empty() : Optional.of(values.getFirst());
+    }
+
+    private static void requireMutation(int changed) {
+        if (changed != 1) {
+            throw conflict(null);
+        }
+    }
+
+    private static Instant instant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static CustomerAccountException notFound() {
+        return new CustomerAccountException(
+                CustomerAccountException.Kind.NOT_FOUND,
+                "customer account was not found");
+    }
+
+    private static CustomerAccountException conflict(Throwable cause) {
+        CustomerAccountException exception =
+                new CustomerAccountException(
+                        CustomerAccountException.Kind.CONFLICT,
+                        "customer account changed or email is already registered");
+        if (cause != null) {
+            exception.initCause(cause);
+        }
+        return exception;
+    }
+}

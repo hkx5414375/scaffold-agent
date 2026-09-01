@@ -1,0 +1,301 @@
+package {{.PackageName}}.customeraccounts;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class CustomerAccountDatabaseIntegrationTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+    private static final String FIRST_PASSWORD = "correct horse battery staple";
+    private static final String SECOND_PASSWORD = "another correct password";
+
+    @Test
+    @Timeout(60)
+    void enforcesScopeLifecycleSessionRevocationVersionAndAtomicAudit() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_customer_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            PasswordHasher hasher = new PasswordHasher();
+            TokenCodec tokens = new TokenCodec();
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions), hasher, tokens);
+            identity.ensureAdmin("customer-admin@example.com", FIRST_PASSWORD);
+            Principal actor =
+                    identity.login(
+                                    "customer-admin@example.com",
+                                    FIRST_PASSWORD,
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Customer Store", actor);
+            Organization otherOrganization = tenancy.create("Other Store", actor);
+            actor = scoped(actor, organization.id());
+            Principal otherActor = scoped(actor, otherOrganization.id());
+{{- end}}
+            Principal scopedActor = actor;
+            CustomerAccountService service =
+                    new CustomerAccountService(
+                            new JdbcCustomerAccountRepository(jdbc, transactions),
+                            hasher,
+                            tokens,
+                            Clock.fixed(NOW, ZoneOffset.UTC));
+            CustomerAccountService.AuthenticationResult registered =
+                    service.register(
+                            organizationId(scopedActor),
+                            new CustomerAccountService.RegisterInput(
+                                    "customer@example.com", FIRST_PASSWORD, "Customer"),
+                            "127.0.0.1",
+                            "integration-test");
+            CustomerAccount account = registered.customer();
+            assertThat(service.authenticate(organizationId(scopedActor), registered.token()).id())
+                    .isEqualTo(account.id());
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from customer_sessions where token_hash = ?",
+                                    Integer.class,
+                                    registered.token()))
+                    .isZero();
+
+            assertKind(
+                    () ->
+                            service.register(
+                                    organizationId(scopedActor),
+                                    new CustomerAccountService.RegisterInput(
+                                            "CUSTOMER@example.com", FIRST_PASSWORD, "Duplicate"),
+                                    "",
+                                    ""),
+                    CustomerAccountException.Kind.CONFLICT);
+            assertThat(auditCount(jdbc, "customer.register", account.id())).isEqualTo(1);
+{{- if .Tenancy}}
+            CustomerAccount otherAccount =
+                    service.register(
+                                    otherActor.organizationId(),
+                                    new CustomerAccountService.RegisterInput(
+                                            "customer@example.com", FIRST_PASSWORD, "Other"),
+                                    "",
+                                    "")
+                            .customer();
+            assertThat(otherAccount.id()).isNotEqualTo(account.id());
+            assertKind(
+                    () -> service.get(account.id(), otherActor),
+                    CustomerAccountException.Kind.NOT_FOUND);
+{{- end}}
+
+            CustomerAccount profiled =
+                    service.updateProfile(
+                            account,
+                            new CustomerAccountService.ProfileInput("Updated Customer", 1L),
+                            "127.0.0.1",
+                            "integration-test");
+            assertThat(profiled.version()).isEqualTo(2L);
+            assertKind(
+                    () ->
+                            service.updateProfile(
+                                    profiled,
+                                    new CustomerAccountService.ProfileInput("Stale", 1L),
+                                    "",
+                                    ""),
+                    CustomerAccountException.Kind.CONFLICT);
+
+            CustomerAccount suspended =
+                    service.suspend(
+                            account.id(),
+                            new CustomerAccountService.TransitionInput(2L),
+                            scopedActor);
+            assertThat(suspended.status()).isEqualTo(CustomerAccountService.SUSPENDED);
+            assertNoSessions(jdbc, account.id());
+            assertKind(
+                    () -> service.authenticate(organizationId(scopedActor), registered.token()),
+                    CustomerAccountException.Kind.INVALID_CREDENTIALS);
+            CustomerAccount active =
+                    service.reactivate(
+                            account.id(),
+                            new CustomerAccountService.TransitionInput(3L),
+                            scopedActor);
+            assertThat(active.version()).isEqualTo(4L);
+
+            CustomerAccountService.AuthenticationResult login =
+                    service.login(
+                            organizationId(scopedActor),
+                            new CustomerAccountService.LoginInput(
+                                    "customer@example.com", FIRST_PASSWORD),
+                            "127.0.0.1",
+                            "integration-test");
+            CustomerAccount changed =
+                    service.changePassword(
+                            login.customer(),
+                            new CustomerAccountService.PasswordInput(
+                                    FIRST_PASSWORD, SECOND_PASSWORD, 4L),
+                            "127.0.0.1",
+                            "integration-test");
+            assertThat(changed.version()).isEqualTo(5L);
+            assertNoSessions(jdbc, account.id());
+            assertKind(
+                    () -> service.authenticate(organizationId(scopedActor), login.token()),
+                    CustomerAccountException.Kind.INVALID_CREDENTIALS);
+            assertThat(service.list("active", "", 20, scopedActor).items())
+                    .extracting(CustomerAccount::id)
+                    .contains(account.id());
+
+{{- if .Tenancy}}
+            jdbc.update(
+                    "update organizations set status = 'inactive', deactivated_at = ? where id = ?",
+                    Timestamp.from(NOW),
+                    organizationId(scopedActor));
+            assertKind(
+                    () ->
+                            service.login(
+                                    organizationId(scopedActor),
+                                    new CustomerAccountService.LoginInput(
+                                            "customer@example.com", SECOND_PASSWORD),
+                                    "",
+                                    ""),
+                    CustomerAccountException.Kind.INVALID_CREDENTIALS);
+            jdbc.update(
+                    "update organizations set status = 'active', deactivated_at = null where id = ?",
+                    organizationId(scopedActor));
+{{- end}}
+            CustomerAccountService.AuthenticationResult closingLogin =
+                    service.login(
+                            organizationId(scopedActor),
+                            new CustomerAccountService.LoginInput(
+                                    "customer@example.com", SECOND_PASSWORD),
+                            "",
+                            "");
+            CustomerAccount closed =
+                    service.close(
+                            closingLogin.customer(),
+                            new CustomerAccountService.TransitionInput(5L),
+                            "",
+                            "");
+            assertThat(closed.status()).isEqualTo(CustomerAccountService.CLOSED);
+            assertNoSessions(jdbc, account.id());
+            assertThat(auditCount(jdbc, "customer.close", account.id())).isEqualTo(1);
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static int auditCount(JdbcTemplate jdbc, String action, String target) {
+        Integer count =
+                jdbc.queryForObject(
+                        "select count(*) from audit_events where action = ? and target = ?",
+                        Integer.class,
+                        action,
+                        target);
+        return count == null ? 0 : count;
+    }
+
+    private static void assertNoSessions(JdbcTemplate jdbc, String customerId) {
+        Integer count =
+                jdbc.queryForObject(
+                        "select count(*) from customer_sessions where customer_id = ?",
+                        Integer.class,
+                        customerId);
+        assertThat(count).isZero();
+    }
+
+    private static void assertKind(
+            Runnable operation, CustomerAccountException.Kind kind) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(CustomerAccountException.class)
+                .hasFieldOrPropertyWithValue("kind", kind);
+    }
+
+{{- if .Tenancy}}
+    private static Principal scoped(Principal actor, String organizationId) {
+        return new Principal(
+                actor.userId(), actor.email(), actor.role(), actor.method(), organizationId);
+    }
+
+{{- end}}
+    private static String organizationId(Principal actor) {
+{{- if .Tenancy}}
+        return actor.organizationId();
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

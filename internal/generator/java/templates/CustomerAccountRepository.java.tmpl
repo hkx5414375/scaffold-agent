@@ -1,0 +1,61 @@
+package {{.PackageName}}.customeraccounts;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+public interface CustomerAccountRepository {
+
+    void register(
+            CustomerAccount account,
+            String tokenHash,
+            Instant expiresAt,
+            AuditEvent auditEvent);
+
+    Optional<CustomerAccount> findByEmail(String organizationId, String email);
+
+    void createSession(
+            String tokenHash,
+            String customerId,
+            Instant expiresAt,
+            AuditEvent auditEvent);
+
+    Optional<CustomerAccount> findBySession(
+            String organizationId, String tokenHash, Instant now);
+
+    void deleteSession(String tokenHash, AuditEvent auditEvent);
+
+    void appendAudit(AuditEvent auditEvent);
+
+    CustomerAccount updateProfile(Mutation mutation, AuditEvent auditEvent);
+
+    CustomerAccount changePassword(Mutation mutation, AuditEvent auditEvent);
+
+    Optional<CustomerAccount> get(String organizationId, String id);
+
+    PageResult list(String organizationId, String status, String cursor, int limit);
+
+    CustomerAccount transition(Transition transition, AuditEvent auditEvent);
+
+    record Mutation(
+            String organizationId,
+            String id,
+            long expectedVersion,
+            String replacement,
+            Instant updatedAt) {}
+
+    record Transition(
+            String organizationId,
+            String id,
+            long expectedVersion,
+            String fromStatus,
+            String toStatus,
+            Instant updatedAt) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the JDBC adapter")
+    record PageResult(List<CustomerAccount> items, String nextCursor) {}
+}

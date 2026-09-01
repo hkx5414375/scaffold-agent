@@ -1,0 +1,42 @@
+insert into identity_permissions (code, description) values
+    ('customers:accounts:read', 'Read storefront customer accounts'),
+    ('customers:accounts:manage', 'Suspend and reactivate storefront customer accounts')
+on conflict (code) do nothing;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'customers:accounts:read'),
+    ('admin', 'customers:accounts:manage')
+on conflict (role_code, permission_code) do nothing;
+
+create table customer_accounts (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    email varchar(254) not null,
+    password_hash text not null,
+    display_name varchar(160) not null,
+    status varchar(16) not null check (status in ('active', 'suspended', 'closed')),
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+
+{{if .Tenancy}}create unique index customer_accounts_scope_email_unique
+    on customer_accounts (organization_id, email);
+create index customer_accounts_scope_status_idx
+    on customer_accounts (organization_id, status, id);
+{{else}}create unique index customer_accounts_email_unique on customer_accounts (email);
+create index customer_accounts_status_idx on customer_accounts (status, id);
+{{end}}
+create table customer_sessions (
+    token_hash char(64) primary key,
+    customer_id text not null references customer_accounts (id) on delete cascade,
+    expires_at timestamptz not null,
+    created_at timestamptz not null
+);
+
+create index customer_sessions_customer_idx on customer_sessions (customer_id);
+create index customer_sessions_expiry_idx on customer_sessions (expires_at);

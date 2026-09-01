@@ -159,6 +159,83 @@ func TestCommerceCatalogRequiresLifecycleTenancy(t *testing.T) {
 	}
 }
 
+func TestGenerateCustomerAccountsAcrossDatabasesAndSurfaces(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Stack.AdminUI = "element-plus"
+			project.Spec.Stack.Storefront = "nuxt"
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: customerOwner, Version: customerVersion},
+			}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if result.CapabilityLock[customerOwner] != customerVersion ||
+				result.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion ||
+				result.CapabilityLock[adminOwner] != adminVersion ||
+				result.CapabilityLock[storefrontOwner] != storefrontVersion {
+				t.Fatalf("Generate() capability lock = %#v", result.CapabilityLock)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/customeraccounts/CustomerAccountService.java",
+				"src/main/java/com/scaffold/generated/demoservice/customeraccounts/JdbcCustomerAccountRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/customeraccounts/CustomerAccountController.java",
+				"src/test/java/com/scaffold/generated/demoservice/customeraccounts/CustomerAccountServiceTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/customeraccounts/CustomerAccountControllerTest.java",
+				"src/test/java/com/scaffold/generated/demoservice/customeraccounts/CustomerAccountDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000270__customer_accounts.sql",
+				"web/admin/src/views/CustomerAccountsView.vue",
+				"web/storefront/app/pages/account/index.vue",
+				"web/storefront/server/api/storefront/account/login.post.ts",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != customerOwner {
+					t.Errorf("customer output %s is missing or has the wrong owner", path)
+				}
+			}
+			openAPI := outputContent(result, "api/openapi.yaml")
+			var contract map[string]any
+			if err := yaml.Unmarshal(openAPI, &contract); err != nil {
+				t.Fatalf("generated customer OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/config/WebConfiguration.java")),
+				"/api/v1/storefront/**") ||
+				!strings.Contains(string(openAPI), "/api/v1/storefront/account/register:") ||
+				!strings.Contains(string(openAPI), "/api/v1/customers/{id}/suspend:") ||
+				!strings.Contains(string(openAPI), "customers:accounts:manage") ||
+				!strings.Contains(string(openAPI), "scaffold_customer_session") ||
+				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")),
+					"CustomerAccountsView") {
+				t.Fatal("generated Java customer accounts lack public or administration wiring")
+			}
+		})
+	}
+}
+
+func TestCustomerAccountsRequiresLifecycleTenancy(t *testing.T) {
+	t.Parallel()
+
+	for _, version := range []string{tenancyVersion, tenancyMembersVersion} {
+		project := validProject()
+		project.Spec.Capabilities = []spec.CapabilitySelection{
+			{Name: tenancyOwner, Version: version},
+			{Name: customerOwner, Version: customerVersion},
+		}
+		_, err := New().Generate(context.Background(), project)
+		if err == nil || !strings.Contains(err.Error(), tenancyLifecycleVersion) {
+			t.Fatalf("Generate() error = %v", err)
+		}
+	}
+}
+
 func TestGenerateRejectsIncompleteFoundationSelections(t *testing.T) {
 	t.Parallel()
 

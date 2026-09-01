@@ -8,7 +8,7 @@ The project is intentionally not an AI model, chat UI, or model gateway. Codex, 
 
 ## Status
 
-Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation and `commerce-catalog` `0.1.0`. Go additionally has the reference `customer-accounts` `0.1.0` implementation with separate storefront identity, shared Vue customer administration, and Nuxt account pages; Java and Python parity remain in progress. Schemas stay experimental until 1.0.
+Scaffold Agent is under active construction. The protocol core, deterministic filesystem transactions, stable JSON CLI, six-tool MCP server, and the Go/PostgreSQL/MySQL generator are implemented. Generated Go applications include secure identity, permission RBAC, transactional audit, Blueprint-driven CRUD, OpenAPI 3.1, a build-tested Vue/Element Plus administration UI, and the completed M5 platform capability suite. The Java 21/Spring Boot and Python 3.12+/FastAPI adapters now have platform parity across PostgreSQL and MySQL, including CRUD, tenancy, durable jobs, notifications, file assets, cache, job administration, observability, CSV transfer, approvals, OpenAPI, and the shared administration UI. All three backends can generate the same locked Nuxt 4 SSR storefront foundation and `commerce-catalog` `0.1.0`. Go and Java additionally implement `customer-accounts` `0.1.0` with separate storefront identity, shared Vue customer administration, and Nuxt account pages; Python parity remains in progress. Schemas stay experimental until 1.0.
 
 ## Design goals
 
@@ -74,6 +74,7 @@ go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-go 
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-java --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/catalog-store-python --blueprint scaffold.yaml
 go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-go --blueprint scaffold.yaml
+go run ./cmd/scaffold-agent validate --project-root ./examples/customer-store-java --blueprint scaffold.yaml
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [the Agent interface](docs/agent-interface.md), [the architecture decision](docs/adr/0001-foundation.md), and [the roadmap](docs/roadmap.md) before contributing.

@@ -171,7 +171,8 @@ func (service *Service) Login(ctx context.Context, organizationID, email, passwo
 	if err != nil {
 		return "", Account{}, fmt.Errorf("look up customer login account: %w", err)
 	}
-	if account.Status != StatusActive || !identity.VerifyPassword(account.PasswordHash, password) {
+	passwordValid := identity.VerifyPassword(account.PasswordHash, password)
+	if account.Status != StatusActive || !passwordValid {
 		return "", Account{}, service.denyLogin(ctx, account.ID, ipAddress, userAgent)
 	}
 	now := service.now().UTC()

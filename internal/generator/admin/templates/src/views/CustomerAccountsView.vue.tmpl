@@ -32,7 +32,10 @@ async function loadPage(cursor: string): Promise<void> {
   }
 }
 
-async function transition(customer: CustomerAccount, action: "suspend" | "reactivate"): Promise<void> {
+async function transition(
+  customer: CustomerAccount,
+  action: "suspend" | "reactivate",
+): Promise<void> {
   if (action === "suspend") {
     try {
       await ElMessageBox.confirm(

@@ -1,0 +1,480 @@
+package {{.PackageName}}.customeraccounts;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.IdentityException;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class CustomerAccountService {
+
+    public static final String ACTIVE = "active";
+    public static final String SUSPENDED = "suspended";
+    public static final String CLOSED = "closed";
+
+    private static final Duration SESSION_LIFETIME = Duration.ofDays(30);
+    private static final int MAXIMUM_IDENTIFIER_LENGTH = 191;
+    private static final int MAXIMUM_DISPLAY_NAME_LENGTH = 160;
+    private static final int MAXIMUM_AUDIT_VALUE_LENGTH = 512;
+    private static final int MAXIMUM_CREDENTIAL_LENGTH = 512;
+    private static final String DUMMY_PASSWORD_HASH =
+            "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$"
+                    + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+$");
+    private static final Set<String> STATUSES = Set.of(ACTIVE, SUSPENDED, CLOSED);
+
+    private final CustomerAccountRepository repository;
+    private final PasswordHasher passwordHasher;
+    private final TokenCodec tokenCodec;
+    private final Clock clock;
+
+    public CustomerAccountService(
+            CustomerAccountRepository repository,
+            PasswordHasher passwordHasher,
+            TokenCodec tokenCodec) {
+        this(repository, passwordHasher, tokenCodec, Clock.systemUTC());
+    }
+
+    CustomerAccountService(
+            CustomerAccountRepository repository,
+            PasswordHasher passwordHasher,
+            TokenCodec tokenCodec,
+            Clock clock) {
+        this.repository = repository;
+        this.passwordHasher = passwordHasher;
+        this.tokenCodec = tokenCodec;
+        this.clock = clock;
+    }
+
+    public AuthenticationResult register(
+            String organizationId,
+            RegisterInput input,
+            String ipAddress,
+            String userAgent) {
+        String scope = publicScope(organizationId);
+        if (input == null) {
+            throw invalid();
+        }
+        String email = normalizeEmail(input.email());
+        String displayName = normalizeDisplayName(input.displayName());
+        String passwordHash = hashPassword(input.password());
+        Instant now = clock.instant();
+        CustomerAccount account =
+                new CustomerAccount(
+                        newId(),
+                        emptyToNull(scope),
+                        email,
+                        passwordHash,
+                        displayName,
+                        ACTIVE,
+                        1L,
+                        now,
+                        now);
+        String token = tokenCodec.newToken();
+        repository.register(
+                account,
+                tokenCodec.digest(token),
+                now.plus(SESSION_LIFETIME),
+                customerAudit(
+                        "customer.register", account.id(), ipAddress, userAgent, now));
+        return new AuthenticationResult(token, account);
+    }
+
+    public AuthenticationResult login(
+            String organizationId,
+            LoginInput input,
+            String ipAddress,
+            String userAgent) {
+        String scope;
+        String email;
+        try {
+            scope = publicScope(organizationId);
+            email = normalizeEmail(input == null ? "" : input.email());
+        } catch (CustomerAccountException exception) {
+            passwordHasher.verify(
+                    DUMMY_PASSWORD_HASH, input == null ? "" : input.password());
+            denyLogin("", ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        Optional<CustomerAccount> candidate = repository.findByEmail(scope, email);
+        if (candidate.isEmpty()) {
+            passwordHasher.verify(
+                    DUMMY_PASSWORD_HASH, input == null ? "" : input.password());
+            denyLogin("", ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        CustomerAccount account = candidate.get();
+        boolean passwordValid = passwordHasher.verify(account.passwordHash(), input.password());
+        if (!ACTIVE.equals(account.status()) || !passwordValid) {
+            denyLogin(account.id(), ipAddress, userAgent);
+            throw invalidCredentials();
+        }
+        Instant now = clock.instant();
+        String token = tokenCodec.newToken();
+        repository.createSession(
+                tokenCodec.digest(token),
+                account.id(),
+                now.plus(SESSION_LIFETIME),
+                customerAudit("customer.login", account.id(), ipAddress, userAgent, now));
+        return new AuthenticationResult(token, account);
+    }
+
+    public CustomerAccount authenticate(String organizationId, String rawToken) {
+        String scope;
+        try {
+            scope = publicScope(organizationId);
+        } catch (CustomerAccountException exception) {
+            throw invalidCredentials();
+        }
+        if (!validCredential(rawToken)) {
+            throw invalidCredentials();
+        }
+        return repository
+                .findBySession(scope, tokenCodec.digest(rawToken), clock.instant())
+                .filter(account -> ACTIVE.equals(account.status()))
+                .orElseThrow(CustomerAccountService::invalidCredentials);
+    }
+
+    public void logout(
+            String organizationId,
+            String rawToken,
+            String ipAddress,
+            String userAgent) {
+        CustomerAccount account;
+        try {
+            account = authenticate(organizationId, rawToken);
+        } catch (CustomerAccountException exception) {
+            if (exception.kind() == CustomerAccountException.Kind.INVALID_CREDENTIALS) {
+                return;
+            }
+            throw exception;
+        }
+        Instant now = clock.instant();
+        repository.deleteSession(
+                tokenCodec.digest(rawToken),
+                customerAudit("customer.logout", account.id(), ipAddress, userAgent, now));
+    }
+
+    public CustomerAccount updateProfile(
+            CustomerAccount account,
+            ProfileInput input,
+            String ipAddress,
+            String userAgent) {
+        if (account == null || input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        String displayName = normalizeDisplayName(input.displayName());
+        Instant now = clock.instant();
+        return repository.updateProfile(
+                new CustomerAccountRepository.Mutation(
+                        scope(account), account.id(), input.version(), displayName, now),
+                customerAudit("customer.profile.update", account.id(), ipAddress, userAgent, now));
+    }
+
+    public CustomerAccount changePassword(
+            CustomerAccount account,
+            PasswordInput input,
+            String ipAddress,
+            String userAgent) {
+        if (account == null
+                || input == null
+                || input.version() == null
+                || input.version() < 1L
+                || !passwordHasher.verify(account.passwordHash(), input.currentPassword())) {
+            throw invalidCredentials();
+        }
+        String passwordHash = hashPassword(input.newPassword());
+        Instant now = clock.instant();
+        return repository.changePassword(
+                new CustomerAccountRepository.Mutation(
+                        scope(account), account.id(), input.version(), passwordHash, now),
+                customerAudit("customer.password.change", account.id(), ipAddress, userAgent, now));
+    }
+
+    public CustomerAccount close(
+            CustomerAccount account,
+            TransitionInput input,
+            String ipAddress,
+            String userAgent) {
+        if (account == null || input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        Instant now = clock.instant();
+        return repository.transition(
+                new CustomerAccountRepository.Transition(
+                        scope(account),
+                        account.id(),
+                        input.version(),
+                        ACTIVE,
+                        CLOSED,
+                        now),
+                customerAudit("customer.close", account.id(), ipAddress, userAgent, now));
+    }
+
+    public CustomerAccount get(String id, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireIdentifier(id);
+        return repository
+                .get(organizationId, normalizedId)
+                .orElseThrow(CustomerAccountService::notFound);
+    }
+
+    public Page list(String status, String cursor, int limit, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedStatus = text(status);
+        String normalizedCursor = text(cursor);
+        if (limit < 1
+                || limit > 100
+                || normalizedCursor.length() > MAXIMUM_IDENTIFIER_LENGTH
+                || !safeText(normalizedCursor)
+                || (!normalizedStatus.isEmpty() && !STATUSES.contains(normalizedStatus))) {
+            throw invalid();
+        }
+        CustomerAccountRepository.PageResult result =
+                repository.list(
+                        organizationId, normalizedStatus, normalizedCursor, limit);
+        return new Page(result.items(), result.nextCursor());
+    }
+
+    public CustomerAccount suspend(String id, TransitionInput input, Principal actor) {
+        return transition(
+                id,
+                input,
+                ACTIVE,
+                SUSPENDED,
+                "customers:accounts:suspend",
+                actor);
+    }
+
+    public CustomerAccount reactivate(String id, TransitionInput input, Principal actor) {
+        return transition(
+                id,
+                input,
+                SUSPENDED,
+                ACTIVE,
+                "customers:accounts:reactivate",
+                actor);
+    }
+
+    private CustomerAccount transition(
+            String id,
+            TransitionInput input,
+            String fromStatus,
+            String toStatus,
+            String action,
+            Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = requireIdentifier(id);
+        if (input == null || input.version() == null || input.version() < 1L) {
+            throw invalid();
+        }
+        Instant now = clock.instant();
+        return repository.transition(
+                new CustomerAccountRepository.Transition(
+                        organizationId,
+                        normalizedId,
+                        input.version(),
+                        fromStatus,
+                        toStatus,
+                        now),
+                staffAudit(actor, action, normalizedId, now));
+    }
+
+    private void denyLogin(String customerId, String ipAddress, String userAgent) {
+        repository.appendAudit(
+                new AuditEvent(
+                        newId(),
+                        "",
+                        "customer.login",
+                        "denied",
+                        safeAuditValue(customerId),
+                        safeAuditValue(ipAddress),
+                        safeAuditValue(userAgent),
+                        clock.instant()));
+    }
+
+    private static String hashPassword(String password, PasswordHasher hasher) {
+        try {
+            return hasher.hash(password);
+        } catch (IdentityException exception) {
+            throw invalid();
+        }
+    }
+
+    private String hashPassword(String password) {
+        return hashPassword(password, passwordHasher);
+    }
+
+    private static String normalizeEmail(String email) {
+        String normalized = text(email).toLowerCase(Locale.ROOT);
+        if (normalized.length() > 254
+                || !EMAIL_PATTERN.matcher(normalized).matches()
+                || !safeText(normalized)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String normalizeDisplayName(String displayName) {
+        String normalized = text(displayName);
+        if (normalized.isEmpty()
+                || normalized.codePointCount(0, normalized.length())
+                        > MAXIMUM_DISPLAY_NAME_LENGTH
+                || !safeText(normalized)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static String publicScope(String organizationId) {
+        String normalized = text(organizationId);
+{{- if .Tenancy}}
+        if (!validRequiredText(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- else}}
+        if (!normalized.isEmpty()) {
+            throw invalid();
+        }
+{{- end}}
+        return normalized;
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null
+                || !validRequiredText(text(actor.userId()), MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        String organizationId = text(actor.organizationId());
+        if (!validRequiredText(organizationId, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return organizationId;
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static String requireIdentifier(String id) {
+        String normalized = text(id);
+        if (!validRequiredText(normalized, MAXIMUM_IDENTIFIER_LENGTH)) {
+            throw invalid();
+        }
+        return normalized;
+    }
+
+    private static boolean validCredential(String value) {
+        return value != null
+                && !value.isBlank()
+                && value.length() <= MAXIMUM_CREDENTIAL_LENGTH
+                && safeText(value);
+    }
+
+    private static boolean validRequiredText(String value, int maximumLength) {
+        return !value.isEmpty()
+                && value.length() <= maximumLength
+                && safeText(value);
+    }
+
+    private static boolean safeText(String value) {
+        return value.codePoints().noneMatch(Character::isISOControl);
+    }
+
+    private static String text(String value) {
+        return value == null ? "" : value.trim();
+    }
+
+    private static String scope(CustomerAccount account) {
+        return account.organizationId() == null ? "" : account.organizationId();
+    }
+
+    private static String emptyToNull(String value) {
+        return value.isEmpty() ? null : value;
+    }
+
+    private static String safeAuditValue(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.codePoints()
+                .filter(character -> !Character.isISOControl(character))
+                .limit(MAXIMUM_AUDIT_VALUE_LENGTH)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+    }
+
+    private static AuditEvent customerAudit(
+            String action,
+            String target,
+            String ipAddress,
+            String userAgent,
+            Instant now) {
+        return new AuditEvent(
+                newId(),
+                "",
+                action,
+                "succeeded",
+                safeAuditValue(target),
+                safeAuditValue(ipAddress),
+                safeAuditValue(userAgent),
+                now);
+    }
+
+    private static AuditEvent staffAudit(
+            Principal actor, String action, String target, Instant now) {
+        return new AuditEvent(
+                newId(), actor.userId(), action, "succeeded", target, "", "", now);
+    }
+
+    private static CustomerAccountException invalid() {
+        return new CustomerAccountException(
+                CustomerAccountException.Kind.INVALID,
+                "customer account data is invalid");
+    }
+
+    private static CustomerAccountException invalidCredentials() {
+        return new CustomerAccountException(
+                CustomerAccountException.Kind.INVALID_CREDENTIALS,
+                "email or password is incorrect");
+    }
+
+    private static CustomerAccountException notFound() {
+        return new CustomerAccountException(
+                CustomerAccountException.Kind.NOT_FOUND,
+                "customer account was not found");
+    }
+
+    private static String newId() {
+        return UUID.randomUUID().toString();
+    }
+
+    public record RegisterInput(String email, String password, String displayName) {}
+
+    public record LoginInput(String email, String password) {}
+
+    public record ProfileInput(String displayName, Long version) {}
+
+    public record PasswordInput(String currentPassword, String newPassword, Long version) {}
+
+    public record TransitionInput(Long version) {}
+
+    public record AuthenticationResult(String token, CustomerAccount customer) {}
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record Page(List<CustomerAccount> items, String nextCursor) {}
+}

@@ -455,6 +455,126 @@ func TestJavaPostgreSQLCommerceCatalogPlanApplyVerifyEndToEnd(t *testing.T) {
 	)
 }
 
+func TestJavaPostgreSQLTenantCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCustomerAccountsReference(t, "postgresql", true)
+}
+
+func TestJavaMySQLTenantCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCustomerAccountsReference(t, "mysql", true)
+}
+
+func TestJavaPostgreSQLCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCustomerAccountsReference(t, "postgresql", false)
+}
+
+func TestJavaMySQLCustomerAccountsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedJavaCustomerAccountsReference(t, "mysql", false)
+}
+
+func runGeneratedJavaCustomerAccountsReference(t *testing.T, database string, tenancy bool) {
+	t.Helper()
+	root := t.TempDir()
+	capabilities := "  capabilities:\n"
+	if tenancy {
+		capabilities += `    - name: organization-tenancy
+      version: 0.3.0
+`
+	}
+	capabilities += `    - name: customer-accounts
+      version: 0.1.0
+`
+	blueprint := `
+api_version: scaffold-agent.io/v1alpha1
+kind: Project
+metadata:
+  name: generated-java-customer
+spec:
+  stack:
+    backend: java
+    admin_ui: element-plus
+    storefront: none
+  database:
+    engine: DATABASE_ENGINE
+  auth:
+    modes: [session, token]
+CAPABILITIES`
+	blueprint = strings.ReplaceAll(blueprint, "DATABASE_ENGINE", database)
+	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
+	writeBlueprint(t, root, blueprint)
+	application := New("test")
+	ctx := context.Background()
+	planned := application.Plan(ctx, PlanInput{
+		ProjectRoot: root, BlueprintPath: "scaffold.yaml", Action: plan.ActionCreate,
+	})
+	if planned.Status != result.StatusOK {
+		t.Fatalf("Plan() = %#v, want ok", planned)
+	}
+	plannedData := planned.Data.(planData)
+	wantChanges := 62
+	if tenancy {
+		wantChanges = 89
+	}
+	if plannedData.ChangeCount != wantChanges ||
+		plannedData.CapabilityLock["customer-accounts"] != "0.1.0" {
+		t.Fatalf("Plan() data = %#v", plannedData)
+	}
+	previewed := application.Preview(ctx, PreviewInput{
+		ProjectRoot: root, PlanID: plannedData.PlanID,
+	})
+	if previewed.Status != result.StatusOK {
+		t.Fatalf("Preview() = %#v, want ok", previewed)
+	}
+	applied := application.Apply(ctx, ApplyInput{
+		ProjectRoot: root,
+		PlanID:      plannedData.PlanID,
+		ApplyToken:  previewed.Data.(previewData).ApplyToken,
+	})
+	if applied.Status != result.StatusOK {
+		t.Fatalf("Apply() = %#v, want ok", applied)
+	}
+	for _, path := range []string{
+		"src/main/java/com/scaffold/generated/generatedjavacustomer/customeraccounts/CustomerAccountService.java",
+		"src/main/java/com/scaffold/generated/generatedjavacustomer/customeraccounts/JdbcCustomerAccountRepository.java",
+		"src/main/java/com/scaffold/generated/generatedjavacustomer/customeraccounts/CustomerAccountController.java",
+		"src/test/java/com/scaffold/generated/generatedjavacustomer/customeraccounts/CustomerAccountDatabaseIntegrationTest.java",
+		"src/main/resources/db/migration/V000270__customer_accounts.sql",
+		"web/admin/src/views/CustomerAccountsView.vue",
+	} {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+			t.Errorf("generated Java customer project is missing %s: %v", path, err)
+		}
+	}
+	if os.Getenv("SCAFFOLD_AGENT_RUN_JAVA_BUILD") == "1" {
+		command := exec.CommandContext(ctx, "mvn", "-B", "-ntp", "verify")
+		command.Dir = root
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("generated Java customer mvn verify failed: %v\n%s", err, output)
+		}
+	}
+	if tenancy && database == "postgresql" &&
+		os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1" {
+		adminRoot := filepath.Join(root, "web", "admin")
+		for _, arguments := range [][]string{
+			{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"},
+			{"npm", "run", "lint"},
+			{"npm", "test"},
+			{"npm", "run", "build"},
+			{"npm", "run", "format:check"},
+		} {
+			command := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
+			command.Dir = adminRoot
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("generated Java customer admin %s failed: %v\n%s",
+					strings.Join(arguments, " "), err, output)
+			}
+		}
+	}
+	verified := application.Verify(ctx, VerifyInput{ProjectRoot: root})
+	if verified.Status != result.StatusOK || !strings.Contains(verified.Summary, "no findings") {
+		t.Fatalf("Verify() = %#v, want no findings", verified)
+	}
+}
+
 const tenancySelectionV1 = `  capabilities:
     - name: organization-tenancy
       version: 0.1.0

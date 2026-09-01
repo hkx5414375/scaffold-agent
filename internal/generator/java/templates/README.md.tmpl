@@ -184,6 +184,25 @@ publish, or archive operation commits its audit event in the same transaction.
 Tenant-enabled storefront requests require `X-Organization-ID`; the generated
 Nuxt proxy reads it from server-only `SCAFFOLD_ORGANIZATION_ID`.
 {{end}}
+{{if .CustomerAccounts}}
+
+## Customer accounts
+
+The customer capability keeps storefront identities and the
+`scaffold_customer_session` cookie separate from staff users, roles, API tokens,
+and `scaffold_session`. Public routes under `/api/v1/storefront/account` provide
+registration, login, logout, profile changes, password changes, and permanent
+self-closure. Administration routes under `/api/v1/customers` require separate
+read and manage permissions.
+
+Email addresses normalize to lower case inside the current organization. Passwords
+use bounded PBKDF2-SHA256 hashes, while the 30-day raw browser token is returned only
+in an HttpOnly, SameSite=Lax cookie and only its SHA-256 digest is persisted. Password
+changes, suspension, and closure revoke every session. State transitions and profile
+or password mutations use decimal-string optimistic versions and commit audit evidence
+in the same transaction. Tenant storefront requests require the server-provided
+`X-Organization-ID`; do not expose tenant selection to browser input.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

@@ -1,0 +1,19 @@
+package {{.PackageName}}.customeraccounts;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+import tools.jackson.databind.annotation.JsonSerialize;
+import tools.jackson.databind.ser.std.ToStringSerializer;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record CustomerAccount(
+        String id,
+        String organizationId,
+        String email,
+        @JsonIgnore String passwordHash,
+        String displayName,
+        String status,
+        @JsonSerialize(using = ToStringSerializer.class) long version,
+        Instant createdAt,
+        Instant updatedAt) {}

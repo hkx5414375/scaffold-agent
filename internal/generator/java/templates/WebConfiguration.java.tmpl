@@ -20,7 +20,7 @@ public class WebConfiguration implements WebMvcConfigurer {
                 .addPathPatterns("/api/v1/**")
                 .excludePathPatterns(
                         "/api/v1/auth/login",
-                        "/api/v1/auth/logout"{{if .Catalog}},
+                        "/api/v1/auth/logout"{{if or .Catalog .CustomerAccounts}},
                         "/api/v1/storefront/**"{{end}});
     }
 }
