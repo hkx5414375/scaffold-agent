@@ -1,0 +1,99 @@
+"""Approval transport and public failure contracts."""
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from test_approval_workflows import MemoryRepository, _actor
+
+from {{.PackageName}}.approvals.http import (
+    approve,
+    cancel,
+    get_approval,
+    history,
+    install_error_handlers,
+    list_approvals,
+    list_mine,
+    reject,
+    submit,
+)
+from {{.PackageName}}.approvals.models import (
+    ApprovalDecision,
+    ApprovalError,
+    ApprovalErrorKind,
+    ApprovalStatus,
+    ApprovalSubmit,
+)
+from {{.PackageName}}.approvals.service import ApprovalService
+
+
+def test_direct_transport_covers_submission_lists_history_and_transitions() -> None:
+    requester = _actor("requester-1")
+    reviewer = _actor("reviewer-1")
+
+    approved_service = ApprovalService(MemoryRepository())
+    approved = submit(
+        ApprovalSubmit(subject_id="task-1", summary="Review task"),
+        requester,
+        approved_service,
+    )
+    assert list_mine(requester, approved_service).items == [approved]
+    assert list_approvals(reviewer, approved_service).items == [approved]
+    assert get_approval(approved.id, reviewer, approved_service) == approved
+    result = approve(
+        approved.id,
+        ApprovalDecision(version="1", comment="yes"),
+        reviewer,
+        approved_service,
+    )
+    assert result.status == ApprovalStatus.APPROVED
+    assert len(history(approved.id, reviewer, approved_service).items) == 2
+
+    rejected_service = ApprovalService(MemoryRepository())
+    rejected = submit(
+        ApprovalSubmit(subject_id="task-2", summary="Review task"),
+        requester,
+        rejected_service,
+    )
+    assert (
+        reject(
+            rejected.id,
+            ApprovalDecision(version="1", comment="missing"),
+            reviewer,
+            rejected_service,
+        ).status
+        == ApprovalStatus.REJECTED
+    )
+
+    cancelled_service = ApprovalService(MemoryRepository())
+    cancelled = submit(
+        ApprovalSubmit(subject_id="task-3", summary="Review task"),
+        requester,
+        cancelled_service,
+    )
+    assert (
+        cancel(
+            cancelled.id,
+            ApprovalDecision(version="1"),
+            requester,
+            cancelled_service,
+        ).status
+        == ApprovalStatus.CANCELLED
+    )
+
+
+def test_approval_errors_use_stable_public_mapping() -> None:
+    application = FastAPI()
+    install_error_handlers(application)
+
+    @application.get("/failure")
+    def failure() -> None:
+        raise ApprovalError(
+            ApprovalErrorKind.SELF_DECISION,
+            "requesters cannot decide their own approval request",
+        )
+
+    response = TestClient(application).get("/failure")
+    assert response.status_code == 403
+    assert response.json() == {
+        "code": "approval.self_decision",
+        "message": "requesters cannot decide their own approval request",
+    }

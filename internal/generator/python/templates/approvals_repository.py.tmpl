@@ -1,0 +1,294 @@
+"""Transactional approval persistence with immutable evidence."""
+
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Protocol, cast, overload
+
+from sqlalchemy import insert, select, update
+from sqlalchemy.engine import Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
+
+from {{.PackageName}}.approvals.models import (
+    ApprovalEvent,
+    ApprovalRequest,
+    ApprovalStatus,
+    approval_events,
+    approval_requests,
+)
+from {{.PackageName}}.identity.models import AuditEvent
+from {{.PackageName}}.identity.repository import append_audit
+from {{.PackageName}}.{{.Business.PackageName}}.models import table as business_table
+
+
+class ApprovalConflict(Exception):
+    """The request conflicts with current database state."""
+
+
+class ApprovalSubjectNotFound(Exception):
+    """The scoped generated business subject does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalTransition:
+    """Database-enforced optimistic actor transition."""
+
+    organization_id: str
+    request_id: str
+    expected_version: int
+    actor_user_id: str
+    actor_rule: str
+    from_status: ApprovalStatus
+    to_status: ApprovalStatus
+    comment: str
+    resolved_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalPageResult:
+    """Internal bounded keyset page."""
+
+    items: list[ApprovalRequest]
+    next_cursor: str
+
+
+class ApprovalRepository(Protocol):
+    """Persistence seam for atomic requests, events, and audits."""
+
+    def create(
+        self,
+        request: ApprovalRequest,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> None: ...
+
+    def get(self, organization_id: str, request_id: str) -> ApprovalRequest | None: ...
+
+    def list_page(
+        self,
+        organization_id: str,
+        requester_user_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> ApprovalPageResult: ...
+
+    def transition(
+        self,
+        transition: ApprovalTransition,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> ApprovalRequest: ...
+
+    def events(self, organization_id: str, request_id: str) -> list[ApprovalEvent]: ...
+
+
+class SQLAlchemyApprovalRepository:
+    """SQLAlchemy adapter repeating scope, version, state, and actor rules in SQL."""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def create(
+        self,
+        request: ApprovalRequest,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> None:
+        try:
+            with self._engine.begin() as connection:
+                subject = select(business_table.c.id).where(
+                    business_table.c.id == request.subject_id
+                )
+{{- if .Tenancy}}
+                subject = subject.where(business_table.c.organization_id == request.organization_id)
+{{- end}}
+                if connection.execute(subject).first() is None:
+                    raise ApprovalSubjectNotFound()
+                connection.execute(insert(approval_requests).values(**_request_values(request)))
+                connection.execute(insert(approval_events).values(**_event_values(event)))
+                append_audit(connection, audit)
+        except IntegrityError as error:
+            raise ApprovalConflict() from error
+
+    def get(self, organization_id: str, request_id: str) -> ApprovalRequest | None:
+        statement = select(approval_requests).where(approval_requests.c.id == request_id)
+{{- if .Tenancy}}
+        statement = statement.where(approval_requests.c.organization_id == organization_id)
+{{- else}}
+        del organization_id
+{{- end}}
+        with self._engine.connect() as connection:
+            row = connection.execute(statement).mappings().first()
+        return _map_request(row) if row is not None else None
+
+    def list_page(
+        self,
+        organization_id: str,
+        requester_user_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> ApprovalPageResult:
+        statement = select(approval_requests).order_by(approval_requests.c.id).limit(limit + 1)
+{{- if .Tenancy}}
+        statement = statement.where(approval_requests.c.organization_id == organization_id)
+{{- else}}
+        del organization_id
+{{- end}}
+        if requester_user_id:
+            statement = statement.where(approval_requests.c.requester_user_id == requester_user_id)
+        if status:
+            statement = statement.where(approval_requests.c.status == status)
+        if cursor:
+            statement = statement.where(approval_requests.c.id > cursor)
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        values = [_map_request(row) for row in rows]
+        next_cursor = values[limit - 1].id if len(values) > limit else ""
+        return ApprovalPageResult(values[:limit], next_cursor)
+
+    def transition(
+        self,
+        transition: ApprovalTransition,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> ApprovalRequest:
+        if transition.actor_rule == "requester":
+            actor_condition = approval_requests.c.requester_user_id == transition.actor_user_id
+        elif transition.actor_rule == "other":
+            actor_condition = approval_requests.c.requester_user_id != transition.actor_user_id
+        else:
+            raise ValueError("approval actor rule is invalid")
+        conditions = [
+            approval_requests.c.id == transition.request_id,
+            approval_requests.c.status == transition.from_status.value,
+            approval_requests.c.version == transition.expected_version,
+            actor_condition,
+        ]
+{{- if .Tenancy}}
+        conditions.append(approval_requests.c.organization_id == transition.organization_id)
+{{- end}}
+        try:
+            with self._engine.begin() as connection:
+                changed = connection.execute(
+                    update(approval_requests)
+                    .where(*conditions)
+                    .values(
+                        status=transition.to_status.value,
+                        version=approval_requests.c.version + 1,
+                        resolution_comment=transition.comment or None,
+                        resolved_by_user_id=transition.actor_user_id,
+                        resolved_at=transition.resolved_at,
+                        updated_at=transition.resolved_at,
+                    )
+                ).rowcount
+                if changed != 1:
+                    raise ApprovalConflict()
+                connection.execute(insert(approval_events).values(**_event_values(event)))
+                append_audit(connection, audit)
+                row = (
+                    connection.execute(select(approval_requests).where(*conditions[:1]))
+                    .mappings()
+                    .one()
+                )
+                return _map_request(row)
+        except IntegrityError as error:
+            raise ApprovalConflict() from error
+
+    def events(self, organization_id: str, request_id: str) -> list[ApprovalEvent]:
+        statement = (
+            select(approval_events)
+            .join(
+                approval_requests,
+                approval_requests.c.id == approval_events.c.request_id,
+            )
+            .where(approval_events.c.request_id == request_id)
+            .order_by(approval_events.c.sequence, approval_events.c.id)
+        )
+{{- if .Tenancy}}
+        statement = statement.where(approval_requests.c.organization_id == organization_id)
+{{- else}}
+        del organization_id
+{{- end}}
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return [_map_event(row) for row in rows]
+
+
+def _request_values(value: ApprovalRequest) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "organization_id": {{if .Tenancy}}value.organization_id{{else}}None{{end}},
+        "subject_type": value.subject_type,
+        "subject_id": value.subject_id,
+        "requester_user_id": value.requester_user_id,
+        "summary": value.summary,
+        "details": value.details,
+        "status": value.status.value,
+        "version": int(value.version),
+        "resolution_comment": value.resolution_comment,
+        "resolved_by_user_id": value.resolved_by_user_id,
+        "resolved_at": value.resolved_at,
+        "created_at": value.created_at,
+        "updated_at": value.updated_at,
+    }
+
+
+def _event_values(value: ApprovalEvent) -> dict[str, object]:
+    return {
+        "id": value.id,
+        "request_id": value.request_id,
+        "actor_user_id": value.actor_user_id,
+        "status": value.status.value,
+        "sequence": 1 if value.status == ApprovalStatus.PENDING else 2,
+        "comment": value.comment,
+        "created_at": value.created_at,
+    }
+
+
+def _map_request(row: RowMapping) -> ApprovalRequest:
+    return ApprovalRequest(
+        id=str(row["id"]),
+{{- if .Tenancy}}
+        organization_id=str(row["organization_id"]),
+{{- end}}
+        subject_type=str(row["subject_type"]),
+        subject_id=str(row["subject_id"]),
+        requester_user_id=str(row["requester_user_id"]),
+        summary=str(row["summary"]),
+        details=str(row["details"]),
+        status=ApprovalStatus(str(row["status"])),
+        version=str(row["version"]),
+        resolution_comment=cast(str | None, row["resolution_comment"]),
+        resolved_by_user_id=cast(str | None, row["resolved_by_user_id"]),
+        resolved_at=_utc(cast(datetime | None, row["resolved_at"])),
+        created_at=_utc(cast(datetime, row["created_at"])),
+        updated_at=_utc(cast(datetime, row["updated_at"])),
+    )
+
+
+def _map_event(row: RowMapping) -> ApprovalEvent:
+    return ApprovalEvent(
+        id=str(row["id"]),
+        request_id=str(row["request_id"]),
+        actor_user_id=str(row["actor_user_id"]),
+        status=ApprovalStatus(str(row["status"])),
+        comment=cast(str | None, row["comment"]),
+        created_at=_utc(cast(datetime, row["created_at"])),
+    )
+
+
+@overload
+def _utc(value: datetime) -> datetime: ...
+
+
+@overload
+def _utc(value: None) -> None: ...
+
+
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

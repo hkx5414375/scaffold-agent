@@ -1,0 +1,237 @@
+"""Approval transaction, scope, evidence, and permission storage contracts."""
+
+import os
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, delete, func, insert, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+
+from {{.PackageName}}.approvals.models import (
+    ApprovalDecision,
+    ApprovalError,
+    ApprovalErrorKind,
+    ApprovalStatus,
+    ApprovalSubmit,
+    approval_events,
+    approval_requests,
+)
+from {{.PackageName}}.approvals.repository import SQLAlchemyApprovalRepository
+from {{.PackageName}}.approvals.service import ApprovalService
+from {{.PackageName}}.database import create_database_engine
+from {{.PackageName}}.identity.models import (
+    Principal,
+    audit_events,
+    role_permissions,
+    users,
+)
+from {{.PackageName}}.migrations import upgrade_database
+from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Write, table
+from {{.PackageName}}.{{.Business.PackageName}}.repository import SQLAlchemy{{.Business.EntityClass}}Repository
+from {{.PackageName}}.{{.Business.PackageName}}.service import {{.Business.EntityClass}}Service
+{{- if .Tenancy}}
+from {{.PackageName}}.tenancy.models import organization_memberships, organizations
+from {{.PackageName}}.tenancy.repository import SQLAlchemyTenancyRepository
+from {{.PackageName}}.tenancy.service import TenancyService
+{{- end}}
+
+
+def _repository_contract(engine: Engine) -> None:
+    suffix = uuid4().hex
+    now = datetime.now(UTC)
+    requester_id = "approval-requester-" + suffix
+    reviewer_id = "approval-reviewer-" + suffix
+    requester_email = suffix + "-requester@example.com"
+    reviewer_email = suffix + "-reviewer@example.com"
+    with engine.begin() as connection:
+        connection.execute(
+            insert(users),
+            [
+                {
+                    "id": requester_id,
+                    "email": requester_email,
+                    "password_hash": "unused",
+                    "role": "admin",
+                    "disabled": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+                {
+                    "id": reviewer_id,
+                    "email": reviewer_email,
+                    "password_hash": "unused",
+                    "role": "admin",
+                    "disabled": False,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ],
+        )
+    requester = Principal(
+        user_id=requester_id,
+        email=requester_email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=None,
+{{- end}}
+    )
+{{- if .Tenancy}}
+    tenancy = TenancyService(SQLAlchemyTenancyRepository(engine), lambda: now)
+    organization = tenancy.create("Approval " + suffix, requester)
+    requester = requester.model_copy(update={"organization_id": organization.id})
+    with engine.begin() as connection:
+        connection.execute(
+            insert(organization_memberships).values(
+                organization_id=organization.id,
+                user_id=reviewer_id,
+                role_code="admin",
+                created_at=now,
+            )
+        )
+{{- end}}
+    reviewer = Principal(
+        user_id=reviewer_id,
+        email=reviewer_email,
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id=organization.id,
+{{- end}}
+    )
+    business = {{.Business.EntityClass}}Service(SQLAlchemy{{.Business.EntityClass}}Repository(engine), lambda: now)
+    subject = business.create(
+        {{.Business.EntityClass}}Write(
+{{- range .Business.Fields}}
+            {{.Name}}={{if and .Unique .StringLike}}"subject-" + suffix{{else}}{{.SampleOne}}{{end}},
+{{- end}}
+        ),
+        requester,
+    )
+    approvals = ApprovalService(SQLAlchemyApprovalRepository(engine), lambda: now)
+    submitted = approvals.submit(
+        ApprovalSubmit(
+            subject_id=subject.id,
+            summary="Review generated subject",
+            details="details",
+        ),
+        requester,
+    )
+
+    with pytest.raises(ApprovalError) as duplicate:
+        approvals.submit(
+            ApprovalSubmit(subject_id=subject.id, summary="Duplicate pending"),
+            requester,
+        )
+    assert duplicate.value.kind == ApprovalErrorKind.CONFLICT
+    assert approvals.list_mine("pending", "", 20, requester).items == [submitted]
+{{- if .Tenancy}}
+    wrong_scope = reviewer.model_copy(update={"organization_id": "missing-" + suffix})
+    with pytest.raises(ApprovalError) as hidden:
+        approvals.get(submitted.id, wrong_scope)
+    assert hidden.value.kind == ApprovalErrorKind.NOT_FOUND
+{{- end}}
+
+    missing_reviewer = reviewer.model_copy(update={"user_id": "missing-" + suffix})
+    with pytest.raises(ApprovalError) as failed_evidence:
+        approvals.approve(
+            submitted.id,
+            ApprovalDecision(version="1", comment="invalid actor"),
+            missing_reviewer,
+        )
+    assert failed_evidence.value.kind == ApprovalErrorKind.CONFLICT
+    assert approvals.get(submitted.id, reviewer).status == ApprovalStatus.PENDING
+    assert len(approvals.history(submitted.id, reviewer).items) == 1
+
+    rejected = approvals.reject(
+        submitted.id,
+        ApprovalDecision(version="1", comment="missing evidence"),
+        reviewer,
+    )
+    assert rejected.status == ApprovalStatus.REJECTED
+    assert rejected.version == "2"
+    assert business.get(subject.id, requester).version == "1"
+    assert [event.status for event in approvals.history(rejected.id, reviewer).items] == [
+        ApprovalStatus.PENDING,
+        ApprovalStatus.REJECTED,
+    ]
+
+    permission_codes = [
+        "approvals:submit",
+        "approvals:mine",
+        "approvals:read",
+        "approvals:decide",
+    ]
+    with engine.connect() as connection:
+        approval_audits = connection.scalar(
+            select(func.count())
+            .select_from(audit_events)
+            .where(
+                audit_events.c.target == submitted.id,
+                audit_events.c.action.in_(["approvals:submit", "approvals:rejected"]),
+            )
+        )
+        grants = set(
+            connection.execute(
+                select(role_permissions.c.role_code, role_permissions.c.permission_code).where(
+                    role_permissions.c.permission_code.in_(permission_codes)
+                )
+            ).all()
+        )
+    assert approval_audits == 2
+    assert grants == {
+        ("admin", "approvals:submit"),
+        ("admin", "approvals:mine"),
+        ("admin", "approvals:read"),
+        ("admin", "approvals:decide"),
+        ("user", "approvals:submit"),
+        ("user", "approvals:mine"),
+    }
+
+    with engine.begin() as connection:
+        connection.execute(
+            delete(approval_events).where(approval_events.c.request_id == submitted.id)
+        )
+        connection.execute(delete(approval_requests).where(approval_requests.c.id == submitted.id))
+        connection.execute(delete(table).where(table.c.id == subject.id))
+        connection.execute(
+            delete(audit_events).where(audit_events.c.user_id.in_([requester_id, reviewer_id]))
+        )
+{{- if .Tenancy}}
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id == organization.id
+            )
+        )
+        connection.execute(delete(organizations).where(organizations.c.id == organization.id))
+{{- end}}
+        connection.execute(delete(users).where(users.c.id.in_([requester_id, reviewer_id])))
+
+
+def test_repository_contract_without_external_services() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()
+
+
+def test_configured_database_migration_and_repository_contract() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url is None:
+        pytest.skip("TEST_DATABASE_URL is not configured")
+    engine = create_database_engine(database_url)
+    try:
+        upgrade_database(engine)
+        _repository_contract(engine)
+    finally:
+        engine.dispose()

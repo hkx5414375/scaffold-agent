@@ -21,10 +21,12 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` refuses calls without the `apply_token` produced for the exact immutable Plan. Large change sets and verification findings are returned through opaque cursors instead of being inserted into model context all at once.
 
-The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, organization tenancy 0.3, durable background jobs 0.1, email notifications 0.1, file assets 0.1, application cache 0.1, payload-free job administration 0.1, safe HTTP observability 0.1, atomic CSV transfer 0.1, the shared Vue/Element Plus administration project, and locked quality gates. Unsupported Python capability selections return explicit stable generation errors and never produce partial output.
+The six-tool surface and storage contracts are implemented. The Go adapter generates a PostgreSQL- or MySQL-backed HTTP service with embedded migrations, session and token authentication, permission-based RBAC, audit events, business CRUD, OpenAPI, Vue administration, and the M5 platform capabilities. The Java adapter generates a Java 21/Spring Boot 4.1 Maven service for PostgreSQL or MySQL and now has parity with the Go platform capability set. The Python 3.12+/FastAPI adapter generates a PostgreSQL or MySQL identity foundation plus one complete Blueprint CRUD entity with deterministic uv locks, Alembic migrations, bounded health/readiness, digest-only credentials, permission RBAC, transactional audit, keyset pagination, optimistic concurrency, stable OpenAPI, organization tenancy 0.3, durable background jobs 0.1, email notifications 0.1, file assets 0.1, application cache 0.1, payload-free job administration 0.1, safe HTTP observability 0.1, atomic CSV transfer 0.1, portable approvals 0.1, the shared Vue/Element Plus administration project, and locked quality gates. Go, Java, and Python now expose the same M5 capability set.
 
 See `examples/task-service/scaffold.yaml` for the Go business-module contract and
-`examples/task-service-java/scaffold.yaml` for the Java-equivalent contract.
+`examples/task-service-java/scaffold.yaml` and
+`examples/task-service-python/scaffold.yaml` for the equivalent Java and Python
+contracts.
 Every generated service includes `api/openapi.yaml`, including stable operation IDs,
 authentication schemes, permission extensions, request schemas, response schemas,
 pagination, and optimistic-lock inputs. Agents should read that contract before
@@ -123,7 +125,7 @@ to prevent spreadsheet formula execution. Agents must use the generated field
 order and RFC3339 datetimes, must not turn import into an unaudited upsert, and
 must not bypass organization scope or the generated limits.
 
-Selecting `approval-workflows` version `0.1.0` on Go or Java requires one generated business
+Selecting `approval-workflows` version `0.1.0` on Go, Java, or Python requires one generated business
 entity and one explicit module workflow named `approval` whose ordered states are
 `pending`, `approved`, `rejected`, and `cancelled`. The generated service verifies
 the tenant-scoped subject at submission, permits at most one pending request per

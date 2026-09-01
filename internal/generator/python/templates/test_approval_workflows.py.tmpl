@@ -1,0 +1,276 @@
+"""Approval separation, validation, evidence, and failure contracts."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+
+import pytest
+
+from {{.PackageName}}.approvals.models import (
+    ApprovalDecision,
+    ApprovalError,
+    ApprovalErrorKind,
+    ApprovalEvent,
+    ApprovalRequest,
+    ApprovalStatus,
+    ApprovalSubmit,
+)
+from {{.PackageName}}.approvals.repository import (
+    ApprovalConflict,
+    ApprovalPageResult,
+    ApprovalSubjectNotFound,
+    ApprovalTransition,
+)
+from {{.PackageName}}.approvals.service import ApprovalService
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+NOW = datetime(2026, 9, 1, tzinfo=UTC)
+
+
+class MemoryRepository:
+    def __init__(self) -> None:
+        self.request: ApprovalRequest | None = None
+        self.event_values: list[ApprovalEvent] = []
+        self.audits: list[AuditEvent] = []
+        self.failure: Exception | None = None
+
+    def create(
+        self,
+        request: ApprovalRequest,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> None:
+        self._fail()
+        self.request = request
+        self.event_values.append(event)
+        self.audits.append(audit)
+
+    def get(self, organization_id: str, request_id: str) -> ApprovalRequest | None:
+        self._fail()
+        assert organization_id == {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+        if self.request is None or self.request.id != request_id:
+            return None
+        return self.request
+
+    def list_page(
+        self,
+        organization_id: str,
+        requester_user_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+    ) -> ApprovalPageResult:
+        self._fail()
+        assert organization_id == {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+        assert cursor == ""
+        assert limit == 20
+        values = [] if self.request is None else [self.request]
+        if requester_user_id:
+            values = [item for item in values if item.requester_user_id == requester_user_id]
+        if status:
+            values = [item for item in values if item.status.value == status]
+        return ApprovalPageResult(values, "")
+
+    def transition(
+        self,
+        transition: ApprovalTransition,
+        event: ApprovalEvent,
+        audit: AuditEvent,
+    ) -> ApprovalRequest:
+        self._fail()
+        assert self.request is not None
+        self.request = self.request.model_copy(
+            update={
+                "status": transition.to_status,
+                "version": str(int(self.request.version) + 1),
+                "resolution_comment": transition.comment or None,
+                "resolved_by_user_id": transition.actor_user_id,
+                "resolved_at": transition.resolved_at,
+                "updated_at": transition.resolved_at,
+            }
+        )
+        self.event_values.append(event)
+        self.audits.append(audit)
+        return self.request
+
+    def events(self, organization_id: str, request_id: str) -> list[ApprovalEvent]:
+        self._fail()
+        assert organization_id == {{if .Tenancy}}"organization-1"{{else}}""{{end}}
+        return [event for event in self.event_values if event.request_id == request_id]
+
+    def _fail(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
+
+def _actor(user_id: str) -> Principal:
+    return Principal(
+        user_id=user_id,
+        email=user_id + "@example.com",
+        role="admin",
+        method="token",
+{{- if .Tenancy}}
+        organization_id="organization-1",
+{{- end}}
+    )
+
+
+def _service(repository: MemoryRepository) -> ApprovalService:
+    return ApprovalService(repository, lambda: NOW)
+
+
+def test_submit_approve_list_and_immutable_history() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    requester = _actor("requester-1")
+    reviewer = _actor("reviewer-1")
+
+    submitted = service.submit(
+        ApprovalSubmit(subject_id="task-1", summary=" Review task ", details=" details "),
+        requester,
+    )
+    mine = service.list_mine("pending", "", 20, requester)
+    queue = service.list("pending", "", 20, reviewer)
+    approved = service.approve(
+        submitted.id,
+        ApprovalDecision(version="1", comment=" looks good "),
+        reviewer,
+    )
+    history = service.history(submitted.id, reviewer)
+
+    assert submitted.status == ApprovalStatus.PENDING
+    assert submitted.summary == "Review task"
+    assert submitted.details == "details"
+    assert mine.items == [submitted]
+    assert queue.items == [submitted]
+    assert approved.status == ApprovalStatus.APPROVED
+    assert approved.version == "2"
+    assert approved.resolution_comment == "looks good"
+    assert [event.status for event in history.items] == [
+        ApprovalStatus.PENDING,
+        ApprovalStatus.APPROVED,
+    ]
+    assert [audit.action for audit in repository.audits] == [
+        "approvals:submit",
+        "approvals:approved",
+    ]
+
+
+def test_separation_reason_ownership_and_version_rules() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    requester = _actor("requester-1")
+    reviewer = _actor("reviewer-1")
+    submitted = service.submit(
+        ApprovalSubmit(subject_id="task-1", summary="Review task"),
+        requester,
+    )
+
+    failures: list[tuple[Callable[[], object], ApprovalErrorKind]] = [
+        (
+            lambda: service.approve(
+                submitted.id,
+                ApprovalDecision(version="1"),
+                requester,
+            ),
+            ApprovalErrorKind.SELF_DECISION,
+        ),
+        (
+            lambda: service.reject(
+                submitted.id,
+                ApprovalDecision(version="1"),
+                reviewer,
+            ),
+            ApprovalErrorKind.INVALID,
+        ),
+        (
+            lambda: service.cancel(
+                submitted.id,
+                ApprovalDecision(version="1"),
+                reviewer,
+            ),
+            ApprovalErrorKind.FORBIDDEN,
+        ),
+        (
+            lambda: service.approve(
+                submitted.id,
+                ApprovalDecision(version="2"),
+                reviewer,
+            ),
+            ApprovalErrorKind.CONFLICT,
+        ),
+    ]
+    for operation, kind in failures:
+        with pytest.raises(ApprovalError) as failure:
+            operation()
+        assert failure.value.kind == kind
+    assert len(repository.event_values) == 1
+
+
+def test_cancel_and_reject_create_terminal_evidence() -> None:
+    first_repository = MemoryRepository()
+    first = _service(first_repository)
+    requester = _actor("requester-1")
+    submitted = first.submit(ApprovalSubmit(subject_id="task-1", summary="Review task"), requester)
+    cancelled = first.cancel(
+        submitted.id,
+        ApprovalDecision(version="1", comment="withdrawn"),
+        requester,
+    )
+    assert cancelled.status == ApprovalStatus.CANCELLED
+
+    second_repository = MemoryRepository()
+    second = _service(second_repository)
+    submitted = second.submit(ApprovalSubmit(subject_id="task-2", summary="Review task"), requester)
+    rejected = second.reject(
+        submitted.id,
+        ApprovalDecision(version="1", comment="missing evidence"),
+        _actor("reviewer-1"),
+    )
+    assert rejected.status == ApprovalStatus.REJECTED
+    assert rejected.resolution_comment == "missing evidence"
+
+
+def test_invalid_inputs_filters_actor_and_clock_are_rejected() -> None:
+    service = _service(MemoryRepository())
+    actor = _actor("requester-1")
+    operations: list[Callable[[], object]] = [
+        lambda: service.submit(ApprovalSubmit(subject_id=" ", summary="summary"), actor),
+        lambda: service.submit(ApprovalSubmit(subject_id="task-1", summary="bad\nsummary"), actor),
+        lambda: service.list("unknown", "", 20, actor),
+        lambda: service.list("", "x" * 192, 20, actor),
+        lambda: service.list("", "", 101, actor),
+        lambda: service.get("", actor),
+    ]
+    for operation in operations:
+        with pytest.raises(ApprovalError) as failure:
+            operation()
+        assert failure.value.kind == ApprovalErrorKind.INVALID
+
+    with pytest.raises(ApprovalError):
+        service.list("", "", 20, _actor(""))
+    invalid_clock = ApprovalService(MemoryRepository(), lambda: NOW.replace(tzinfo=None))
+    with pytest.raises(ApprovalError):
+        invalid_clock.submit(ApprovalSubmit(subject_id="task-1", summary="summary"), actor)
+
+
+def test_repository_failures_map_without_leaking_details() -> None:
+    repository = MemoryRepository()
+    service = _service(repository)
+    actor = _actor("requester-1")
+    value = ApprovalSubmit(subject_id="task-1", summary="Review task")
+
+    repository.failure = ApprovalSubjectNotFound()
+    with pytest.raises(ApprovalError) as missing:
+        service.submit(value, actor)
+    assert missing.value.kind == ApprovalErrorKind.SUBJECT_NOT_FOUND
+
+    repository.failure = ApprovalConflict()
+    with pytest.raises(ApprovalError) as conflict:
+        service.submit(value, actor)
+    assert conflict.value.kind == ApprovalErrorKind.CONFLICT
+
+    repository.failure = RuntimeError("database password")
+    with pytest.raises(ApprovalError) as storage:
+        service.submit(value, actor)
+    assert storage.value.kind == ApprovalErrorKind.STORAGE
+    assert "database password" not in storage.value.message

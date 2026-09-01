@@ -1,0 +1,230 @@
+"""Approval workflow API records and SQLAlchemy table metadata."""
+
+from datetime import datetime
+from enum import StrEnum
+
+import sqlalchemy as sa
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from {{.PackageName}}.identity.models import metadata
+
+POSITIVE_VERSION = r"^[1-9][0-9]*$"
+
+approval_requests = sa.Table(
+    "approval_requests",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "organization_id",
+        sa.String(191),
+{{- if .Tenancy}}
+        sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+{{- else}}
+        nullable=True,
+{{- end}}
+    ),
+    sa.Column("subject_type", sa.String(191), nullable=False),
+    sa.Column("subject_id", sa.String(191), nullable=False),
+    sa.Column(
+        "requester_user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id"),
+        nullable=False,
+    ),
+    sa.Column("summary", sa.String(255), nullable=False),
+    sa.Column("details", sa.Text(), nullable=False, server_default=""),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("version", sa.BigInteger(), nullable=False),
+    sa.Column("resolution_comment", sa.Text(), nullable=True),
+    sa.Column(
+        "resolved_by_user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id"),
+        nullable=True,
+    ),
+    sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "subject_type = '{{.Business.ModuleName}}.{{.Business.EntityName}}'",
+        name="approval_subject_type",
+    ),
+    sa.CheckConstraint(
+        "status in ('pending', 'approved', 'rejected', 'cancelled')",
+        name="approval_status",
+    ),
+    sa.CheckConstraint("version > 0", name="approval_version"),
+    sa.CheckConstraint(
+        "(status = 'pending' and resolved_by_user_id is null and resolved_at is null) "
+        "or (status <> 'pending' and resolved_by_user_id is not null "
+        "and resolved_at is not null)",
+        name="approval_resolution",
+    ),
+)
+sa.Index(
+    "approval_scope_status_idx",
+{{- if .Tenancy}}
+    approval_requests.c.organization_id,
+{{- end}}
+    approval_requests.c.status,
+    approval_requests.c.id,
+)
+sa.Index(
+    "approval_scope_requester_idx",
+{{- if .Tenancy}}
+    approval_requests.c.organization_id,
+{{- end}}
+    approval_requests.c.requester_user_id,
+    approval_requests.c.id,
+)
+
+approval_events = sa.Table(
+    "approval_events",
+    metadata,
+    sa.Column("id", sa.String(191), primary_key=True),
+    sa.Column(
+        "request_id",
+        sa.String(191),
+        sa.ForeignKey("approval_requests.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    sa.Column(
+        "actor_user_id",
+        sa.String(191),
+        sa.ForeignKey("identity_users.id"),
+        nullable=False,
+    ),
+    sa.Column("status", sa.String(32), nullable=False),
+    sa.Column("sequence", sa.BigInteger(), nullable=False),
+    sa.Column("comment", sa.Text(), nullable=True),
+    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.CheckConstraint(
+        "status in ('pending', 'approved', 'rejected', 'cancelled')",
+        name="approval_event_status",
+    ),
+    sa.CheckConstraint("sequence in (1, 2)", name="approval_event_sequence"),
+    sa.UniqueConstraint(
+        "request_id",
+        "sequence",
+        name="approval_event_request_sequence_unique",
+    ),
+)
+sa.Index(
+    "approval_events_request_idx",
+    approval_events.c.request_id,
+    approval_events.c.sequence,
+    approval_events.c.id,
+)
+
+
+class ApprovalStatus(StrEnum):
+    """Portable ordered workflow states."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class ApprovalErrorKind(StrEnum):
+    """Stable approval failure categories."""
+
+    INVALID = "invalid"
+    NOT_FOUND = "not_found"
+    SUBJECT_NOT_FOUND = "subject_not_found"
+    CONFLICT = "conflict"
+    SELF_DECISION = "self_decision"
+    FORBIDDEN = "forbidden"
+    STORAGE = "storage"
+
+
+class ApprovalError(Exception):
+    """Expected workflow failure without storage internals."""
+
+    def __init__(self, kind: ApprovalErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+
+
+class StrictModel(BaseModel):
+    """Reject fields outside the stable approval contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ApprovalRequest(StrictModel):
+    """Persisted request and current single-stage decision."""
+
+    id: str = Field(min_length=1, max_length=191)
+{{- if .Tenancy}}
+    organization_id: str = Field(min_length=1, max_length=191)
+{{- end}}
+    subject_type: str = Field(min_length=1, max_length=191)
+    subject_id: str = Field(min_length=1, max_length=191)
+    requester_user_id: str = Field(min_length=1, max_length=191)
+    summary: str = Field(min_length=1, max_length=255)
+    details: str = Field(default="", max_length=4000)
+    status: ApprovalStatus
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    resolution_comment: str | None = Field(default=None, max_length=2000)
+    resolved_by_user_id: str | None = Field(default=None, max_length=191)
+    resolved_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("resolved_at", "created_at", "updated_at")
+    @classmethod
+    def require_timezone(cls, value: datetime | None) -> datetime | None:
+        """Reject ambiguous local timestamps."""
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+
+
+class ApprovalEvent(StrictModel):
+    """Immutable request state evidence."""
+
+    id: str = Field(min_length=1, max_length=191)
+    request_id: str = Field(min_length=1, max_length=191)
+    actor_user_id: str = Field(min_length=1, max_length=191)
+    status: ApprovalStatus
+    comment: str | None = Field(default=None, max_length=2000)
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        """Reject ambiguous local timestamps."""
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("datetime values must include a UTC offset")
+        return value
+
+
+class ApprovalSubmit(StrictModel):
+    """Bounded request submission."""
+
+    subject_id: str = Field(min_length=1, max_length=191)
+    summary: str = Field(min_length=1, max_length=255)
+    details: str = Field(default="", max_length=4000)
+
+
+class ApprovalDecision(StrictModel):
+    """Optimistic terminal transition input."""
+
+    version: str = Field(pattern=POSITIVE_VERSION, max_length=19)
+    comment: str = Field(default="", max_length=2000)
+
+
+class ApprovalPage(StrictModel):
+    """Bounded keyset approval page."""
+
+    items: list[ApprovalRequest]
+    next_cursor: str
+
+
+class ApprovalEventPage(StrictModel):
+    """Complete immutable history for one bounded request."""
+
+    items: list[ApprovalEvent]

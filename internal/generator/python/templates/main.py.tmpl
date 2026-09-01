@@ -5,7 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-{{if .Cache}}from {{.PackageName}}.cache.repository import SQLAlchemyCacheRepository
+{{if .Approvals}}from {{.PackageName}}.approvals.http import (
+    install_error_handlers as install_approval_error_handlers,
+)
+from {{.PackageName}}.approvals.http import router as approval_router
+from {{.PackageName}}.approvals.repository import SQLAlchemyApprovalRepository
+from {{.PackageName}}.approvals.service import ApprovalService
+{{end}}{{if .Cache}}from {{.PackageName}}.cache.repository import SQLAlchemyCacheRepository
 from {{.PackageName}}.cache.service import CacheService
 {{end}}from {{.PackageName}}.config import get_settings
 from {{.PackageName}}.database import DatabaseProbe, create_database_engine
@@ -79,6 +85,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.bootstrap_admin_email and settings.bootstrap_admin_password:
             service.ensure_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
         app.state.identity_service = service
+{{- if .Approvals}}
+        app.state.approval_service = ApprovalService(SQLAlchemyApprovalRepository(engine))
+{{- end}}
 {{- if .Cache}}
         app.state.cache_service = CacheService(SQLAlchemyCacheRepository(engine))
 {{- end}}
@@ -126,6 +135,9 @@ def create_app() -> FastAPI:
     application.add_middleware(HttpObservabilityMiddleware, observer=observer)
 {{- end}}
     install_error_handlers(application)
+{{- if .Approvals}}
+    install_approval_error_handlers(application)
+{{- end}}
 {{- if .Files}}
     install_file_error_handlers(application)
 {{- end}}
@@ -143,6 +155,9 @@ def create_app() -> FastAPI:
     application.include_router(observability_router)
 {{- end}}
     application.include_router(identity_router)
+{{- if .Approvals}}
+    application.include_router(approval_router)
+{{- end}}
 {{- if .Files}}
     application.include_router(file_router)
 {{- end}}

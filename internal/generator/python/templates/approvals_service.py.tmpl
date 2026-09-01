@@ -1,0 +1,369 @@
+"""Portable single-stage approval use cases and safety rules."""
+
+from collections.abc import Callable
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from {{.PackageName}}.approvals.models import (
+    ApprovalDecision,
+    ApprovalError,
+    ApprovalErrorKind,
+    ApprovalEvent,
+    ApprovalEventPage,
+    ApprovalPage,
+    ApprovalRequest,
+    ApprovalStatus,
+    ApprovalSubmit,
+)
+from {{.PackageName}}.approvals.repository import (
+    ApprovalConflict,
+    ApprovalRepository,
+    ApprovalSubjectNotFound,
+    ApprovalTransition,
+)
+from {{.PackageName}}.identity.models import AuditEvent, Principal
+
+MAXIMUM_VERSION = 2**63 - 1
+STATUSES = {status.value for status in ApprovalStatus}
+
+
+class ApprovalService:
+    """Enforce separation of duties before database-repeated transition rules."""
+
+    def __init__(
+        self,
+        repository: ApprovalRepository,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def submit(self, value: ApprovalSubmit, actor: Principal) -> ApprovalRequest:
+        """Verify and atomically persist a pending request and its evidence."""
+        organization_id = _scope(actor)
+        subject_id = _required_text(value.subject_id, 191)
+        summary = _required_text(value.summary, 255)
+        details = _optional_text(value.details, 4000)
+        now = _now(self._clock)
+        request = ApprovalRequest(
+            id=str(uuid4()),
+{{- if .Tenancy}}
+            organization_id=organization_id,
+{{- end}}
+            subject_type="{{.Business.ModuleName}}.{{.Business.EntityName}}",
+            subject_id=subject_id,
+            requester_user_id=actor.user_id,
+            summary=summary,
+            details=details,
+            status=ApprovalStatus.PENDING,
+            version="1",
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            self._repository.create(
+                request,
+                _event(request.id, actor.user_id, ApprovalStatus.PENDING, "", now),
+                _audit(actor, "approvals:submit", request.id, now),
+            )
+        except ApprovalSubjectNotFound as error:
+            raise _error(
+                ApprovalErrorKind.SUBJECT_NOT_FOUND,
+                "approval subject was not found",
+            ) from error
+        except ApprovalConflict as error:
+            raise _conflict() from error
+        except ApprovalError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return request
+
+    def get(self, request_id: str, actor: Principal) -> ApprovalRequest:
+        """Read one request only inside the current scope."""
+        organization_id = _scope(actor)
+        normalized_id = _required_text(request_id, 191)
+        try:
+            request = self._repository.get(organization_id, normalized_id)
+        except ApprovalError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        if request is None:
+            raise _not_found()
+        return request
+
+    def list(
+        self,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> ApprovalPage:
+        """List the reviewer queue in stable identifier order."""
+        return self._list_for("", status, cursor, limit, actor)
+
+    def list_mine(
+        self,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> ApprovalPage:
+        """List only requests submitted by the current actor."""
+        _scope(actor)
+        return self._list_for(actor.user_id, status, cursor, limit, actor)
+
+    def approve(
+        self,
+        request_id: str,
+        value: ApprovalDecision,
+        actor: Principal,
+    ) -> ApprovalRequest:
+        """Approve a pending request as a different identity."""
+        return self._decide(request_id, value, ApprovalStatus.APPROVED, actor)
+
+    def reject(
+        self,
+        request_id: str,
+        value: ApprovalDecision,
+        actor: Principal,
+    ) -> ApprovalRequest:
+        """Reject a pending request with a required reason."""
+        if not _optional_text(value.comment, 2000):
+            raise _invalid()
+        return self._decide(request_id, value, ApprovalStatus.REJECTED, actor)
+
+    def cancel(
+        self,
+        request_id: str,
+        value: ApprovalDecision,
+        actor: Principal,
+    ) -> ApprovalRequest:
+        """Cancel a pending request only as its requester."""
+        current = self.get(request_id, actor)
+        if current.requester_user_id != actor.user_id:
+            raise _error(
+                ApprovalErrorKind.FORBIDDEN,
+                "only the requester can cancel an approval request",
+            )
+        expected_version = _version(value.version)
+        _require_pending_version(current, expected_version)
+        return self._transition(
+            current,
+            expected_version,
+            _optional_text(value.comment, 2000),
+            ApprovalStatus.CANCELLED,
+            "requester",
+            actor,
+        )
+
+    def history(self, request_id: str, actor: Principal) -> ApprovalEventPage:
+        """Read immutable events only after a scoped request lookup."""
+        request = self.get(request_id, actor)
+        organization_id = _scope(actor)
+        try:
+            events = self._repository.events(organization_id, request.id)
+        except ApprovalError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return ApprovalEventPage(items=events)
+
+    def _list_for(
+        self,
+        requester_user_id: str,
+        status: str,
+        cursor: str,
+        limit: int,
+        actor: Principal,
+    ) -> ApprovalPage:
+        organization_id = _scope(actor)
+        normalized_status = status.strip()
+        normalized_cursor = cursor.strip()
+        if (
+            (normalized_status and normalized_status not in STATUSES)
+            or len(normalized_cursor) > 191
+            or any(not character.isprintable() for character in normalized_cursor)
+            or limit < 1
+            or limit > 100
+        ):
+            raise _invalid()
+        try:
+            result = self._repository.list_page(
+                organization_id,
+                requester_user_id,
+                normalized_status,
+                normalized_cursor,
+                limit,
+            )
+        except ApprovalError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+        return ApprovalPage(items=result.items, next_cursor=result.next_cursor)
+
+    def _decide(
+        self,
+        request_id: str,
+        value: ApprovalDecision,
+        status: ApprovalStatus,
+        actor: Principal,
+    ) -> ApprovalRequest:
+        current = self.get(request_id, actor)
+        if current.requester_user_id == actor.user_id:
+            raise _error(
+                ApprovalErrorKind.SELF_DECISION,
+                "requesters cannot decide their own approval request",
+            )
+        expected_version = _version(value.version)
+        _require_pending_version(current, expected_version)
+        return self._transition(
+            current,
+            expected_version,
+            _optional_text(value.comment, 2000),
+            status,
+            "other",
+            actor,
+        )
+
+    def _transition(
+        self,
+        current: ApprovalRequest,
+        expected_version: int,
+        comment: str,
+        status: ApprovalStatus,
+        actor_rule: str,
+        actor: Principal,
+    ) -> ApprovalRequest:
+        organization_id = _scope(actor)
+        now = _now(self._clock)
+        transition = ApprovalTransition(
+            organization_id=organization_id,
+            request_id=current.id,
+            expected_version=expected_version,
+            actor_user_id=actor.user_id,
+            actor_rule=actor_rule,
+            from_status=ApprovalStatus.PENDING,
+            to_status=status,
+            comment=comment,
+            resolved_at=now,
+        )
+        try:
+            return self._repository.transition(
+                transition,
+                _event(current.id, actor.user_id, status, comment, now),
+                _audit(actor, f"approvals:{status.value}", current.id, now),
+            )
+        except ApprovalConflict as error:
+            raise _conflict() from error
+        except ApprovalError:
+            raise
+        except Exception as error:
+            raise _storage() from error
+
+
+def _scope(actor: Principal) -> str:
+    if not actor.user_id or any(not character.isprintable() for character in actor.user_id):
+        raise _invalid()
+{{- if .Tenancy}}
+    organization_id = actor.organization_id or ""
+    if not organization_id or any(not character.isprintable() for character in organization_id):
+        raise _invalid()
+    return organization_id.strip()
+{{- else}}
+    return ""
+{{- end}}
+
+
+def _required_text(value: str, maximum: int) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum:
+        raise _invalid()
+    if any(not character.isprintable() for character in normalized):
+        raise _invalid()
+    return normalized
+
+
+def _optional_text(value: str, maximum: int) -> str:
+    normalized = value.strip()
+    if len(normalized) > maximum:
+        raise _invalid()
+    if any(not character.isprintable() for character in normalized):
+        raise _invalid()
+    return normalized
+
+
+def _version(value: str) -> int:
+    try:
+        version = int(value, 10)
+    except ValueError as error:
+        raise _invalid() from error
+    if version < 1 or version > MAXIMUM_VERSION or str(version) != value:
+        raise _invalid()
+    return version
+
+
+def _require_pending_version(request: ApprovalRequest, version: int) -> None:
+    if request.status != ApprovalStatus.PENDING or int(request.version) != version:
+        raise _conflict()
+
+
+def _now(clock: Callable[[], datetime]) -> datetime:
+    value = clock()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise _invalid()
+    return value.astimezone(UTC)
+
+
+def _event(
+    request_id: str,
+    actor_user_id: str,
+    status: ApprovalStatus,
+    comment: str,
+    now: datetime,
+) -> ApprovalEvent:
+    return ApprovalEvent(
+        id=str(uuid4()),
+        request_id=request_id,
+        actor_user_id=actor_user_id,
+        status=status,
+        comment=comment or None,
+        created_at=now,
+    )
+
+
+def _audit(actor: Principal, action: str, target: str, now: datetime) -> AuditEvent:
+    return AuditEvent(
+        id=str(uuid4()),
+        user_id=actor.user_id,
+        action=action,
+        outcome="succeeded",
+        target=target,
+        ip_address=None,
+        user_agent=None,
+        created_at=now,
+    )
+
+
+def _invalid() -> ApprovalError:
+    return _error(ApprovalErrorKind.INVALID, "approval data is invalid")
+
+
+def _not_found() -> ApprovalError:
+    return _error(ApprovalErrorKind.NOT_FOUND, "approval request was not found")
+
+
+def _conflict() -> ApprovalError:
+    return _error(
+        ApprovalErrorKind.CONFLICT,
+        "approval request changed or is no longer pending",
+    )
+
+
+def _storage() -> ApprovalError:
+    return _error(ApprovalErrorKind.STORAGE, "approval operation could not be completed")
+
+
+def _error(kind: ApprovalErrorKind, message: str) -> ApprovalError:
+    return ApprovalError(kind, message)

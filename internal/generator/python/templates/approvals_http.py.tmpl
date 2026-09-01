@@ -1,0 +1,176 @@
+"""Permission-protected approval workflow transport."""
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
+from fastapi.responses import JSONResponse
+
+from {{.PackageName}}.approvals.models import (
+    ApprovalDecision,
+    ApprovalError,
+    ApprovalErrorKind,
+    ApprovalEventPage,
+    ApprovalPage,
+    ApprovalRequest,
+    ApprovalSubmit,
+)
+from {{.PackageName}}.approvals.service import ApprovalService
+from {{.PackageName}}.errors import ApiError
+from {{.PackageName}}.identity.http import require_permission
+from {{.PackageName}}.identity.models import Principal
+
+router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
+
+
+def approval_service(request: Request) -> ApprovalService:
+    """Resolve the process-scoped approval service."""
+    service: ApprovalService = request.app.state.approval_service
+    return service
+
+
+def install_error_handlers(app: FastAPI) -> None:
+    """Install stable workflow error responses."""
+
+    @app.exception_handler(ApprovalError)
+    async def approval_error(_request: Request, error: ApprovalError) -> JSONResponse:
+        status, code = {
+            ApprovalErrorKind.INVALID: (400, "approval.invalid"),
+            ApprovalErrorKind.NOT_FOUND: (404, "approval.not_found"),
+            ApprovalErrorKind.SUBJECT_NOT_FOUND: (404, "approval.subject_not_found"),
+            ApprovalErrorKind.CONFLICT: (409, "approval.conflict"),
+            ApprovalErrorKind.SELF_DECISION: (403, "approval.self_decision"),
+            ApprovalErrorKind.FORBIDDEN: (403, "approval.forbidden"),
+            ApprovalErrorKind.STORAGE: (500, "internal.error"),
+        }[error.kind]
+        return JSONResponse(
+            status_code=status,
+            content=ApiError(code=code, message=error.message).model_dump(),
+        )
+
+
+@router.post(
+    "",
+    response_model=ApprovalRequest,
+    response_model_exclude_none=True,
+    status_code=201,
+)
+def submit(
+    value: ApprovalSubmit,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:submit"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalRequest:
+    """Submit one scoped business subject for approval."""
+    return service.submit(value, principal)
+
+
+@router.get("", response_model=ApprovalPage, response_model_exclude_none=True)
+def list_approvals(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+    status: Annotated[str, Query(max_length=32)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ApprovalPage:
+    """List a reviewer queue in identifier order."""
+    return service.list(status, cursor, limit, principal)
+
+
+@router.get("/mine", response_model=ApprovalPage, response_model_exclude_none=True)
+def list_mine(
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:mine"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+    status: Annotated[str, Query(max_length=32)] = "",
+    cursor: Annotated[str, Query(max_length=191)] = "",
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> ApprovalPage:
+    """List only the current requester's approvals."""
+    return service.list_mine(status, cursor, limit, principal)
+
+
+@router.get("/{id}", response_model=ApprovalRequest, response_model_exclude_none=True)
+def get_approval(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalRequest:
+    """Read one scoped approval request."""
+    return service.get(id, principal)
+
+
+@router.get("/{id}/events", response_model=ApprovalEventPage, response_model_exclude_none=True)
+def history(
+    id: str,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:read"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalEventPage:
+    """Read immutable request events."""
+    return service.history(id, principal)
+
+
+@router.post(
+    "/{id}/approve",
+    response_model=ApprovalRequest,
+    response_model_exclude_none=True,
+)
+def approve(
+    id: str,
+    value: ApprovalDecision,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:decide"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalRequest:
+    """Approve one pending request as a different identity."""
+    return service.approve(id, value, principal)
+
+
+@router.post(
+    "/{id}/reject",
+    response_model=ApprovalRequest,
+    response_model_exclude_none=True,
+)
+def reject(
+    id: str,
+    value: ApprovalDecision,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:decide"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalRequest:
+    """Reject one pending request with a reason."""
+    return service.reject(id, value, principal)
+
+
+@router.post(
+    "/{id}/cancel",
+    response_model=ApprovalRequest,
+    response_model_exclude_none=True,
+)
+def cancel(
+    id: str,
+    value: ApprovalDecision,
+    principal: Annotated[
+        Principal,
+        Depends(require_permission("approvals:mine"{{if .Tenancy}}, tenant_scoped=True{{end}})),
+    ],
+    service: Annotated[ApprovalService, Depends(approval_service)],
+) -> ApprovalRequest:
+    """Cancel one pending request as its requester."""
+    return service.cancel(id, value, principal)

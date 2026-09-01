@@ -1,0 +1,198 @@
+"""Create portable single-stage approval workflow storage and permissions."""
+
+from collections.abc import Sequence
+
+import sqlalchemy as sa
+from alembic import op
+
+revision: str = "000250_approval_workflows"
+down_revision: str | None = {{if .CSVTransfer}}"000240_csv_import_export"{{else if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000051_tenant_business"{{else}}"000002_business"{{end}}
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
+
+
+def upgrade() -> None:
+    """Create requests, immutable events, indexes, and separated grants."""
+    permissions = sa.table(
+        "identity_permissions",
+        sa.column("code", sa.String),
+        sa.column("description", sa.String),
+    )
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("role_code", sa.String),
+        sa.column("permission_code", sa.String),
+    )
+    rows = [
+        {"code": "approvals:submit", "description": "Submit approval requests"},
+        {"code": "approvals:mine", "description": "Read and cancel own requests"},
+        {"code": "approvals:read", "description": "Read requests and events"},
+        {"code": "approvals:decide", "description": "Approve or reject requests"},
+    ]
+    op.bulk_insert(permissions, rows)
+    op.bulk_insert(
+        role_permissions,
+        [{"role_code": "admin", "permission_code": row["code"]} for row in rows]
+        + [
+            {"role_code": "user", "permission_code": "approvals:submit"},
+            {"role_code": "user", "permission_code": "approvals:mine"},
+        ],
+    )
+
+    op.create_table(
+        "approval_requests",
+        sa.Column("id", sa.String(191), primary_key=True),
+        sa.Column(
+            "organization_id",
+            sa.String(191),
+{{- if .Tenancy}}
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+{{- else}}
+            nullable=True,
+{{- end}}
+        ),
+        sa.Column("subject_type", sa.String(191), nullable=False),
+        sa.Column("subject_id", sa.String(191), nullable=False),
+        sa.Column(
+            "requester_user_id",
+            sa.String(191),
+            sa.ForeignKey("identity_users.id"),
+            nullable=False,
+        ),
+        sa.Column("summary", sa.String(255), nullable=False),
+        sa.Column("details", sa.Text(), nullable=False, server_default=""),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("version", sa.BigInteger(), nullable=False),
+        sa.Column("resolution_comment", sa.Text(), nullable=True),
+        sa.Column(
+            "resolved_by_user_id",
+            sa.String(191),
+            sa.ForeignKey("identity_users.id"),
+            nullable=True,
+        ),
+        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "subject_type = '{{.Business.ModuleName}}.{{.Business.EntityName}}'",
+            name="approval_subject_type",
+        ),
+        sa.CheckConstraint(
+            "status in ('pending', 'approved', 'rejected', 'cancelled')",
+            name="approval_status",
+        ),
+        sa.CheckConstraint("version > 0", name="approval_version"),
+        sa.CheckConstraint(
+            "(status = 'pending' and resolved_by_user_id is null "
+            "and resolved_at is null) or (status <> 'pending' "
+            "and resolved_by_user_id is not null and resolved_at is not null)",
+            name="approval_resolution",
+        ),
+    )
+    op.create_index(
+        "approval_scope_status_idx",
+        "approval_requests",
+        [{{if .Tenancy}}"organization_id", {{end}}"status", "id"],
+    )
+    op.create_index(
+        "approval_scope_requester_idx",
+        "approval_requests",
+        [{{if .Tenancy}}"organization_id", {{end}}"requester_user_id", "id"],
+    )
+    dialect = op.get_bind().dialect.name
+    pending_columns = [{{if .Tenancy}}"organization_id", {{end}}"subject_id"]
+    if dialect == "mysql":
+        op.add_column(
+            "approval_requests",
+            sa.Column(
+                "pending_subject_id",
+                sa.String(191),
+                sa.Computed(
+                    "case when status = 'pending' then subject_id else null end",
+                    persisted=True,
+                ),
+                nullable=True,
+            ),
+        )
+        pending_columns[-1] = "pending_subject_id"
+        op.create_index(
+            "approval_pending_subject_unique",
+            "approval_requests",
+            pending_columns,
+            unique=True,
+        )
+    elif dialect == "sqlite":
+        op.create_index(
+            "approval_pending_subject_unique",
+            "approval_requests",
+            pending_columns,
+            unique=True,
+            sqlite_where=sa.text("status = 'pending'"),
+        )
+    else:
+        op.create_index(
+            "approval_pending_subject_unique",
+            "approval_requests",
+            pending_columns,
+            unique=True,
+            postgresql_where=sa.text("status = 'pending'"),
+        )
+
+    op.create_table(
+        "approval_events",
+        sa.Column("id", sa.String(191), primary_key=True),
+        sa.Column(
+            "request_id",
+            sa.String(191),
+            sa.ForeignKey("approval_requests.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "actor_user_id",
+            sa.String(191),
+            sa.ForeignKey("identity_users.id"),
+            nullable=False,
+        ),
+        sa.Column("status", sa.String(32), nullable=False),
+        sa.Column("sequence", sa.BigInteger(), nullable=False),
+        sa.Column("comment", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "status in ('pending', 'approved', 'rejected', 'cancelled')",
+            name="approval_event_status",
+        ),
+        sa.CheckConstraint("sequence in (1, 2)", name="approval_event_sequence"),
+        sa.UniqueConstraint(
+            "request_id",
+            "sequence",
+            name="approval_event_request_sequence_unique",
+        ),
+    )
+    op.create_index(
+        "approval_events_request_idx",
+        "approval_events",
+        ["request_id", "sequence", "id"],
+    )
+
+
+def downgrade() -> None:
+    """Remove approval storage and separated permissions."""
+    op.drop_table("approval_events")
+    op.drop_table("approval_requests")
+    codes = [
+        "approvals:submit",
+        "approvals:mine",
+        "approvals:read",
+        "approvals:decide",
+    ]
+    role_permissions = sa.table(
+        "identity_role_permissions",
+        sa.column("permission_code", sa.String),
+    )
+    permissions = sa.table("identity_permissions", sa.column("code", sa.String))
+    connection = op.get_bind()
+    connection.execute(
+        sa.delete(role_permissions).where(role_permissions.c.permission_code.in_(codes))
+    )
+    connection.execute(sa.delete(permissions).where(permissions.c.code.in_(codes)))

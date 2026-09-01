@@ -172,6 +172,22 @@ func TestPythonMySQLTenantCSVImportExportPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, false, false, false, false, true)
 }
 
+func TestPythonPostgreSQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", false, false, false, false, false, false, false, true)
+}
+
+func TestPythonMySQLTenantApprovalWorkflowsPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", false, false, false, false, false, false, false, true)
+}
+
+func TestPythonPostgreSQLPlatformCapabilitiesCompose(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "postgresql", true, true, "0.3.0", true, true, true, true, true, true, true, true)
+}
+
+func TestPythonMySQLPlatformCapabilitiesCompose(t *testing.T) {
+	runGeneratedPythonReferenceOptions(t, "mysql", true, false, "0.3.0", true, true, true, true, true, true, true, true)
+}
+
 func runGeneratedPythonReference(
 	t *testing.T,
 	database string,
@@ -207,10 +223,11 @@ func runGeneratedPythonReferenceOptions(
 	cache bool,
 	jobAdmin bool,
 	observability bool,
-	csvTransferSelection ...bool,
+	platformSelections ...bool,
 ) {
 	t.Helper()
-	csvTransfer := len(csvTransferSelection) > 0 && csvTransferSelection[0]
+	csvTransfer := len(platformSelections) > 0 && platformSelections[0]
+	approvals := len(platformSelections) > 1 && platformSelections[1]
 	root := t.TempDir()
 	if captureRoot := os.Getenv("SCAFFOLD_AGENT_CAPTURE_PYTHON_ROOT"); captureRoot != "" {
 		root = filepath.Join(captureRoot, database)
@@ -243,7 +260,7 @@ CAPABILITIES
 	}
 	blueprint = strings.ReplaceAll(blueprint, "ADMIN_UI", adminUI)
 	capabilities := ""
-	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer {
+	if organizationTenancyVersion != "" || jobs || notifications || files || cache || jobAdmin || observability || csvTransfer || approvals {
 		capabilities = "  capabilities:\n"
 	}
 	if organizationTenancyVersion != "" {
@@ -291,6 +308,11 @@ CAPABILITIES
       version: 0.1.0
 `
 	}
+	if approvals {
+		capabilities += `    - name: approval-workflows
+      version: 0.1.0
+`
+	}
 	blueprint = strings.ReplaceAll(blueprint, "CAPABILITIES", capabilities)
 	modules := ""
 	if business {
@@ -310,6 +332,12 @@ CAPABILITIES
         - {code: "tasks:task:update"}
         - {code: "tasks:task:delete"}
 `
+		if approvals {
+			modules += `      workflows:
+        - name: approval
+          states: [pending, approved, rejected, cancelled]
+`
+		}
 	}
 	writeBlueprint(t, root, strings.ReplaceAll(blueprint, "MODULES", modules))
 	application := New("test")
@@ -375,6 +403,12 @@ CAPABILITIES
 	if csvTransfer {
 		wantChanges += 9
 	}
+	if approvals {
+		wantChanges += 9
+		if admin {
+			wantChanges++
+		}
+	}
 	if plannedData.ChangeCount != wantChanges || plannedData.CapabilityLock["python-service"] != "0.1.0" {
 		t.Fatalf("Plan() data = %#v", plannedData)
 	}
@@ -408,6 +442,9 @@ CAPABILITIES
 	}
 	if csvTransfer && plannedData.CapabilityLock["csv-import-export"] != "0.1.0" {
 		t.Fatalf("Plan() CSV transfer lock = %#v", plannedData.CapabilityLock)
+	}
+	if approvals && plannedData.CapabilityLock["approval-workflows"] != "0.1.0" {
+		t.Fatalf("Plan() approvals lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

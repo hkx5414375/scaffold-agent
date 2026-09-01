@@ -45,6 +45,8 @@ const (
 	observabilityVersion    = "0.1.0"
 	csvTransferOwner        = "csv-import-export"
 	csvTransferVersion      = "0.1.0"
+	approvalsOwner          = "approval-workflows"
+	approvalsVersion        = "0.1.0"
 )
 
 //go:embed all:templates
@@ -174,6 +176,16 @@ var pythonCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: csvTransferOwner, Version: csvTransferVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Atomic bounded CSV import and audited tenant-scoped export.",
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: approvalsOwner, Version: approvalsVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Tenant-aware single-stage approvals with immutable events.",
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
 		},
@@ -413,6 +425,18 @@ var csvTransferTemplates = map[string]string{
 	"tests/test_csv_transfer_http.py":                            "templates/test_csv_transfer_http.py.tmpl",
 }
 
+var approvalsTemplates = map[string]string{
+	"src/package/approvals/__init__.py":                           "templates/approvals_init.py.tmpl",
+	"src/package/approvals/http.py":                               "templates/approvals_http.py.tmpl",
+	"src/package/approvals/models.py":                             "templates/approvals_models.py.tmpl",
+	"src/package/approvals/repository.py":                         "templates/approvals_repository.py.tmpl",
+	"src/package/approvals/service.py":                            "templates/approvals_service.py.tmpl",
+	"src/package/migration/versions/000250_approval_workflows.py": "templates/approvals_migration.py.tmpl",
+	"tests/test_approval_workflows.py":                            "templates/test_approval_workflows.py.tmpl",
+	"tests/test_approval_workflows_database.py":                   "templates/test_approval_workflows_database.py.tmpl",
+	"tests/test_approval_workflows_http.py":                       "templates/test_approval_workflows_http.py.tmpl",
+}
+
 // Adapter generates the Python backend.
 type Adapter struct{}
 
@@ -474,6 +498,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	jobAdminEnabled := false
 	observabilityEnabled := false
 	csvTransferEnabled := false
+	approvalsEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -504,6 +529,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == csvTransferOwner {
 			csvTransferEnabled = true
 		}
+		if pack.Metadata.Name == approvalsOwner {
+			approvalsEnabled = true
+		}
 	}
 	if len(project.Spec.Modules) > 1 {
 		return generator.Result{}, fmt.Errorf("the Python CRUD slice supports at most one business module")
@@ -511,7 +539,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	var business *businessData
 	if len(project.Spec.Modules) == 1 {
 		var err error
-		business, err = buildBusiness(project.Spec.Modules[0], database.Engine)
+		business, err = buildBusiness(project.Spec.Modules[0], database.Engine, approvalsEnabled)
 		if err != nil {
 			return generator.Result{}, err
 		}
@@ -519,6 +547,11 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if csvTransferEnabled && business == nil {
 		return generator.Result{}, fmt.Errorf(
 			"csv-import-export requires exactly one generated business entity",
+		)
+	}
+	if approvalsEnabled && business == nil {
+		return generator.Result{}, fmt.Errorf(
+			"approval-workflows requires exactly one generated business entity",
 		)
 	}
 
@@ -539,11 +572,12 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		JobAdmin:              jobAdminEnabled,
 		Observability:         observabilityEnabled,
 		CSVTransfer:           csvTransferEnabled,
+		Approvals:             approvalsEnabled,
 	}
 	data.MigrationImports, data.MigrationMetadata = migrationModels(data)
 	targets := make(
 		map[string]renderTarget,
-		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+4,
+		len(baseTemplates)+len(businessTemplates)+len(tenancyTemplates)+len(tenancyMemberTemplates)+len(tenancyLifecycleTemplates)+len(jobsTemplates)+len(notificationTemplates)+len(fileTemplates)+len(cacheTemplates)+len(jobAdminTemplates)+len(observabilityTemplates)+len(csvTransferTemplates)+len(approvalsTemplates)+4,
 	)
 	for path, templatePath := range baseTemplates {
 		targets[replacePackage(path, data.PackageName)] = renderTarget{Template: templatePath, Owner: baseOwner}
@@ -656,6 +690,14 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if approvalsEnabled {
+		for path, templatePath := range approvalsTemplates {
+			targets[replacePackage(path, data.PackageName)] = renderTarget{
+				Template: templatePath,
+				Owner:    approvalsOwner,
+			}
+		}
+	}
 	if adminEnabled {
 		for path, templatePath := range adminui.BaseTemplates {
 			targets[path] = renderTarget{
@@ -692,6 +734,13 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			targets["web/admin/src/views/JobsView.vue"] = renderTarget{
 				Template:    "templates/src/views/JobsView.vue",
 				Owner:       jobAdminOwner,
+				SharedAdmin: true,
+			}
+		}
+		if approvalsEnabled {
+			targets["web/admin/src/views/ApprovalsView.vue"] = renderTarget{
+				Template:    "templates/src/views/ApprovalsView.vue.tmpl",
+				Owner:       approvalsOwner,
 				SharedAdmin: true,
 			}
 		}
@@ -751,6 +800,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if csvTransferEnabled {
 		capabilityLock[csvTransferOwner] = csvTransferVersion
 	}
+	if approvalsEnabled {
+		capabilityLock[approvalsOwner] = approvalsVersion
+	}
 	return generator.Result{
 		CapabilityLock: capabilityLock,
 		Outputs:        outputs,
@@ -767,6 +819,10 @@ func migrationModels(data templateData) (string, string) {
 			"from "+data.PackageName+"."+data.Business.PackageName+" import models as business_models",
 		)
 		metadata = append(metadata, "_business_metadata = business_models.table.metadata")
+	}
+	if data.Approvals {
+		imports = append(imports, "from "+data.PackageName+".approvals import models as approval_models")
+		metadata = append(metadata, "_approval_metadata = approval_models.approval_requests.metadata")
 	}
 	if data.Files {
 		imports = append(imports, "from "+data.PackageName+".files import models as file_models")
@@ -793,15 +849,23 @@ func migrationModels(data templateData) (string, string) {
 	return strings.Join(imports, "\n"), strings.Join(metadata, "\n")
 }
 
-func buildBusiness(module spec.Module, databaseEngine string) (*businessData, error) {
+func buildBusiness(module spec.Module, databaseEngine string, approvalsEnabled bool) (*businessData, error) {
 	if _, reserved := pythonKeywords[module.Name]; reserved {
 		return nil, fmt.Errorf("Python business module name %q is a language keyword", module.Name)
 	}
 	if len(module.Entities) != 1 {
 		return nil, fmt.Errorf("the Python CRUD slice requires exactly one entity")
 	}
-	if len(module.Workflows) > 0 || len(module.Pages) > 0 {
-		return nil, fmt.Errorf("the Python CRUD slice does not support workflows or pages yet")
+	if len(module.Pages) > 0 {
+		return nil, fmt.Errorf("the Python CRUD slice does not support pages yet")
+	}
+	if approvalsEnabled {
+		if len(module.Workflows) != 1 || module.Workflows[0].Name != "approval" ||
+			!equalStrings(module.Workflows[0].States, []string{"pending", "approved", "rejected", "cancelled"}) {
+			return nil, fmt.Errorf("approval-workflows requires workflow approval with states pending, approved, rejected, cancelled in that order")
+		}
+	} else if len(module.Workflows) > 0 {
+		return nil, fmt.Errorf("the Python CRUD slice does not support workflows without approval-workflows")
 	}
 	entity := module.Entities[0]
 	if _, reserved := pythonKeywords[entity.Name]; reserved {
@@ -933,6 +997,18 @@ func replacePackage(path, packageName string) string {
 
 func enabled(value string) bool {
 	return value != "" && value != "none"
+}
+
+func equalStrings(actual, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for index := range actual {
+		if actual[index] != expected[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func hasExactAuthModes(values []string, expected ...string) bool {

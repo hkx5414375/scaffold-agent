@@ -21,9 +21,9 @@ scaffold_query -> scaffold_plan -> scaffold_preview -> scaffold_apply -> scaffol
 
 `scaffold_apply` 必须收到该不可变 Plan 对应的 `apply_token`。大型变更集和验证问题使用不透明 Cursor 分页，避免一次性占用模型上下文。
 
-六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 身份底座和一个完整 Blueprint CRUD 实体，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、原子 CSV 导入导出 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。任何不支持的 Python 能力选择都会返回明确且稳定的生成错误，不会生成残缺项目。
+六个工具和存储协议已实现。Go 适配器已能生成 PostgreSQL 或 MySQL、内嵌迁移、Session 与 Token 双认证、权限码 RBAC、审计事件、完整 CRUD、OpenAPI 3.1、Vue/Element Plus 管理端及 M5 平台能力。Java 适配器可生成 Java 21/Spring Boot 4.1 + Maven 服务，并已与 Go 的平台能力集合对齐。Python 3.12+/FastAPI 适配器现可生成 PostgreSQL 或 MySQL 服务，包含确定性 uv 锁、Alembic 迁移、有界健康检查、只保存摘要的凭证、权限 RBAC、事务审计、游标分页、乐观锁、稳定 OpenAPI、组织多租户 0.3、可靠后台任务 0.1、邮件通知 0.1、文件资产 0.1、应用缓存 0.1、不暴露载荷的任务管理 0.1、安全 HTTP 可观测性 0.1、原子 CSV 导入导出 0.1、便携审批 0.1、共用 Vue/Element Plus 管理端和锁定质量门禁。Go、Java、Python 现已具备相同的 M5 能力集合。
 
-Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`。
+Go 业务模块写法参见 `examples/task-service/scaffold.yaml`，Java 对等写法参见 `examples/task-service-java/scaffold.yaml`，Python 对等写法参见 `examples/task-service-python/scaffold.yaml`。
 每个生成项目都会包含 `api/openapi.yaml`，其中给出稳定的操作 ID、认证方式、所需权限扩展、请求与响应结构、分页参数和乐观锁输入。AI 在读取 HTTP 实现代码前应优先读取这份契约。
 
 Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会加入组织创建与查询、成员身份范围内的权限校验、管理端组织选择，以及所有业务读写的 `X-Organization-ID` 租户条件。三种后端的 `0.2.0` 都进一步加入成员列表、72 小时且绑定邮箱的邀请、邀请接受、角色变更、成员移除和并发最后管理员保护。邀请明文只在创建响应中返回一次，数据库只保存 SHA-256 摘要，AI 不应尝试从数据库恢复邀请明文。三种后端的 `0.3.0` 都再加入独立所有者、组织改名、原子所有权转移、可逆停用和重新启用；所有权只能转给现有成员且会自动把新所有者提升为管理员。AI 不得绕过所有者保护或自行补一个级联删除组织的接口。停用组织仍可查询，但不能再授权租户业务请求。
@@ -44,7 +44,7 @@ Go、Java 与 Python 选择 `organization-tenancy` `0.1.0` 后，生成项目会
 
 Go、Java 或 Python 选择 `csv-import-export` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体。生成项目会按字段顺序提供 CSV 表头、类型解析、空模板、原子且只新增的导入，以及带审计的导出；导入和导出使用独立的管理员权限。单个文档最多 5 MiB、1000 行，任意一行无效或冲突都会回滚整个导入，超出上限的导出不会返回半份文件。字符串导出会用可逆方式转义电子表格公式。AI 必须沿用生成的字段顺序和 RFC3339 时间，不得擅自改成无审计 Upsert，也不得绕过组织范围或大小限制。
 
-Go 或 Java 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体，并在同一模块中显式声明名为 `approval` 的工作流，状态顺序固定为 `pending`、`approved`、`rejected`、`cancelled`。生成服务会在提交时验证当前组织范围内的业务对象，同一对象同时最多有一个待审批请求；发起人不能批准或拒绝自己的请求，只有发起人能撤回待审批请求，所有终态变更都必须携带当前版本。发起和审批使用分离的权限，每次成功提交或变更都会在同一事务中写入审批请求、不可变事件和安全审计。AI 不得让审批隐式修改业务对象、绕过职责分离、覆盖事件历史，或自行增加 Blueprint 没有声明的流程状态。
+Go、Java 或 Python 选择 `approval-workflows` `0.1.0` 时，Blueprint 必须包含一个已生成的业务实体，并在同一模块中显式声明名为 `approval` 的工作流，状态顺序固定为 `pending`、`approved`、`rejected`、`cancelled`。生成服务会在提交时验证当前组织范围内的业务对象，同一对象同时最多有一个待审批请求；发起人不能批准或拒绝自己的请求，只有发起人能撤回待审批请求，所有终态变更都必须携带当前版本。发起和审批使用分离的权限，每次成功提交或变更都会在同一事务中写入审批请求、不可变事件和安全审计。AI 不得让审批隐式修改业务对象、绕过职责分离、覆盖事件历史，或自行增加 Blueprint 没有声明的流程状态。
 
 ## STDIO 协议
 

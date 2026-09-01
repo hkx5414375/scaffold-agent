@@ -890,6 +890,161 @@ func TestGenerateCSVTransferComposesWithTenantAdministration(t *testing.T) {
 	}
 }
 
+func TestGenerateApprovalWorkflowsRequiresBusinessAndExactWorkflow(t *testing.T) {
+	t.Parallel()
+
+	missingBusiness := validProject()
+	missingBusiness.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: approvalsOwner, Version: approvalsVersion,
+	}}
+	_, err := New().Generate(context.Background(), missingBusiness)
+	if err == nil || !strings.Contains(err.Error(), "requires exactly one generated business entity") {
+		t.Fatalf("Generate(missing business) error = %v", err)
+	}
+
+	invalidWorkflow := validBusinessProject()
+	invalidWorkflow.Spec.Modules[0].Workflows = []spec.Workflow{{
+		Name: "approval", States: []string{"pending", "approved"},
+	}}
+	invalidWorkflow.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: approvalsOwner, Version: approvalsVersion,
+	}}
+	_, err = New().Generate(context.Background(), invalidWorkflow)
+	if err == nil || !strings.Contains(err.Error(), "requires workflow approval") {
+		t.Fatalf("Generate(invalid workflow) error = %v", err)
+	}
+}
+
+func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validApprovalProject()
+			project.Spec.Database.Engine = database
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate(%s) error = %v", database, err)
+			}
+			if generated.CapabilityLock[approvalsOwner] != approvalsVersion ||
+				len(generated.Outputs) != 46 {
+				t.Fatalf("Generate(%s) result = %#v", database, generated)
+			}
+			for _, path := range []string{
+				"src/demo_service/approvals/http.py",
+				"src/demo_service/approvals/models.py",
+				"src/demo_service/approvals/repository.py",
+				"src/demo_service/approvals/service.py",
+				"src/demo_service/migration/versions/000250_approval_workflows.py",
+				"tests/test_approval_workflows.py",
+				"tests/test_approval_workflows_database.py",
+				"tests/test_approval_workflows_http.py",
+			} {
+				if outputContent(generated, path) == nil || outputOwner(generated, path) != approvalsOwner {
+					t.Errorf("Generate(%s) did not produce approval-owned %s", database, path)
+				}
+			}
+			mainSource := string(outputContent(generated, "src/demo_service/main.py"))
+			if !strings.Contains(mainSource, "app.state.approval_service = ApprovalService(") ||
+				!strings.Contains(mainSource, "SQLAlchemyApprovalRepository(engine)") ||
+				!strings.Contains(mainSource, "application.include_router(approval_router)") {
+				t.Errorf("Generate(%s) does not compose approvals", database)
+			}
+			migration := string(outputContent(
+				generated,
+				"src/demo_service/migration/versions/000250_approval_workflows.py",
+			))
+			for _, fragment := range []string{
+				`{"role_code": "admin", "permission_code": row["code"]}`,
+				`{"role_code": "user", "permission_code": "approvals:mine"}`,
+				`"approvals:decide"`,
+				"approval_pending_subject_unique",
+				"pending_subject_id",
+			} {
+				if !strings.Contains(migration, fragment) {
+					t.Errorf("Generate(%s) migration does not contain %q", database, fragment)
+				}
+			}
+			contract := outputContent(generated, "api/openapi.yaml")
+			var openAPI map[string]any
+			if err := yaml.Unmarshal(contract, &openAPI); err != nil {
+				t.Fatalf("generated approval OpenAPI is invalid YAML: %v", err)
+			}
+			for _, fragment := range []string{
+				"/api/v1/approvals/{id}/approve:",
+				"/api/v1/approvals/{id}/reject:",
+				"x-required-permission: approvals:decide",
+				"ApprovalEventPage:",
+			} {
+				if !strings.Contains(string(contract), fragment) {
+					t.Errorf("Generate(%s) OpenAPI does not contain %q", database, fragment)
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateApprovalWorkflowsComposeWithTenantAdministration(t *testing.T) {
+	t.Parallel()
+
+	project := validApprovalProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: approvalsOwner, Version: approvalsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 91 ||
+		generated.CapabilityLock[approvalsOwner] != approvalsVersion {
+		t.Fatalf("Generate() result = %#v", generated)
+	}
+	viewPath := "web/admin/src/views/ApprovalsView.vue"
+	view := string(outputContent(generated, viewPath))
+	if outputOwner(generated, viewPath) != approvalsOwner ||
+		!strings.Contains(view, "requesters cannot decide") && !strings.Contains(view, "Approve") {
+		t.Fatalf("generated approval administration view is incomplete")
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000250_approval_workflows.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000070_tenancy_lifecycle"`) ||
+		!strings.Contains(migration, `sa.ForeignKey("organizations.id"`) {
+		t.Fatalf("generated approval migration is not tenant-aware:\n%s", migration)
+	}
+}
+
+func TestGenerateCSVAndApprovalMigrationsCompose(t *testing.T) {
+	t.Parallel()
+
+	project := validApprovalProject()
+	project.Spec.Stack.AdminUI = "element-plus"
+	project.Spec.Capabilities = []spec.CapabilitySelection{
+		{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+		{Name: csvTransferOwner, Version: csvTransferVersion},
+		{Name: approvalsOwner, Version: approvalsVersion},
+	}
+	generated, err := New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if len(generated.Outputs) != 100 {
+		t.Fatalf("Generate() output count = %d, want 100", len(generated.Outputs))
+	}
+	migration := string(outputContent(
+		generated,
+		"src/demo_service/migration/versions/000250_approval_workflows.py",
+	))
+	if !strings.Contains(migration, `down_revision: str | None = "000240_csv_import_export"`) {
+		t.Fatalf("approval migration does not follow CSV transfer:\n%s", migration)
+	}
+}
+
 func TestTenantCompositionImportsRemainSortedAroundBusinessPackage(t *testing.T) {
 	t.Parallel()
 
@@ -1071,6 +1226,23 @@ func validBusinessProject() spec.Project {
 			{Code: "tasks:task:update"},
 			{Code: "tasks:task:delete"},
 		},
+	}}
+	return project
+}
+
+func validApprovalProject() spec.Project {
+	project := validBusinessProject()
+	project.Spec.Modules[0].Workflows = []spec.Workflow{{
+		Name: "approval",
+		States: []string{
+			"pending",
+			"approved",
+			"rejected",
+			"cancelled",
+		},
+	}}
+	project.Spec.Capabilities = []spec.CapabilitySelection{{
+		Name: approvalsOwner, Version: approvalsVersion,
 	}}
 	return project
 }
