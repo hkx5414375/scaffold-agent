@@ -1,0 +1,41 @@
+package {{.PackageName}}.jobadmin;
+
+import {{.PackageName}}.identity.AuthenticationInterceptor;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.RequirePermission;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestAttribute;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/v1/jobs")
+public final class JobAdministrationController {
+
+    private final JobAdministrationService service;
+
+    public JobAdministrationController(JobAdministrationService service) {
+        this.service = service;
+    }
+
+    @GetMapping
+    @RequirePermission(value = "jobs:read"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public JobAdministrationService.Page list(
+            @RequestParam(defaultValue = "") String status,
+            @RequestParam(defaultValue = "") String cursor,
+            @RequestParam(defaultValue = "20") int limit,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.list(status, cursor, limit, actor);
+    }
+
+    @PostMapping("/{id}/retry")
+    @RequirePermission(value = "jobs:manage"{{if .Tenancy}}, tenantScoped = true{{end}})
+    public JobAdministrationItem retry(
+            @PathVariable String id,
+            @RequestAttribute(AuthenticationInterceptor.PRINCIPAL_ATTRIBUTE) Principal actor) {
+        return service.retry(id, actor);
+    }
+}

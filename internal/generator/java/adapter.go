@@ -38,6 +38,8 @@ const (
 	filesVersion            = "0.1.0"
 	cacheOwner              = "application-cache"
 	cacheVersion            = "0.1.0"
+	jobAdminOwner           = "job-administration"
+	jobAdminVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -68,6 +70,7 @@ type databaseData struct {
 	JobsMigrationTemplate             string
 	FilesMigrationTemplate            string
 	CacheMigrationTemplate            string
+	JobAdminMigrationTemplate         string
 }
 
 var databases = map[string]databaseData{
@@ -86,6 +89,7 @@ var databases = map[string]databaseData{
 		JobsMigrationTemplate:             "templates/jobs_postgresql.sql.tmpl",
 		FilesMigrationTemplate:            "templates/files_postgresql.sql.tmpl",
 		CacheMigrationTemplate:            "templates/cache_postgresql.sql.tmpl",
+		JobAdminMigrationTemplate:         "templates/jobadmin_postgresql.sql.tmpl",
 	},
 	"mysql": {
 		Engine:                            "mysql",
@@ -102,6 +106,7 @@ var databases = map[string]databaseData{
 		JobsMigrationTemplate:             "templates/jobs_mysql.sql.tmpl",
 		FilesMigrationTemplate:            "templates/files_mysql.sql.tmpl",
 		CacheMigrationTemplate:            "templates/cache_mysql.sql.tmpl",
+		JobAdminMigrationTemplate:         "templates/jobadmin_mysql.sql.tmpl",
 	},
 }
 
@@ -152,6 +157,17 @@ var javaCapabilityCatalog = capability.NewCatalog(
 		Metadata:   spec.Metadata{Name: notificationsOwner, Version: notificationsVersion},
 		Spec: spec.CapabilityPackSpec{
 			Description: "Idempotent email notifications delivered by reliable background jobs.",
+			Requires:    []spec.PackDependency{{Name: jobsOwner, Constraint: "^0.1.0"}},
+			Backends:    []string{backend},
+			Databases:   []string{"postgresql", "mysql"},
+		},
+	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: jobAdminOwner, Version: jobAdminVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Payload-free job inspection and audited dead-job retry.",
 			Requires:    []spec.PackDependency{{Name: jobsOwner, Constraint: "^0.1.0"}},
 			Backends:    []string{backend},
 			Databases:   []string{"postgresql", "mysql"},
@@ -294,6 +310,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	notificationsEnabled := false
 	filesEnabled := false
 	cacheEnabled := false
+	jobAdminEnabled := false
 	selectedTenancyVersion := ""
 	for _, pack := range resolvedCapabilities {
 		if pack.Metadata.Name == tenancyOwner {
@@ -314,6 +331,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if pack.Metadata.Name == cacheOwner {
 			cacheEnabled = true
+		}
+		if pack.Metadata.Name == jobAdminOwner {
+			jobAdminEnabled = true
 		}
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Engine)
@@ -343,6 +363,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	if cacheEnabled {
 		migrationCount++
 	}
+	if jobAdminEnabled {
+		migrationCount++
+	}
 	packageSegment := javaIdentifier(project.Metadata.Name)
 	data := templateData{
 		ProjectName:      project.Metadata.Name,
@@ -359,6 +382,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		Notifications:    notificationsEnabled,
 		Files:            filesEnabled,
 		Cache:            cacheEnabled,
+		JobAdmin:         jobAdminEnabled,
 		MigrationCount:   migrationCount,
 	}
 	targets := make(map[string]string, len(outputTemplates)+20)
@@ -372,6 +396,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	notificationPaths := make(map[string]struct{}, 11)
 	filesPaths := make(map[string]struct{}, 15)
 	cachePaths := make(map[string]struct{}, 9)
+	jobAdminPaths := make(map[string]struct{}, 11)
 	addBusinessTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		businessPaths[path] = struct{}{}
@@ -409,6 +434,15 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	addCacheTarget := func(path, templatePath string) {
 		targets[path] = templatePath
 		cachePaths[path] = struct{}{}
+	}
+	addJobAdminTarget := func(path, templatePath string) {
+		targets[path] = templatePath
+		jobAdminPaths[path] = struct{}{}
+	}
+	addJobAdminUI := func(path, templatePath string) {
+		targets[path] = templatePath
+		jobAdminPaths[path] = struct{}{}
+		adminPaths[path] = struct{}{}
 	}
 	mainRoot := "src/main/java/" + data.PackagePath
 	testRoot := "src/test/java/" + data.PackagePath
@@ -559,6 +593,51 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		)
 		capabilityLock[cacheOwner] = cacheVersion
 	}
+	if jobAdminEnabled {
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JobAdministrationItem.java",
+			"templates/JobAdministrationItem.java.tmpl",
+		)
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JobAdministrationException.java",
+			"templates/JobAdministrationException.java.tmpl",
+		)
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JobAdministrationRepository.java",
+			"templates/JobAdministrationRepository.java.tmpl",
+		)
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JdbcJobAdministrationRepository.java",
+			"templates/JdbcJobAdministrationRepository.java.tmpl",
+		)
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JobAdministrationService.java",
+			"templates/JobAdministrationService.java.tmpl",
+		)
+		addJobAdminTarget(
+			mainRoot+"/jobadmin/JobAdministrationController.java",
+			"templates/JobAdministrationController.java.tmpl",
+		)
+		addJobAdminTarget(
+			testRoot+"/jobadmin/JobAdministrationServiceTest.java",
+			"templates/JobAdministrationServiceTest.java.tmpl",
+		)
+		addJobAdminTarget(
+			testRoot+"/jobadmin/JobAdministrationDatabaseIntegrationTest.java",
+			"templates/JobAdministrationDatabaseIntegrationTest.java.tmpl",
+		)
+		addJobAdminTarget(
+			"src/main/resources/db/migration/V000230__job_administration.sql",
+			database.JobAdminMigrationTemplate,
+		)
+		if adminEnabled {
+			addJobAdminUI(
+				"web/admin/src/views/JobsView.vue",
+				"templates/src/views/JobsView.vue",
+			)
+		}
+		capabilityLock[jobAdminOwner] = jobAdminVersion
+	}
 	if business != nil {
 		businessRoot := mainRoot + "/" + business.PackagePath
 		businessTestRoot := testRoot + "/" + business.PackagePath
@@ -624,6 +703,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		}
 		if _, isCachePath := cachePaths[path]; isCachePath {
 			owner = cacheOwner
+		}
+		if _, isJobAdminPath := jobAdminPaths[path]; isJobAdminPath {
+			owner = jobAdminOwner
 		}
 		outputs = append(outputs, change.Output{Path: path, Owner: owner, Content: content})
 	}

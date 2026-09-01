@@ -1,0 +1,210 @@
+package {{.PackageName}}.jobadmin;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import tools.jackson.databind.ObjectMapper;
+import {{.PackageName}}.identity.IdentityService;
+import {{.PackageName}}.identity.JdbcIdentityRepository;
+import {{.PackageName}}.identity.PasswordHasher;
+import {{.PackageName}}.identity.Principal;
+import {{.PackageName}}.identity.TokenCodec;
+import {{.PackageName}}.jobs.JdbcJobRepository;
+import {{.PackageName}}.jobs.Job;
+import {{.PackageName}}.jobs.JobService;
+{{- if .Tenancy}}
+import {{.PackageName}}.tenancy.JdbcTenancyRepository;
+import {{.PackageName}}.tenancy.Organization;
+import {{.PackageName}}.tenancy.TenancyService;
+{{- end}}
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Arrays;
+import java.util.UUID;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.support.TransactionTemplate;
+
+class JobAdministrationDatabaseIntegrationTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    @Timeout(45)
+    void scopesMetadataAndAtomicallyAuditsDeadJobRetry() throws SQLException {
+        String adminUrl = environment("TEST_DATABASE_URL");
+        Assumptions.assumeTrue(!adminUrl.isBlank(), "TEST_DATABASE_URL is not set");
+        String username = environment("TEST_DATABASE_USER");
+        String password = environment("TEST_DATABASE_PASSWORD");
+        String scope = "scaffold_java_jobadmin_" + UUID.randomUUID().toString().replace("-", "");
+        String applicationUrl;
+{{- if eq .Database.Engine "postgresql"}}
+        execute(adminUrl, username, password, "create schema " + scope);
+        applicationUrl = adminUrl + (adminUrl.contains("?") ? "&" : "?") + "currentSchema=" + scope;
+{{- else}}
+        execute(adminUrl, username, password, "create database `" + scope + "`");
+        applicationUrl = mysqlDatabaseUrl(adminUrl, scope);
+{{- end}}
+        try {
+            DriverManagerDataSource dataSource =
+                    new DriverManagerDataSource(applicationUrl, username, password);
+            Flyway flyway = Flyway.configure().dataSource(dataSource).load();
+            assertThat(flyway.migrate().migrationsExecuted).isEqualTo({{.MigrationCount}});
+            assertThat(flyway.migrate().migrationsExecuted).isZero();
+
+            JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+            TransactionTemplate transactions =
+                    new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+            IdentityService identity =
+                    new IdentityService(
+                            new JdbcIdentityRepository(jdbc, transactions),
+                            new PasswordHasher(),
+                            new TokenCodec());
+            identity.ensureAdmin("admin@example.com", "correct horse battery staple");
+            Principal loginActor =
+                    identity.login(
+                                    "admin@example.com",
+                                    "correct horse battery staple",
+                                    "127.0.0.1",
+                                    "integration-test")
+                            .principal();
+            String organizationId = "";
+            Principal actor = loginActor;
+{{- if .Tenancy}}
+            TenancyService tenancy =
+                    new TenancyService(new JdbcTenancyRepository(jdbc, transactions));
+            Organization organization = tenancy.create("Acme", loginActor);
+            organizationId = organization.id();
+            actor =
+                    new Principal(
+                            loginActor.userId(),
+                            loginActor.email(),
+                            loginActor.role(),
+                            loginActor.method(),
+                            organizationId);
+{{- end}}
+            Principal scopedActor = actor;
+            Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+            JobService jobs =
+                    new JobService(
+                            new JdbcJobRepository(jdbc, transactions), new ObjectMapper());
+            Job dead = jobs.enqueue(organizationId, "reports.export", "{\"secret\":true}", "dead", 0, 3);
+            jdbc.update(
+                    "update background_jobs set status = 'dead', attempts = 3, "
+                            + "last_error = 'failed', completed_at = ? where id = ?",
+                    java.sql.Timestamp.from(NOW),
+                    dead.id());
+{{- if .Tenancy}}
+            Organization other = tenancy.create("Other", loginActor);
+            Job hidden =
+                    jobs.enqueue(other.id(), "reports.export", "{\"hidden\":true}", "hidden", 0, 3);
+            jdbc.update(
+                    "update background_jobs set status = 'dead', attempts = 3 where id = ?",
+                    hidden.id());
+{{- end}}
+            Job rollback =
+                    jobs.enqueue(
+                            organizationId,
+                            "reports.export",
+                            "{\"rollback\":true}",
+                            "rollback",
+                            0,
+                            3);
+            jdbc.update(
+                    "update background_jobs set status = 'dead', attempts = 3 where id = ?",
+                    rollback.id());
+
+            JobAdministrationService service =
+                    new JobAdministrationService(
+                            new JdbcJobAdministrationRepository(jdbc, transactions), clock);
+            JobAdministrationService.Page page = service.list("dead", "", 20, scopedActor);
+            assertThat(page.items())
+                    .extracting(JobAdministrationItem::id)
+                    .containsExactlyInAnyOrder(dead.id(), rollback.id());
+            assertThat(
+                            Arrays.stream(JobAdministrationItem.class.getRecordComponents())
+                                    .map(component -> component.getName()))
+                    .doesNotContain("payloadJson", "scopeKey", "dedupeKey");
+{{- if .Tenancy}}
+            assertThatThrownBy(() -> service.retry(hidden.id(), scopedActor))
+                    .isInstanceOf(JobAdministrationException.class)
+                    .hasFieldOrPropertyWithValue(
+                            "kind", JobAdministrationException.Kind.NOT_FOUND);
+{{- end}}
+
+            Principal unknownActor =
+                    new Principal(
+                            "missing-user",
+                            "missing@example.com",
+                            "admin",
+                            "session"{{if .Tenancy}},
+                            organizationId{{end}});
+            assertThatThrownBy(() -> service.retry(rollback.id(), unknownActor))
+                    .isInstanceOf(RuntimeException.class);
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select status from background_jobs where id = ?",
+                                    String.class,
+                                    rollback.id()))
+                    .isEqualTo("dead");
+
+            JobAdministrationItem retried = service.retry(dead.id(), scopedActor);
+            assertThat(retried.status()).isEqualTo("queued");
+            assertThat(retried.attempts()).isZero();
+            assertThat(retried.lastError()).isNull();
+            assertThat(
+                            jdbc.queryForObject(
+                                    "select count(*) from audit_events "
+                                            + "where action = 'jobs:retry' and target = ?",
+                                    Integer.class,
+                                    dead.id()))
+                    .isEqualTo(1);
+            assertThatThrownBy(() -> service.retry(dead.id(), scopedActor))
+                    .isInstanceOf(JobAdministrationException.class)
+                    .hasFieldOrPropertyWithValue(
+                            "kind", JobAdministrationException.Kind.CONFLICT);
+        } finally {
+{{- if eq .Database.Engine "postgresql"}}
+            execute(adminUrl, username, password, "drop schema " + scope + " cascade");
+{{- else}}
+            execute(adminUrl, username, password, "drop database `" + scope + "`");
+{{- end}}
+        }
+    }
+
+    private static void execute(String url, String username, String password, String sql)
+            throws SQLException {
+        try (Connection connection = DriverManager.getConnection(url, username, password);
+                Statement statement = connection.createStatement()) {
+            statement.execute(sql);
+        }
+    }
+
+{{- if eq .Database.Engine "mysql"}}
+    private static String mysqlDatabaseUrl(String adminUrl, String database) {
+        int queryOffset = adminUrl.indexOf('?');
+        String query = queryOffset < 0 ? "" : adminUrl.substring(queryOffset);
+        String base = queryOffset < 0 ? adminUrl : adminUrl.substring(0, queryOffset);
+        int slash = base.lastIndexOf('/');
+        if (slash < "jdbc:mysql://".length()) {
+            throw new IllegalArgumentException("TEST_DATABASE_URL must include a trailing slash");
+        }
+        return base.substring(0, slash + 1) + database + query;
+    }
+
+{{- end}}
+    private static String environment(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
+    }
+}

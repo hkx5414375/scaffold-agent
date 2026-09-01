@@ -1,0 +1,92 @@
+package {{.PackageName}}.jobadmin;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Clock;
+import java.time.Instant;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import org.springframework.stereotype.Service;
+
+@Service
+public final class JobAdministrationService {
+
+    private static final Set<String> STATUSES =
+            Set.of("queued", "running", "succeeded", "retry", "dead");
+
+    private final JobAdministrationRepository repository;
+    private final Clock clock;
+
+    public JobAdministrationService(JobAdministrationRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    JobAdministrationService(JobAdministrationRepository repository, Clock clock) {
+        this.repository = repository;
+        this.clock = clock;
+    }
+
+    public Page list(String status, String cursor, int limit, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedStatus = status == null ? "" : status.trim();
+        String normalizedCursor = cursor == null ? "" : cursor.trim();
+        if ((!normalizedStatus.isEmpty() && !STATUSES.contains(normalizedStatus))
+                || normalizedCursor.length() > 191
+                || limit < 1
+                || limit > 100) {
+            throw invalid();
+        }
+        JobAdministrationRepository.PageResult result =
+                repository.list(
+                        organizationId, normalizedStatus, normalizedCursor, limit);
+        return new Page(result.items(), result.nextCursor());
+    }
+
+    public JobAdministrationItem retry(String id, Principal actor) {
+        String organizationId = actorScope(actor);
+        String normalizedId = id == null ? "" : id.trim();
+        if (normalizedId.isEmpty() || normalizedId.length() > 191) {
+            throw invalid();
+        }
+        Instant now = clock.instant();
+        AuditEvent audit =
+                new AuditEvent(
+                        UUID.randomUUID().toString(),
+                        actor.userId(),
+                        "jobs:retry",
+                        "succeeded",
+                        normalizedId,
+                        "",
+                        "",
+                        now);
+        return repository.retryDead(organizationId, normalizedId, now, audit);
+    }
+
+    private static String actorScope(Principal actor) {
+        if (actor == null
+                || actor.userId() == null
+                || actor.userId().isBlank(){{if .Tenancy}}
+                || actor.organizationId() == null
+                || actor.organizationId().isBlank(){{end}}) {
+            throw invalid();
+        }
+{{- if .Tenancy}}
+        return actor.organizationId().trim();
+{{- else}}
+        return "";
+{{- end}}
+    }
+
+    private static JobAdministrationException invalid() {
+        return new JobAdministrationException(
+                JobAdministrationException.Kind.INVALID,
+                "job administration input is invalid");
+    }
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    public record Page(List<JobAdministrationItem> items, String nextCursor) {}
+}

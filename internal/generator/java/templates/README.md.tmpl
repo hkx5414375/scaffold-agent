@@ -109,6 +109,19 @@ mutations. Do not cache secrets or expose a generic cache HTTP endpoint. A Redis
 repository may replace the JDBC adapter only if it preserves the same scope, size,
 expiry, miss, and bounded-cleanup semantics.
 {{end}}
+{{if .JobAdmin}}
+
+## Background job administration
+
+Administrators with `jobs:read` can inspect bounded metadata pages at
+`GET /api/v1/jobs`; `jobs:manage` permits only `POST /api/v1/jobs/{id}/retry` for
+dead jobs. The response contract never includes payloads, scope keys, or
+deduplication keys. A retry locks the scoped row, resets attempts and lease state,
+returns it to `queued`, and writes its audit event in the same transaction.
+
+Do not add payload inspection or editing, running-job takeover, unbounded listing,
+cross-tenant lookup, or direct queue-table updates to operational tooling.
+{{end}}
 {{if .Tenancy}}
 
 Authenticated users create and discover organizations through

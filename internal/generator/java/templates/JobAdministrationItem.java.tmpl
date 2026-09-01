@@ -1,0 +1,21 @@
+package {{.PackageName}}.jobadmin;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+import java.time.Instant;
+
+@JsonInclude(JsonInclude.Include.NON_NULL)
+public record JobAdministrationItem(
+        String id,
+        String organizationId,
+        String type,
+        String status,
+        int priority,
+        int attempts,
+        int maxAttempts,
+        Instant availableAt,
+        String leaseOwner,
+        Instant leaseUntil,
+        String lastError,
+        Instant createdAt,
+        Instant updatedAt,
+        Instant completedAt) {}

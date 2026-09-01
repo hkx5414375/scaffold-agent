@@ -1,0 +1,7 @@
+insert into identity_permissions (code, description) values
+    ('jobs:read', 'Inspect background job state'),
+    ('jobs:manage', 'Retry dead background jobs');
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'jobs:read'),
+    ('admin', 'jobs:manage');

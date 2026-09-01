@@ -552,6 +552,84 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
 {{- end}}
+{{- if .JobAdmin}}
+  /api/v1/jobs:
+    get:
+      operationId: listBackgroundJobs
+      x-required-permission: jobs:read
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      parameters:
+{{- if .Tenancy}}
+        - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, retry, dead]
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 191
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Bounded background job metadata page without payloads or internal keys
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAdministrationPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+  /api/v1/jobs/{id}/retry:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 191
+{{- if .Tenancy}}
+      - $ref: "#/components/parameters/OrganizationHeader"
+{{- end}}
+    post:
+      operationId: retryDeadBackgroundJob
+      x-required-permission: jobs:manage
+      security:
+        - sessionCookie: []
+        - bearerToken: []
+      responses:
+        "200":
+          description: Dead background job reset and returned to the queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobAdministrationItem"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+{{- end}}
 {{- if .Business}}
   {{.Business.RoutePath}}:
     post:
@@ -789,6 +867,74 @@ components:
           maxItems: 100
           items:
             $ref: "#/components/schemas/FileAsset"
+        next_cursor:
+          type: string
+{{- end}}
+{{- if .JobAdmin}}
+    JobAdministrationItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - type
+        - status
+        - priority
+        - attempts
+        - max_attempts
+        - available_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, retry, dead]
+        priority:
+          type: integer
+          format: int32
+        attempts:
+          type: integer
+          format: int32
+          minimum: 0
+        max_attempts:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+        available_at:
+          type: string
+          format: date-time
+        lease_owner:
+          type: string
+        lease_until:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    JobAdministrationPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/JobAdministrationItem"
         next_cursor:
           type: string
 {{- end}}

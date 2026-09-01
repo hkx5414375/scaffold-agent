@@ -1,0 +1,163 @@
+package {{.PackageName}}.jobadmin;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
+
+@Repository
+public final class JdbcJobAdministrationRepository implements JobAdministrationRepository {
+
+    private static final String COLUMNS =
+            "id, organization_id, type, status, priority, attempts, max_attempts, "
+                    + "available_at, lease_owner, lease_until, last_error, created_at, "
+                    + "updated_at, completed_at";
+
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transactionTemplate;
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP2",
+            justification = "Spring JDBC collaborators are process-scoped infrastructure dependencies")
+    public JdbcJobAdministrationRepository(
+            JdbcTemplate jdbcTemplate, TransactionTemplate transactionTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    @Override
+    public PageResult list(
+            String organizationId, String status, String cursor, int limit) {
+        StringBuilder sql =
+                new StringBuilder("select ").append(COLUMNS).append(" from background_jobs where ");
+        List<Object> arguments = new ArrayList<>();
+{{- if .Tenancy}}
+        sql.append("organization_id = ? and ");
+        arguments.add(organizationId);
+{{- end}}
+        sql.append("(? = '' or status = ?) and (? = '' or id < ?) order by id desc limit ?");
+        arguments.add(status);
+        arguments.add(status);
+        arguments.add(cursor);
+        arguments.add(cursor);
+        arguments.add(limit + 1);
+        List<JobAdministrationItem> items =
+                jdbcTemplate.query(sql.toString(), JdbcJobAdministrationRepository::mapItem, arguments.toArray());
+        String nextCursor = "";
+        if (items.size() > limit) {
+            nextCursor = items.get(limit - 1).id();
+            items = List.copyOf(items.subList(0, limit));
+        }
+        return new PageResult(List.copyOf(items), nextCursor);
+    }
+
+    @Override
+    public JobAdministrationItem retryDead(
+            String organizationId, String id, Instant now, AuditEvent auditEvent) {
+        JobAdministrationItem item =
+                transactionTemplate.execute(
+                        transaction -> retryDeadInternal(organizationId, id, now, auditEvent));
+        if (item == null) {
+            throw notFound();
+        }
+        return item;
+    }
+
+    private JobAdministrationItem retryDeadInternal(
+            String organizationId, String id, Instant now, AuditEvent auditEvent) {
+        List<String> statuses =
+                jdbcTemplate.query(
+                        "select status from background_jobs where id = ?"
+                                + {{if .Tenancy}}" and organization_id = ?" +{{end}} " for update",
+                        (resultSet, rowNumber) -> resultSet.getString("status"),
+                        {{if .Tenancy}}new Object[] {id, organizationId}{{else}}new Object[] {id}{{end}});
+        if (statuses.isEmpty()) {
+            throw notFound();
+        }
+        if (!"dead".equals(statuses.getFirst())) {
+            throw new JobAdministrationException(
+                    JobAdministrationException.Kind.CONFLICT,
+                    "only dead background jobs can be retried");
+        }
+        int updated =
+                jdbcTemplate.update(
+                        "update background_jobs set status = 'queued', attempts = 0, "
+                                + "available_at = ?, lease_owner = null, lease_until = null, "
+                                + "last_error = null, completed_at = null, updated_at = ? "
+                                + "where id = ?"{{if .Tenancy}} + " and organization_id = ?"{{end}},
+                        {{if .Tenancy}}new Object[] {Timestamp.from(now), Timestamp.from(now), id, organizationId}{{else}}new Object[] {Timestamp.from(now), Timestamp.from(now), id}{{end}});
+        if (updated != 1) {
+            throw notFound();
+        }
+        appendAudit(auditEvent);
+        return one(organizationId, id);
+    }
+
+    private JobAdministrationItem one(String organizationId, String id) {
+        List<JobAdministrationItem> items =
+                jdbcTemplate.query(
+                        "select " + COLUMNS + " from background_jobs where id = ?"
+                                {{if .Tenancy}}+ " and organization_id = ?"{{end}},
+                        JdbcJobAdministrationRepository::mapItem,
+                        {{if .Tenancy}}new Object[] {id, organizationId}{{else}}new Object[] {id}{{end}});
+        if (items.isEmpty()) {
+            throw notFound();
+        }
+        return items.getFirst();
+    }
+
+    private void appendAudit(AuditEvent event) {
+        jdbcTemplate.update(
+                "insert into audit_events "
+                        + "(id, user_id, action, outcome, target, ip_address, user_agent, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?, ?)",
+                event.id(),
+                event.userId(),
+                event.action(),
+                event.outcome(),
+                emptyToNull(event.target()),
+                emptyToNull(event.ipAddress()),
+                emptyToNull(event.userAgent()),
+                Timestamp.from(event.createdAt()));
+    }
+
+    private static JobAdministrationItem mapItem(ResultSet resultSet, int rowNumber)
+            throws SQLException {
+        return new JobAdministrationItem(
+                resultSet.getString("id"),
+                resultSet.getString("organization_id"),
+                resultSet.getString("type"),
+                resultSet.getString("status"),
+                resultSet.getInt("priority"),
+                resultSet.getInt("attempts"),
+                resultSet.getInt("max_attempts"),
+                resultSet.getTimestamp("available_at").toInstant(),
+                resultSet.getString("lease_owner"),
+                instant(resultSet.getTimestamp("lease_until")),
+                resultSet.getString("last_error"),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant(),
+                instant(resultSet.getTimestamp("completed_at")));
+    }
+
+    private static Instant instant(Timestamp value) {
+        return value == null ? null : value.toInstant();
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    private static JobAdministrationException notFound() {
+        return new JobAdministrationException(
+                JobAdministrationException.Kind.NOT_FOUND,
+                "background job was not found");
+    }
+}

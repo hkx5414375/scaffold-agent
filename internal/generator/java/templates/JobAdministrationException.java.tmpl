@@ -1,0 +1,21 @@
+package {{.PackageName}}.jobadmin;
+
+public final class JobAdministrationException extends RuntimeException {
+
+    public enum Kind {
+        INVALID,
+        NOT_FOUND,
+        CONFLICT
+    }
+
+    private final Kind kind;
+
+    public JobAdministrationException(Kind kind, String message) {
+        super(message);
+        this.kind = kind;
+    }
+
+    public Kind kind() {
+        return kind;
+    }
+}

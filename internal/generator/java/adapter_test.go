@@ -645,6 +645,64 @@ func TestGenerateTenantScopedApplicationCache(t *testing.T) {
 	}
 }
 
+func TestGenerateJobAdministrationForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{{
+				Name: jobAdminOwner, Version: jobAdminVersion,
+			}}
+			result, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if len(result.Outputs) != 51 ||
+				result.CapabilityLock[jobAdminOwner] != jobAdminVersion ||
+				result.CapabilityLock[jobsOwner] != jobsVersion {
+				t.Fatalf("Generate() result = %#v", result)
+			}
+			for _, path := range []string{
+				"src/main/java/com/scaffold/generated/demoservice/jobadmin/JobAdministrationItem.java",
+				"src/main/java/com/scaffold/generated/demoservice/jobadmin/JdbcJobAdministrationRepository.java",
+				"src/main/java/com/scaffold/generated/demoservice/jobadmin/JobAdministrationController.java",
+				"src/test/java/com/scaffold/generated/demoservice/jobadmin/JobAdministrationDatabaseIntegrationTest.java",
+				"src/main/resources/db/migration/V000230__job_administration.sql",
+			} {
+				if outputContent(result, path) == nil || outputOwner(result, path) != jobAdminOwner {
+					t.Errorf("Generate() job administration output %s is missing or has the wrong owner", path)
+				}
+			}
+			item := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/jobadmin/JobAdministrationItem.java"))
+			if strings.Contains(item, "payload") || strings.Contains(item, "scopeKey") ||
+				strings.Contains(item, "dedupeKey") {
+				t.Fatalf("generated administration DTO exposes private job data:\n%s", item)
+			}
+			migration := string(outputContent(
+				result, "src/main/resources/db/migration/V000230__job_administration.sql",
+			))
+			if !strings.Contains(migration, "jobs:read") ||
+				!strings.Contains(migration, "jobs:manage") {
+				t.Fatalf("generated job administration permissions are incomplete:\n%s", migration)
+			}
+			openAPI := string(outputContent(result, "api/openapi.yaml"))
+			var contract map[string]any
+			if err := yaml.Unmarshal([]byte(openAPI), &contract); err != nil {
+				t.Fatalf("generated job administration OpenAPI is not valid YAML: %v\n%s", err, openAPI)
+			}
+			if !strings.Contains(openAPI, "/api/v1/jobs/{id}/retry:") ||
+				strings.Contains(openAPI, "payload_json") || strings.Contains(openAPI, "dedupe_key") {
+				t.Fatalf("generated job administration contract is unsafe:\n%s", openAPI)
+			}
+		})
+	}
+}
+
 func TestGeneratePortableBusinessCRUD(t *testing.T) {
 	t.Parallel()
 

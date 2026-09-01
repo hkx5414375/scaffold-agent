@@ -1,0 +1,19 @@
+package {{.PackageName}}.jobadmin;
+
+import {{.PackageName}}.identity.AuditEvent;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Instant;
+import java.util.List;
+
+public interface JobAdministrationRepository {
+
+    PageResult list(String organizationId, String status, String cursor, int limit);
+
+    JobAdministrationItem retryDead(
+            String organizationId, String id, Instant now, AuditEvent auditEvent);
+
+    @SuppressFBWarnings(
+            value = "EI_EXPOSE_REP",
+            justification = "Page lists are immutable snapshots created by the repository")
+    record PageResult(List<JobAdministrationItem> items, String nextCursor) {}
+}

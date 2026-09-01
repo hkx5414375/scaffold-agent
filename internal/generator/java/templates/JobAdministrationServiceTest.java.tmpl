@@ -1,0 +1,121 @@
+package {{.PackageName}}.jobadmin;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import {{.PackageName}}.identity.AuditEvent;
+import {{.PackageName}}.identity.Principal;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class JobAdministrationServiceTest {
+
+    private static final Instant NOW = Instant.parse("2026-09-01T00:00:00Z");
+
+    @Test
+    void listsOnlySafeMetadataAndRetriesDeadJob() {
+        FakeRepository repository = new FakeRepository();
+        JobAdministrationService service =
+                new JobAdministrationService(
+                        repository, Clock.fixed(NOW, ZoneOffset.UTC));
+        Principal actor = actor();
+
+        JobAdministrationService.Page page = service.list("dead", "", 20, actor);
+        JobAdministrationItem retried = service.retry("job-1", actor);
+
+        assertThat(page.items()).containsExactly(repository.original);
+        assertThat(repository.organizationId)
+                .isEqualTo({{if .Tenancy}}"organization-1"{{else}}""{{end}});
+        assertThat(repository.status).isEqualTo("dead");
+        assertThat(retried.status()).isEqualTo("queued");
+        assertThat(retried.attempts()).isZero();
+        assertThat(repository.auditEvent.action()).isEqualTo("jobs:retry");
+        assertThat(repository.auditEvent.target()).isEqualTo("job-1");
+    }
+
+    @Test
+    void rejectsUnsafeFiltersAndIdentifiers() {
+        JobAdministrationService service =
+                new JobAdministrationService(
+                        new FakeRepository(), Clock.fixed(NOW, ZoneOffset.UTC));
+
+        assertInvalid(() -> service.list("unknown", "", 20, actor()));
+        assertInvalid(() -> service.list("", "", 101, actor()));
+        assertInvalid(() -> service.retry("", actor()));
+    }
+
+    private static void assertInvalid(Runnable operation) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(JobAdministrationException.class)
+                .hasFieldOrPropertyWithValue(
+                        "kind", JobAdministrationException.Kind.INVALID);
+    }
+
+    private static Principal actor() {
+        return new Principal(
+                "admin-1",
+                "admin@example.com",
+                "admin",
+                "session"{{if .Tenancy}},
+                "organization-1"{{end}});
+    }
+
+    private static final class FakeRepository implements JobAdministrationRepository {
+
+        private final JobAdministrationItem original =
+                new JobAdministrationItem(
+                        "job-1",
+                        {{if .Tenancy}}"organization-1"{{else}}null{{end}},
+                        "reports.export",
+                        "dead",
+                        10,
+                        8,
+                        8,
+                        NOW,
+                        null,
+                        null,
+                        "failed",
+                        NOW,
+                        NOW,
+                        NOW);
+        private String organizationId;
+        private String status;
+        private AuditEvent auditEvent;
+
+        @Override
+        public PageResult list(
+                String scopedOrganizationId, String scopedStatus, String cursor, int limit) {
+            organizationId = scopedOrganizationId;
+            status = scopedStatus;
+            return new PageResult(List.of(original), "");
+        }
+
+        @Override
+        public JobAdministrationItem retryDead(
+                String scopedOrganizationId,
+                String id,
+                Instant now,
+                AuditEvent audit) {
+            organizationId = scopedOrganizationId;
+            auditEvent = audit;
+            return new JobAdministrationItem(
+                    original.id(),
+                    original.organizationId(),
+                    original.type(),
+                    "queued",
+                    original.priority(),
+                    0,
+                    original.maxAttempts(),
+                    now,
+                    null,
+                    null,
+                    null,
+                    original.createdAt(),
+                    now,
+                    null);
+        }
+    }
+}
