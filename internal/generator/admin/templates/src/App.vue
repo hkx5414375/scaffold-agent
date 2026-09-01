@@ -30,6 +30,9 @@ import CRMView from "./views/CRMView.vue";
 {{- if .Inventory}}
 import InventoryView from "./views/InventoryView.vue";
 {{- end}}
+{{- if .Commerce}}
+import CommerceView from "./views/CommerceView.vue";
+{{- end}}
 {{- if .Business}}
 import BusinessView from "./views/BusinessView.vue";
 {{- else}}
@@ -259,9 +262,22 @@ async function acceptInvitation(): Promise<void> {
           <InventoryView :key="session.currentOrganizationId" />
         </el-tab-pane>
 {{- end}}
+{{- if .Commerce}}
+{{- if .TenancyLifecycle}}
+        <el-tab-pane
+          label="Commerce"
+          name="commerce"
+          :disabled="session.currentOrganization?.status !== 'active'"
+        >
+{{- else}}
+        <el-tab-pane label="Commerce" name="commerce">
+{{- end}}
+          <CommerceView :key="session.currentOrganizationId" />
+        </el-tab-pane>
+{{- end}}
       </el-tabs>
 {{- else}}
-{{- if or .Files .JobAdmin .Approvals .Catalog .CustomerAccounts .CRM .Inventory}}
+{{- if or .Files .JobAdmin .Approvals .Catalog .CustomerAccounts .CRM .Inventory .Commerce}}
 {{- if .Tenancy}}
       <el-tabs v-else class="workspace-tabs">
 {{- else}}
@@ -309,6 +325,11 @@ async function acceptInvitation(): Promise<void> {
 {{- if .Inventory}}
         <el-tab-pane label="Inventory" name="inventory">
           <InventoryView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
+        </el-tab-pane>
+{{- end}}
+{{- if .Commerce}}
+        <el-tab-pane label="Commerce" name="commerce">
+          <CommerceView{{if .Tenancy}} :key="session.currentOrganizationId"{{end}} />
         </el-tab-pane>
 {{- end}}
       </el-tabs>

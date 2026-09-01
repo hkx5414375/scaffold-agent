@@ -45,6 +45,11 @@ import (
 	"{{.ModulePath}}/internal/inventory"
 	inventorypostgres "{{.ModulePath}}/internal/inventory/postgres"
 	{{- end}}
+	{{- if .Commerce}}
+	"{{.ModulePath}}/internal/commerce"
+	commercepostgres "{{.ModulePath}}/internal/commerce/postgres"
+	"{{.ModulePath}}/internal/commerce/sandbox"
+	{{- end}}
 	"{{.ModulePath}}/internal/identity"
 	identitypostgres "{{.ModulePath}}/internal/identity/postgres"
 	{{- if .Cache}}
@@ -461,6 +466,53 @@ func TestPostgreSQLMigrationsAndStores(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select count(*) from audit_events where target = $1 and action like 'customer%'`, customer.ID).Scan(&customerAuditCount); err != nil || customerAuditCount < 5 {
 		t.Fatalf("customer audit count = %d, %v, want at least 5", customerAuditCount, err)
 	}
+{{- end}}
+
+{{- if .Commerce}}
+	for _, permission := range []string{"commerce:orders:read", "commerce:fulfillment:manage", "commerce:marketing:manage", "commerce:payments:manage"} {
+		allowed, err := identityStore.HasPermission(ctx, "admin", permission)
+		if err != nil || !allowed { t.Fatalf("HasPermission(admin, %s) = %t, %v", permission, allowed, err) }
+		allowed, err = identityStore.HasPermission(ctx, "user", permission)
+		if err != nil || allowed { t.Fatalf("HasPermission(user, %s) = %t, %v, want denied", permission, allowed, err) }
+	}
+	commerceProduct, err := catalogService.Create(ctx, catalog.WriteInput{SKU:"COMMERCE-1",Name:"Commerce product",PriceMinor:1399,Currency:"USD"}, catalogActor)
+	if err != nil { t.Fatalf("commerce catalog Create() error = %v", err) }
+	commerceProduct, err = catalogService.Publish(ctx, commerceProduct.ID, catalog.TransitionInput{Version:commerceProduct.Version}, catalogActor)
+	if err != nil { t.Fatalf("commerce catalog Publish() error = %v", err) }
+	commerceStore := commercepostgres.New(pool)
+	commerceGateway := sandbox.New()
+	commerceService := commerce.NewService(commerceStore, catalogService, commerceGateway)
+	commerceActor := identity.Principal{UserID:user.ID,Email:user.Email,Role:"admin",OrganizationID:organizationID}
+	campaign, err := commerceService.CreateCampaign(ctx, commerce.CampaignInput{Name:"Integration promotion",Kind:commerce.DiscountPercent,Value:1000,MinimumMinor:1000,Currency:"USD",Priority:10,CouponRequired:true,StartsAt:now.Add(-time.Hour),EndsAt:now.Add(time.Hour)}, commerceActor)
+	if err != nil { t.Fatalf("commerce CreateCampaign() error = %v", err) }
+	campaign, err = commerceService.ActivateCampaign(ctx, campaign.ID, commerce.TransitionInput{Version:campaign.Version}, commerceActor)
+	if err != nil || campaign.Status != commerce.CampaignActive { t.Fatalf("commerce ActivateCampaign() = %#v, %v", campaign, err) }
+	if _, err := commerceService.CreateCoupon(ctx, commerce.CouponInput{CampaignID:campaign.ID,Code:"SAVE10",MaximumUses:2}, commerceActor); err != nil { t.Fatalf("commerce CreateCoupon() error = %v", err) }
+	cart, err := commerceService.PutLine(ctx, customer, commerceProduct.ID, commerce.LineInput{Currency:"USD",Quantity:2,Version:0})
+	if err != nil || cart.SubtotalMinor != 2798 || cart.Version != 1 { t.Fatalf("commerce PutLine() = %#v, %v", cart, err) }
+	checkoutInput := commerce.CheckoutInput{Currency:"USD",CouponCode:"SAVE10",IdempotencyKey:"checkout-integration",Version:cart.Version}
+	order, err := commerceService.Checkout(ctx, customer, checkoutInput)
+	if err != nil || order.DiscountMinor != 279 || order.TotalMinor != 2519 || order.Status != commerce.OrderPendingPayment { t.Fatalf("commerce Checkout() = %#v, %v", order, err) }
+	checkoutReplay, err := commerceService.Checkout(ctx, customer, checkoutInput)
+	if err != nil || !reflect.DeepEqual(checkoutReplay, order) { t.Fatalf("commerce Checkout(replay) = %#v, %v, want %#v", checkoutReplay, err, order) }
+	if err := commerceGateway.Complete(order.Payment.ProviderRef, commerce.PaymentSucceeded); err != nil { t.Fatalf("sandbox Complete() error = %v", err) }
+	paid, err := commerceService.CompletePayment(ctx, order.Payment.ProviderRef, commerce.PaymentEventInput{EventID:"payment-event-1",Status:commerce.PaymentSucceeded})
+	if err != nil || paid.Status != commerce.OrderConfirmed { t.Fatalf("commerce CompletePayment() = %#v, %v", paid, err) }
+	paidReplay, err := commerceService.CompletePayment(ctx, order.Payment.ProviderRef, commerce.PaymentEventInput{EventID:"payment-event-1",Status:commerce.PaymentSucceeded})
+	if err != nil || !reflect.DeepEqual(paidReplay, paid) { t.Fatalf("commerce CompletePayment(replay) = %#v, %v", paidReplay, err) }
+	refunded, err := commerceService.Refund(ctx, order.ID, commerce.RefundInput{AmountMinor:100,IdempotencyKey:"refund-1"}, commerceActor)
+	if err != nil || refunded.Payment.RefundedMinor != 100 { t.Fatalf("commerce Refund() = %#v, %v", refunded, err) }
+	refundReplay, err := commerceService.Refund(ctx, order.ID, commerce.RefundInput{AmountMinor:100,IdempotencyKey:"refund-1"}, commerceActor)
+	if err != nil || refundReplay.Payment.RefundedMinor != 100 { t.Fatalf("commerce Refund(replay) = %#v, %v", refundReplay, err) }
+	fulfilling, err := commerceService.StartFulfillment(ctx, order.ID, commerce.TransitionInput{Version:refunded.Version}, commerceActor)
+	if err != nil { t.Fatalf("commerce StartFulfillment() error = %v", err) }
+	fulfilled, err := commerceService.CompleteFulfillment(ctx, order.ID, commerce.TransitionInput{Version:fulfilling.Version,Reference:"TRACK-1"}, commerceActor)
+	if err != nil || fulfilled.Status != commerce.OrderFulfilled { t.Fatalf("commerce CompleteFulfillment() = %#v, %v", fulfilled, err) }
+	returnRequested, err := commerceService.RequestReturn(ctx, customer, order.ID, commerce.ReturnInput{Version:fulfilled.Version,Reason:"Damaged"})
+	if err != nil || returnRequested.Status != commerce.OrderReturnRequested { t.Fatalf("commerce RequestReturn() = %#v, %v", returnRequested, err) }
+	returned, err := commerceService.CompleteReturn(ctx, order.ID, commerce.TransitionInput{Version:returnRequested.Version}, commerceActor)
+	if err != nil || returned.Status != commerce.OrderReturned { t.Fatalf("commerce CompleteReturn() = %#v, %v", returned, err) }
+	if _, err := commerceStore.GetOrder(ctx, "different-organization", "", order.ID); !errors.Is(err, commerce.ErrNotFound) { t.Fatalf("commerce GetOrder(cross-tenant) error = %v", err) }
 {{- end}}
 
 {{- if .CRM}}

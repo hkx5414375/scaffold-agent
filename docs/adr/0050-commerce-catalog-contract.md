@@ -1,6 +1,6 @@
 # ADR 0050: Portable commerce catalog contract
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-01
 
 ## Context
@@ -36,5 +36,5 @@ optimistic concurrency, tenancy, and audit boundaries.
   conventions an agent must infer.
 - Inventory availability, price lists, variants, media, tax, search, and channel
   host mapping remain separate composable capabilities.
-- The ADR becomes Accepted only after Go, Java, Python, PostgreSQL, MySQL, shared
-  Vue administration, and Nuxt public catalog conformance gates pass.
+- Go, Java, Python, PostgreSQL, MySQL, shared Vue administration, and Nuxt public
+  catalog conformance gates now protect this contract.

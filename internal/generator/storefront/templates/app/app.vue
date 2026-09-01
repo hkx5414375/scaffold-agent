@@ -9,7 +9,9 @@
       <nav aria-label="Primary navigation">
         <NuxtLink to="/">Home</NuxtLink>[[if .Catalog]]
         <NuxtLink to="/products">Products</NuxtLink>[[end]][[if .CustomerAccounts]]
-        <NuxtLink to="/account">Account</NuxtLink>[[end]]
+        <NuxtLink to="/account">Account</NuxtLink>[[end]][[if .Commerce]]
+        <NuxtLink to="/cart">Cart</NuxtLink>
+        <NuxtLink to="/account/orders">Orders</NuxtLink>[[end]]
       </nav>
     </header>
     <main>

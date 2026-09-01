@@ -59,6 +59,8 @@ const (
 	crmVersion              = "0.1.0"
 	inventoryCapability     = "erp-inventory"
 	inventoryVersion        = "0.1.0"
+	commerceCapability      = "commerce-operations"
+	commerceVersion         = "0.1.0"
 )
 
 //go:embed all:templates
@@ -139,6 +141,9 @@ type databaseTemplateSet struct {
 	InventoryStorePath                string
 	InventoryStoreTemplate            string
 	InventoryMigrationTemplate        string
+	CommerceStorePath                 string
+	CommerceStoreTemplate             string
+	CommerceMigrationTemplate         string
 }
 
 var databaseTemplates = map[string]databaseTemplateSet{
@@ -196,6 +201,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		InventoryStorePath:                "internal/inventory/postgres/store.go",
 		InventoryStoreTemplate:            "templates/inventory_postgres_store.go.tmpl",
 		InventoryMigrationTemplate:        "templates/inventory_postgres.sql.tmpl",
+		CommerceStorePath:                 "internal/commerce/postgres/store.go",
+		CommerceStoreTemplate:             "templates/commerce_postgres_store.go.tmpl",
+		CommerceMigrationTemplate:         "templates/commerce_postgres.sql.tmpl",
 	},
 	"mysql": {
 		Data: databaseData{Engine: "mysql", DisplayName: "MySQL", PackageName: "mysql"},
@@ -252,6 +260,9 @@ var databaseTemplates = map[string]databaseTemplateSet{
 		InventoryStorePath:                "internal/inventory/mysql/store.go",
 		InventoryStoreTemplate:            "templates/inventory_mysql_store.go.tmpl",
 		InventoryMigrationTemplate:        "templates/inventory_mysql.sql.tmpl",
+		CommerceStorePath:                 "internal/commerce/mysql/store.go",
+		CommerceStoreTemplate:             "templates/commerce_mysql_store.go.tmpl",
+		CommerceMigrationTemplate:         "templates/commerce_mysql.sql.tmpl",
 	},
 }
 
@@ -408,6 +419,20 @@ var goCapabilityCatalog = capability.NewCatalog(
 			Databases:   []string{"postgresql", "mysql"},
 		},
 	},
+	spec.CapabilityPack{
+		APIVersion: spec.APIVersionV1Alpha1,
+		Kind:       spec.KindCapabilityPack,
+		Metadata:   spec.Metadata{Name: commerceCapability, Version: commerceVersion},
+		Spec: spec.CapabilityPackSpec{
+			Description: "Portable pricing, carts, checkout, orders, promotions, fulfillment, returns, and payments",
+			Requires: []spec.PackDependency{
+				{Name: catalogCapability, Constraint: "^0.1.0"},
+				{Name: customerCapability, Constraint: "^0.1.0"},
+			},
+			Backends:  []string{"go"},
+			Databases: []string{"postgresql", "mysql"},
+		},
+	},
 )
 
 var tenancyTemplates = map[string]string{
@@ -517,6 +542,13 @@ var inventoryTemplates = map[string]string{
 	"internal/inventory/httpapi/handler_test.go": "templates/inventory_handler_test.go.tmpl",
 }
 
+var commerceTemplates = map[string]string{
+	"internal/commerce/commerce.go":        "templates/commerce.go.tmpl",
+	"internal/commerce/commerce_test.go":   "templates/commerce_test.go.tmpl",
+	"internal/commerce/httpapi/handler.go": "templates/commerce_handler.go.tmpl",
+	"internal/commerce/sandbox/gateway.go": "templates/commerce_sandbox.go.tmpl",
+}
+
 // Adapter generates the Go base service.
 type Adapter struct{}
 
@@ -572,6 +604,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	customerEnabled := false
 	crmEnabled := false
 	inventoryEnabled := false
+	commerceEnabled := false
 	for _, selection := range project.Spec.Capabilities {
 		if len(selection.Config) > 0 {
 			return generator.Result{}, fmt.Errorf("Go capability %q does not accept configuration in this version", selection.Name)
@@ -619,6 +652,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		if pack.Metadata.Name == inventoryCapability {
 			inventoryEnabled = true
 		}
+		if pack.Metadata.Name == commerceCapability {
+			commerceEnabled = true
+		}
 	}
 	if catalogEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("commerce-catalog with organization-tenancy requires organization-tenancy 0.3.0")
@@ -631,6 +667,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 	}
 	if inventoryEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
 		return generator.Result{}, errors.New("erp-inventory with organization-tenancy requires organization-tenancy 0.3.0")
+	}
+	if commerceEnabled && tenancyEnabled && !tenancyLifecycleEnabled {
+		return generator.Result{}, errors.New("commerce-operations with organization-tenancy requires organization-tenancy 0.3.0")
 	}
 	business, err := buildBusinessData(project.Spec.Modules, database.Data.Engine, approvalsEnabled)
 	if err != nil {
@@ -663,6 +702,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		CustomerAccounts: customerEnabled,
 		CRM:              crmEnabled,
 		Inventory:        inventoryEnabled,
+		Commerce:         commerceEnabled,
 	}
 	data.MigrationCount = 1
 	if business != nil {
@@ -705,6 +745,9 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 		data.MigrationCount++
 	}
 	if inventoryEnabled {
+		data.MigrationCount++
+	}
+	if commerceEnabled {
 		data.MigrationCount++
 	}
 	targets := make(map[string]renderTarget, len(outputTemplates)+len(businessTemplates)+len(storefrontui.BaseTemplates)+1)
@@ -988,6 +1031,26 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			}
 		}
 	}
+	if commerceEnabled {
+		for path, templatePath := range commerceTemplates {
+			targets[path] = renderTarget{TemplatePath: templatePath, Owner: commerceCapability}
+		}
+		targets[database.CommerceStorePath] = renderTarget{TemplatePath: database.CommerceStoreTemplate, Owner: commerceCapability}
+		targets["internal/platform/migrate/migrations/000300_commerce_operations.sql"] = renderTarget{TemplatePath: database.CommerceMigrationTemplate, Owner: commerceCapability}
+		if adminEnabled {
+			targets["web/admin/src/views/CommerceView.vue"] = renderTarget{
+				TemplatePath: "templates/src/views/CommerceView.vue.tmpl",
+				Owner:        commerceCapability,
+				SharedAdmin:  true,
+			}
+		}
+		if storefrontEnabled {
+			for path, templatePath := range storefrontui.CommerceTemplates {
+				targets[path] = renderTarget{TemplatePath: templatePath, Owner: commerceCapability, SharedStorefront: true}
+			}
+		}
+		capabilityLock[commerceCapability] = commerceVersion
+	}
 	paths := make([]string, 0, len(targets))
 	for path := range targets {
 		paths = append(paths, path)
@@ -1007,6 +1070,7 @@ func (Adapter) Generate(ctx context.Context, project spec.Project) (generator.Re
 			storefrontData := storefrontui.NewData(project.Metadata.Name, project.Metadata.DisplayName)
 			storefrontData.Catalog = catalogEnabled
 			storefrontData.CustomerAccounts = customerEnabled
+			storefrontData.Commerce = commerceEnabled
 			storefrontData.Tenancy = tenancyEnabled
 			content, err = storefrontui.Render(
 				target.TemplatePath,
@@ -1074,6 +1138,7 @@ type templateData struct {
 	CustomerAccounts bool
 	CRM              bool
 	Inventory        bool
+	Commerce         bool
 	MigrationCount   int
 }
 

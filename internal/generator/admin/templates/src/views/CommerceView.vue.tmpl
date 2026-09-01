@@ -1,0 +1,282 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { onMounted, reactive, ref } from "vue";
+
+import { ApiError, request } from "../api/client";
+import type { CommerceCampaign, CommerceDiscountKind, CommerceOrder, CommercePage } from "../types";
+
+const orders = ref<CommerceOrder[]>([]);
+const campaigns = ref<CommerceCampaign[]>([]);
+const loading = ref(false);
+const campaignDialog = ref(false);
+const now = new Date();
+const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+const campaign = reactive({
+  name: "",
+  kind: "percent" as CommerceDiscountKind,
+  value: "1000",
+  minimum_minor: "0",
+  currency: "USD",
+  priority: 0,
+  coupon_required: false,
+  starts_at: now.toISOString().slice(0, 16),
+  ends_at: tomorrow.toISOString().slice(0, 16),
+});
+
+onMounted(() => load());
+
+async function load(): Promise<void> {
+  loading.value = true;
+  try {
+    const [orderPage, campaignPage] = await Promise.all([
+      request<CommercePage<CommerceOrder>>("/api/v1/commerce/orders?limit=100"),
+      request<CommercePage<CommerceCampaign>>("/api/v1/commerce/campaigns?limit=100"),
+    ]);
+    orders.value = orderPage.items;
+    campaigns.value = campaignPage.items;
+  } catch (error) {
+    showError(error, "Commerce records could not be loaded");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function transitionOrder(
+  order: CommerceOrder,
+  action: "start" | "complete" | "return",
+): Promise<void> {
+  let path = `/api/v1/commerce/orders/${order.id}/fulfillment/${action}`;
+  const payload: { version: string; reference?: string } = { version: order.version };
+  if (action === "complete") {
+    const result = await ElMessageBox.prompt(
+      "Tracking or fulfillment reference",
+      "Complete fulfillment",
+    );
+    payload.reference = result.value;
+  }
+  if (action === "return") path = `/api/v1/commerce/orders/${order.id}/return/complete`;
+  try {
+    await request<CommerceOrder>(path, { method: "POST", body: JSON.stringify(payload) });
+    ElMessage.success("Order updated");
+    await load();
+  } catch (error) {
+    showError(error, "Order could not be updated");
+  }
+}
+
+async function reconcile(order: CommerceOrder): Promise<void> {
+  try {
+    await request<CommerceOrder>(`/api/v1/commerce/orders/${order.id}/reconcile`, {
+      method: "POST",
+    });
+    ElMessage.success("Payment reconciled");
+    await load();
+  } catch (error) {
+    showError(error, "Payment could not be reconciled");
+  }
+}
+
+async function refund(order: CommerceOrder): Promise<void> {
+  const result = await ElMessageBox.prompt("Refund amount in minor units", "Refund payment");
+  try {
+    await request<CommerceOrder>(`/api/v1/commerce/orders/${order.id}/refund`, {
+      method: "POST",
+      body: JSON.stringify({
+        amount_minor: result.value,
+        idempotency_key: globalThis.crypto.randomUUID(),
+      }),
+    });
+    ElMessage.success("Refund recorded");
+    await load();
+  } catch (error) {
+    showError(error, "Refund could not be completed");
+  }
+}
+
+async function createCampaign(): Promise<void> {
+  try {
+    await request<CommerceCampaign>("/api/v1/commerce/campaigns", {
+      method: "POST",
+      body: JSON.stringify({
+        ...campaign,
+        starts_at: new Date(campaign.starts_at).toISOString(),
+        ends_at: new Date(campaign.ends_at).toISOString(),
+      }),
+    });
+    campaignDialog.value = false;
+    ElMessage.success("Draft campaign created");
+    await load();
+  } catch (error) {
+    showError(error, "Campaign could not be created");
+  }
+}
+
+async function transitionCampaign(
+  value: CommerceCampaign,
+  action: "activate" | "archive",
+): Promise<void> {
+  try {
+    await request<CommerceCampaign>(`/api/v1/commerce/campaigns/${value.id}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ version: value.version }),
+    });
+    ElMessage.success(`Campaign ${action}d`);
+    await load();
+  } catch (error) {
+    showError(error, "Campaign could not be updated");
+  }
+}
+
+async function createCoupon(value: CommerceCampaign): Promise<void> {
+  const code = await ElMessageBox.prompt("Coupon code", "Create coupon");
+  const uses = await ElMessageBox.prompt("Maximum redemptions", "Create coupon", {
+    inputValue: "100",
+  });
+  try {
+    await request("/api/v1/commerce/coupons", {
+      method: "POST",
+      body: JSON.stringify({ campaign_id: value.id, code: code.value, maximum_uses: uses.value }),
+    });
+    ElMessage.success("Coupon created");
+  } catch (error) {
+    showError(error, "Coupon could not be created");
+  }
+}
+
+function showError(error: unknown, fallback: string): void {
+  ElMessage.error(error instanceof ApiError ? error.message : fallback);
+}
+</script>
+
+<template>
+  <section v-loading="loading">
+    <div class="page-heading">
+      <div>
+        <h1>Commerce operations</h1>
+        <p class="muted">Orders, fulfillment, returns, promotions, and payment actions.</p>
+      </div>
+      <el-button @click="load">Refresh</el-button>
+    </div>
+    <el-tabs>
+      <el-tab-pane label="Orders">
+        <el-table :data="orders" empty-text="No orders">
+          <el-table-column prop="id" label="Order" min-width="190" />
+          <el-table-column prop="status" label="Status" width="150" />
+          <el-table-column label="Total" width="130">
+            <template #default="scope">
+              <span v-text="`${scope.row.total_minor} ${scope.row.currency}`"></span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Payment" width="140">
+            <template #default="scope">
+              <span v-text="scope.row.payment.status"></span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Actions" min-width="330"
+            ><template #default="scope">
+              <el-button
+                v-if="scope.row.status === 'confirmed'"
+                link
+                type="primary"
+                @click="transitionOrder(scope.row, 'start')"
+                >Start fulfillment</el-button
+              >
+              <el-button
+                v-if="scope.row.status === 'fulfilling'"
+                link
+                type="primary"
+                @click="transitionOrder(scope.row, 'complete')"
+                >Complete</el-button
+              >
+              <el-button
+                v-if="scope.row.status === 'return_requested'"
+                link
+                type="primary"
+                @click="transitionOrder(scope.row, 'return')"
+                >Complete return</el-button
+              >
+              <el-button
+                v-if="scope.row.payment.status === 'requires_action'"
+                link
+                @click="reconcile(scope.row)"
+                >Reconcile</el-button
+              >
+              <el-button
+                v-if="scope.row.payment.status === 'succeeded'"
+                link
+                type="warning"
+                @click="refund(scope.row)"
+                >Refund</el-button
+              >
+            </template></el-table-column
+          >
+        </el-table>
+      </el-tab-pane>
+      <el-tab-pane label="Campaigns">
+        <div class="toolbar">
+          <el-button type="primary" @click="campaignDialog = true">New campaign</el-button>
+        </div>
+        <el-table :data="campaigns" empty-text="No campaigns">
+          <el-table-column prop="name" label="Campaign" min-width="180" />
+          <el-table-column prop="kind" label="Kind" width="100" />
+          <el-table-column prop="value" label="Value" width="110" />
+          <el-table-column prop="status" label="Status" width="110" />
+          <el-table-column label="Actions" min-width="230"
+            ><template #default="scope">
+              <el-button
+                v-if="scope.row.status === 'draft'"
+                link
+                type="primary"
+                @click="transitionCampaign(scope.row, 'activate')"
+                >Activate</el-button
+              >
+              <el-button
+                v-if="scope.row.status === 'active'"
+                link
+                type="warning"
+                @click="transitionCampaign(scope.row, 'archive')"
+                >Archive</el-button
+              >
+              <el-button v-if="scope.row.coupon_required" link @click="createCoupon(scope.row)"
+                >Create coupon</el-button
+              >
+            </template></el-table-column
+          >
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
+    <el-dialog v-model="campaignDialog" title="New campaign" width="560px">
+      <el-form label-position="top">
+        <el-form-item label="Name"
+          ><el-input v-model="campaign.name" maxlength="160"
+        /></el-form-item>
+        <el-form-item label="Discount"
+          ><el-select v-model="campaign.kind"
+            ><el-option label="Percent (basis points)" value="percent" /><el-option
+              label="Fixed minor units"
+              value="fixed" /></el-select
+          ><el-input v-model="campaign.value"
+        /></el-form-item>
+        <el-form-item label="Minimum / currency"
+          ><el-input v-model="campaign.minimum_minor" /><el-input
+            v-model="campaign.currency"
+            maxlength="3"
+        /></el-form-item>
+        <el-form-item label="Starts / ends"
+          ><el-input v-model="campaign.starts_at" type="datetime-local" /><el-input
+            v-model="campaign.ends_at"
+            type="datetime-local"
+        /></el-form-item>
+        <el-form-item
+          ><el-checkbox v-model="campaign.coupon_required"
+            >Coupon required</el-checkbox
+          ></el-form-item
+        >
+      </el-form>
+      <template #footer
+        ><el-button @click="campaignDialog = false">Cancel</el-button
+        ><el-button type="primary" @click="createCampaign">Create</el-button></template
+      >
+    </el-dialog>
+  </section>
+</template>

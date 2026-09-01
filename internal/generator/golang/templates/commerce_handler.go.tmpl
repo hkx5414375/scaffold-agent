@@ -1,0 +1,199 @@
+// Package httpapi exposes portable storefront and staff commerce routes.
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/commerce"
+	"{{.ModulePath}}/internal/commerce/sandbox"
+	"{{.ModulePath}}/internal/customeraccounts"
+	"{{.ModulePath}}/internal/identity"
+	identityhttp "{{.ModulePath}}/internal/identity/httpapi"
+	"{{.ModulePath}}/internal/platform/httpjson"
+)
+
+const (
+	organizationHeader = "X-Organization-ID"
+	customerCookieName = "scaffold_customer_session"
+	defaultLimit = 20
+)
+
+type Handler struct {
+	service *commerce.Service
+	customers *customeraccounts.Service
+	sandbox *sandbox.Gateway
+	sandboxEnabled bool
+}
+
+func New(service *commerce.Service, customers *customeraccounts.Service, gateway *sandbox.Gateway, sandboxEnabled bool) *Handler {
+	return &Handler{service: service, customers: customers, sandbox: gateway, sandboxEnabled: sandboxEnabled}
+}
+
+func (handler *Handler) Register(mux *http.ServeMux, security *identityhttp.Handler) {
+	mux.HandleFunc("GET /api/v1/storefront/cart", handler.customer(handler.cart))
+	mux.HandleFunc("PUT /api/v1/storefront/cart/lines/{product_id}", handler.customer(handler.putLine))
+	mux.HandleFunc("POST /api/v1/storefront/cart/lines/{product_id}/remove", handler.customer(handler.removeLine))
+	mux.HandleFunc("POST /api/v1/storefront/checkout", handler.customer(handler.checkout))
+	mux.HandleFunc("GET /api/v1/storefront/orders", handler.customer(handler.customerOrders))
+	mux.HandleFunc("GET /api/v1/storefront/orders/{id}", handler.customer(handler.customerOrder))
+	mux.HandleFunc("POST /api/v1/storefront/orders/{id}/return", handler.customer(handler.requestReturn))
+	if handler.sandboxEnabled {
+		mux.HandleFunc("POST /api/v1/storefront/sandbox/payments/{provider_ref}/complete", handler.completeSandboxPayment)
+	}
+	mux.HandleFunc("GET /api/v1/commerce/orders", security.Authorized("commerce:orders:read", handler.adminOrders))
+	mux.HandleFunc("POST /api/v1/commerce/orders/{id}/fulfillment/start", security.Authorized("commerce:fulfillment:manage", handler.startFulfillment))
+	mux.HandleFunc("POST /api/v1/commerce/orders/{id}/fulfillment/complete", security.Authorized("commerce:fulfillment:manage", handler.completeFulfillment))
+	mux.HandleFunc("POST /api/v1/commerce/orders/{id}/return/complete", security.Authorized("commerce:fulfillment:manage", handler.completeReturn))
+	mux.HandleFunc("POST /api/v1/commerce/orders/{id}/refund", security.Authorized("commerce:payments:manage", handler.refund))
+	mux.HandleFunc("POST /api/v1/commerce/orders/{id}/reconcile", security.Authorized("commerce:payments:manage", handler.reconcile))
+	mux.HandleFunc("GET /api/v1/commerce/campaigns", security.Authorized("commerce:marketing:manage", handler.campaigns))
+	mux.HandleFunc("POST /api/v1/commerce/campaigns", security.Authorized("commerce:marketing:manage", handler.createCampaign))
+	mux.HandleFunc("POST /api/v1/commerce/campaigns/{id}/activate", security.Authorized("commerce:marketing:manage", handler.activateCampaign))
+	mux.HandleFunc("POST /api/v1/commerce/campaigns/{id}/archive", security.Authorized("commerce:marketing:manage", handler.archiveCampaign))
+	mux.HandleFunc("POST /api/v1/commerce/coupons", security.Authorized("commerce:marketing:manage", handler.createCoupon))
+}
+
+type customerHandler func(http.ResponseWriter, *http.Request, customeraccounts.Account)
+
+func (handler *Handler) customer(next customerHandler) http.HandlerFunc {
+	return func(response http.ResponseWriter, request *http.Request) {
+		cookie, err := request.Cookie(customerCookieName)
+		if err != nil { httpjson.WriteError(response, http.StatusUnauthorized, "customer.unauthenticated", "customer authentication is required"); return }
+		account, err := handler.customers.Authenticate(request.Context(), request.Header.Get(organizationHeader), cookie.Value)
+		if errors.Is(err, customeraccounts.ErrInvalidCredentials) { httpjson.WriteError(response, http.StatusUnauthorized, "customer.unauthenticated", "customer authentication is required"); return }
+		if err != nil { slog.Error("authenticate commerce customer", "error", err); httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed"); return }
+		next(response, request, account)
+	}
+}
+
+func (handler *Handler) cart(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	value, err := handler.service.Cart(request.Context(), account, request.URL.Query().Get("currency")); writeCommerce(response, http.StatusOK, value, err, "get cart")
+}
+
+func (handler *Handler) putLine(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input commerce.LineInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.PutLine(request.Context(), account, request.PathValue("product_id"), input); writeCommerce(response, http.StatusOK, value, err, "put cart line")
+}
+
+func (handler *Handler) removeLine(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input struct { Currency string `json:"currency"`; Version int64 `json:"version,string"` }
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.RemoveLine(request.Context(), account, request.PathValue("product_id"), input.Currency, input.Version); writeCommerce(response, http.StatusOK, value, err, "remove cart line")
+}
+
+func (handler *Handler) checkout(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input commerce.CheckoutInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.Checkout(request.Context(), account, input); writeCommerce(response, http.StatusCreated, value, err, "checkout")
+}
+
+func (handler *Handler) customerOrders(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	limit, ok := pageLimit(response, request); if !ok { return }
+	value, err := handler.service.CustomerOrders(request.Context(), account, request.URL.Query().Get("cursor"), limit); writeCommerce(response, http.StatusOK, value, err, "list customer orders")
+}
+
+func (handler *Handler) customerOrder(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	value, err := handler.service.CustomerOrder(request.Context(), account, request.PathValue("id")); writeCommerce(response, http.StatusOK, value, err, "get customer order")
+}
+
+func (handler *Handler) requestReturn(response http.ResponseWriter, request *http.Request, account customeraccounts.Account) {
+	var input commerce.ReturnInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.RequestReturn(request.Context(), account, request.PathValue("id"), input); writeCommerce(response, http.StatusOK, value, err, "request return")
+}
+
+func (handler *Handler) completeSandboxPayment(response http.ResponseWriter, request *http.Request) {
+	var input commerce.PaymentEventInput
+	if !decode(response, request, &input) { return }
+	providerRef := request.PathValue("provider_ref")
+	if err := handler.sandbox.Complete(providerRef, input.Status); err != nil { handleError(response, "complete sandbox payment", err); return }
+	value, err := handler.service.CompletePayment(request.Context(), providerRef, input); writeCommerce(response, http.StatusOK, value, err, "record sandbox payment")
+}
+
+func (handler *Handler) adminOrders(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request); if !ok { return }
+	value, err := handler.service.AdminOrders(request.Context(), request.URL.Query().Get("cursor"), limit, actor); writeCommerce(response, http.StatusOK, value, err, "list orders")
+}
+
+func (handler *Handler) startFulfillment(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.orderTransition(response, request, actor, handler.service.StartFulfillment, "start fulfillment")
+}
+
+func (handler *Handler) completeFulfillment(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.orderTransition(response, request, actor, handler.service.CompleteFulfillment, "complete fulfillment")
+}
+
+func (handler *Handler) completeReturn(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	handler.orderTransition(response, request, actor, handler.service.CompleteReturn, "complete return")
+}
+
+func (handler *Handler) orderTransition(response http.ResponseWriter, request *http.Request, actor identity.Principal, operation func(context.Context, string, commerce.TransitionInput, identity.Principal) (commerce.Order, error), name string) {
+	var input commerce.TransitionInput
+	if !decode(response, request, &input) { return }
+	value, err := operation(request.Context(), request.PathValue("id"), input, actor); writeCommerce(response, http.StatusOK, value, err, name)
+}
+
+func (handler *Handler) refund(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input commerce.RefundInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.Refund(request.Context(), request.PathValue("id"), input, actor); writeCommerce(response, http.StatusOK, value, err, "refund order")
+}
+
+func (handler *Handler) reconcile(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	value, err := handler.service.Reconcile(request.Context(), request.PathValue("id"), actor); writeCommerce(response, http.StatusOK, value, err, "reconcile order")
+}
+
+func (handler *Handler) campaigns(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	limit, ok := pageLimit(response, request); if !ok { return }
+	value, err := handler.service.Campaigns(request.Context(), request.URL.Query().Get("cursor"), limit, actor); writeCommerce(response, http.StatusOK, value, err, "list campaigns")
+}
+
+func (handler *Handler) createCampaign(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input commerce.CampaignInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.CreateCampaign(request.Context(), input, actor); writeCommerce(response, http.StatusCreated, value, err, "create campaign")
+}
+
+func (handler *Handler) activateCampaign(response http.ResponseWriter, request *http.Request, actor identity.Principal) { handler.campaignTransition(response, request, actor, handler.service.ActivateCampaign, "activate campaign") }
+func (handler *Handler) archiveCampaign(response http.ResponseWriter, request *http.Request, actor identity.Principal) { handler.campaignTransition(response, request, actor, handler.service.ArchiveCampaign, "archive campaign") }
+
+func (handler *Handler) campaignTransition(response http.ResponseWriter, request *http.Request, actor identity.Principal, operation func(context.Context, string, commerce.TransitionInput, identity.Principal) (commerce.Campaign, error), name string) {
+	var input commerce.TransitionInput
+	if !decode(response, request, &input) { return }
+	value, err := operation(request.Context(), request.PathValue("id"), input, actor); writeCommerce(response, http.StatusOK, value, err, name)
+}
+
+func (handler *Handler) createCoupon(response http.ResponseWriter, request *http.Request, actor identity.Principal) {
+	var input commerce.CouponInput
+	if !decode(response, request, &input) { return }
+	value, err := handler.service.CreateCoupon(request.Context(), input, actor); writeCommerce(response, http.StatusCreated, value, err, "create coupon")
+}
+
+func decode(response http.ResponseWriter, request *http.Request, target any) bool {
+	if err := httpjson.Decode(response, request, target); err != nil { httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", err.Error()); return false }; return true
+}
+
+func pageLimit(response http.ResponseWriter, request *http.Request) (int, bool) {
+	limit := defaultLimit
+	if raw := request.URL.Query().Get("limit"); raw != "" { parsed, err := strconv.Atoi(raw); if err != nil { httpjson.WriteError(response, http.StatusBadRequest, "request.invalid", "limit must be an integer"); return 0, false }; limit = parsed }
+	return limit, true
+}
+
+func writeCommerce(response http.ResponseWriter, status int, value any, err error, operation string) {
+	if err != nil { handleError(response, operation, err); return }; httpjson.Write(response, status, value)
+}
+
+func handleError(response http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, commerce.ErrInvalidInput): httpjson.WriteError(response, http.StatusBadRequest, "commerce.invalid", "commerce input is invalid")
+	case errors.Is(err, commerce.ErrNotFound), errors.Is(err, catalog.ErrNotFound): httpjson.WriteError(response, http.StatusNotFound, "commerce.not_found", "commerce record was not found")
+	case errors.Is(err, commerce.ErrConflict): httpjson.WriteError(response, http.StatusConflict, "commerce.conflict", "commerce state or idempotency key conflicts")
+	default: slog.Error(operation, "error", err); httpjson.WriteError(response, http.StatusInternalServerError, "internal.error", "the request could not be completed")
+	}
+}

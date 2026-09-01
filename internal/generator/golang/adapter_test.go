@@ -1135,6 +1135,51 @@ func TestGenerateRejectsCapabilityConfiguration(t *testing.T) {
 	}
 }
 
+func TestGenerateCommerceOperationsForBothDatabases(t *testing.T) {
+	t.Parallel()
+
+	for _, database := range []string{"postgresql", "mysql"} {
+		database := database
+		t.Run(database, func(t *testing.T) {
+			t.Parallel()
+			project := validProject()
+			project.Spec.Database.Engine = database
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: catalogCapability, Version: catalogVersion},
+				{Name: customerCapability, Version: customerVersion},
+				{Name: commerceCapability, Version: commerceVersion},
+			}
+			generated, err := New().Generate(context.Background(), project)
+			if err != nil {
+				t.Fatalf("Generate() error = %v", err)
+			}
+			if generated.CapabilityLock[commerceCapability] != commerceVersion {
+				t.Fatalf("capability lock = %#v", generated.CapabilityLock)
+			}
+			for _, path := range []string{
+				"internal/commerce/commerce.go",
+				"internal/commerce/httpapi/handler.go",
+				"internal/commerce/sandbox/gateway.go",
+				"internal/platform/migrate/migrations/000300_commerce_operations.sql",
+				"api/openapi.yaml",
+			} {
+				if outputContent(generated, path) == nil {
+					t.Errorf("commerce output %s is missing", path)
+				}
+			}
+			var document struct {
+				Paths map[string]any `yaml:"paths"`
+			}
+			if err := yaml.Unmarshal(outputContent(generated, "api/openapi.yaml"), &document); err != nil {
+				t.Fatalf("generated OpenAPI is invalid YAML: %v", err)
+			}
+			if document.Paths["/api/v1/storefront/checkout"] == nil || document.Paths["/api/v1/commerce/orders/{id}/refund"] == nil {
+				t.Fatalf("commerce paths are incomplete")
+			}
+		})
+	}
+}
+
 func TestGenerateRejectsUnsupportedStackSelections(t *testing.T) {
 	t.Parallel()
 

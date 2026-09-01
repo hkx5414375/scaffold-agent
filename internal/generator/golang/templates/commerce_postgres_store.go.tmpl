@@ -1,0 +1,238 @@
+// Package postgres persists portable commerce operations in PostgreSQL.
+package postgres
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"{{.ModulePath}}/internal/commerce"
+	"{{.ModulePath}}/internal/identity"
+)
+
+const cleanupTimeout = 5 * time.Second
+
+type Store struct { pool *pgxpool.Pool }
+
+func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+
+func (store *Store) Cart(ctx context.Context, organizationID, customerID, currency string) (commerce.Cart, error) {
+	return loadCart(ctx, store.pool, organizationID, customerID, currency)
+}
+
+func (store *Store) PutLine(ctx context.Context, command commerce.CartLineCommand) (commerce.Cart, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Cart{}, fmt.Errorf("begin cart mutation: %w", err) }
+	cartID := ""
+	if command.Version == 0 {
+		cartID = command.CartID
+		_, err = transaction.Exec(ctx, `insert into commerce_carts (id, organization_id, customer_id, currency, status, version, created_at, updated_at) values ($1, $2, $3, $4, 'active', 1, $5, $5)`, cartID, nullableOrganization(command.OrganizationID), command.CustomerID, command.Currency, command.Now)
+	} else {
+		err = transaction.QueryRow(ctx, `update commerce_carts set version = version + 1, updated_at = $1 where coalesce(organization_id, '') = $2 and customer_id = $3 and currency = $4 and status = 'active' and version = $5 returning id`, command.Now, command.OrganizationID, command.CustomerID, command.Currency, command.Version).Scan(&cartID)
+	}
+	if err != nil { return commerce.Cart{}, rollback(transaction, persistenceError(err)) }
+	_, err = transaction.Exec(ctx, `insert into commerce_cart_lines (cart_id, product_id, sku, name, unit_minor, quantity) values ($1, $2, $3, $4, $5, $6) on conflict (cart_id, product_id) do update set sku = excluded.sku, name = excluded.name, unit_minor = excluded.unit_minor, quantity = excluded.quantity`, cartID, command.Line.ProductID, command.Line.SKU, command.Line.Name, command.Line.UnitMinor, command.Line.Quantity)
+	if err != nil { return commerce.Cart{}, rollback(transaction, persistenceError(err)) }
+	value, err := loadCart(ctx, transaction, command.OrganizationID, command.CustomerID, command.Currency)
+	if err != nil { return commerce.Cart{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Cart{}, fmt.Errorf("commit cart mutation: %w", err) }
+	return value, nil
+}
+
+func (store *Store) RemoveLine(ctx context.Context, organizationID, customerID, currency, productID string, version int64, now time.Time) (commerce.Cart, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Cart{}, fmt.Errorf("begin cart line removal: %w", err) }
+	var cartID string
+	err = transaction.QueryRow(ctx, `update commerce_carts set version = version + 1, updated_at = $1 where coalesce(organization_id, '') = $2 and customer_id = $3 and currency = $4 and status = 'active' and version = $5 returning id`, now, organizationID, customerID, currency, version).Scan(&cartID)
+	if err != nil { return commerce.Cart{}, rollback(transaction, conflictNotFound(err)) }
+	result, err := transaction.Exec(ctx, `delete from commerce_cart_lines where cart_id = $1 and product_id = $2`, cartID, productID)
+	if err != nil { return commerce.Cart{}, rollback(transaction, err) }
+	if result.RowsAffected() != 1 { return commerce.Cart{}, rollback(transaction, commerce.ErrConflict) }
+	value, err := loadCart(ctx, transaction, organizationID, customerID, currency); if err != nil { return commerce.Cart{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Cart{}, fmt.Errorf("commit cart line removal: %w", err) }
+	return value, nil
+}
+
+func (store *Store) Promotion(ctx context.Context, organizationID, currency, couponCode string, subtotal int64, now time.Time) (commerce.Campaign, commerce.Coupon, error) {
+	if couponCode != "" {
+		var campaign commerce.Campaign; var coupon commerce.Coupon
+		err := store.pool.QueryRow(ctx, `select campaign.id, coalesce(campaign.organization_id, ''), campaign.name, campaign.kind, campaign.value, campaign.minimum_minor, campaign.currency, campaign.priority, campaign.coupon_required, campaign.status, campaign.starts_at, campaign.ends_at, campaign.version, campaign.created_at, campaign.updated_at, coupon.id, coalesce(coupon.organization_id, ''), coupon.campaign_id, coupon.code, coupon.maximum_uses, coupon.redeemed_uses, coupon.created_at from commerce_campaigns campaign join commerce_coupons coupon on coupon.campaign_id = campaign.id and coalesce(coupon.organization_id, '') = coalesce(campaign.organization_id, '') where coalesce(campaign.organization_id, '') = $1 and campaign.currency = $2 and campaign.status = 'active' and campaign.starts_at <= $3 and campaign.ends_at > $3 and campaign.minimum_minor <= $4 and coupon.code = $5 and coupon.redeemed_uses < coupon.maximum_uses order by campaign.priority desc, campaign.id limit 1`, organizationID, currency, now, subtotal, couponCode).Scan(&campaign.ID, &campaign.OrganizationID, &campaign.Name, &campaign.Kind, &campaign.Value, &campaign.MinimumMinor, &campaign.Currency, &campaign.Priority, &campaign.CouponRequired, &campaign.Status, &campaign.StartsAt, &campaign.EndsAt, &campaign.Version, &campaign.CreatedAt, &campaign.UpdatedAt, &coupon.ID, &coupon.OrganizationID, &coupon.CampaignID, &coupon.Code, &coupon.MaximumUses, &coupon.RedeemedUses, &coupon.CreatedAt)
+		if err != nil { return commerce.Campaign{}, commerce.Coupon{}, notFound(err) }
+		return campaign, coupon, nil
+	}
+	var campaign commerce.Campaign
+	err := scanCampaign(store.pool.QueryRow(ctx, `select id, coalesce(organization_id, ''), name, kind, value, minimum_minor, currency, priority, coupon_required, status, starts_at, ends_at, version, created_at, updated_at from commerce_campaigns where coalesce(organization_id, '') = $1 and currency = $2 and status = 'active' and coupon_required = false and starts_at <= $3 and ends_at > $3 and minimum_minor <= $4 order by priority desc, id limit 1`, organizationID, currency, now, subtotal), &campaign)
+	if err != nil { return commerce.Campaign{}, commerce.Coupon{}, err }
+	return campaign, commerce.Coupon{}, nil
+}
+
+func (store *Store) ReplayCheckout(ctx context.Context, organizationID, customerID, key, currency, couponCode string, cartVersion int64) (commerce.Order, error) {
+	var orderID, storedCurrency, storedCoupon string
+	var storedVersion int64
+	err := store.pool.QueryRow(ctx, `select idempotency.order_id, order_value.currency, idempotency.coupon_code, idempotency.cart_version from commerce_checkout_idempotency idempotency join commerce_orders order_value on order_value.id=idempotency.order_id where idempotency.organization_scope=$1 and idempotency.customer_id=$2 and idempotency.idempotency_key=$3`, organizationID, customerID, key).Scan(&orderID, &storedCurrency, &storedCoupon, &storedVersion)
+	if err != nil { return commerce.Order{}, notFound(err) }
+	if storedCurrency != currency || storedCoupon != couponCode || storedVersion != cartVersion { return commerce.Order{}, commerce.ErrConflict }
+	return loadOrder(ctx, store.pool, organizationID, customerID, orderID)
+}
+
+func (store *Store) Checkout(ctx context.Context, command commerce.CheckoutCommand) (commerce.Order, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Order{}, fmt.Errorf("begin checkout: %w", err) }
+	var existingOrderID, existingCartID, existingCoupon string; var existingVersion int64
+	err = transaction.QueryRow(ctx, `select order_id, cart_id, cart_version, coupon_code from commerce_checkout_idempotency where organization_scope = $1 and customer_id = $2 and idempotency_key = $3`, command.Order.OrganizationID, command.Order.CustomerID, command.IdempotencyKey).Scan(&existingOrderID, &existingCartID, &existingVersion, &existingCoupon)
+	if err == nil {
+		if existingCartID != command.CartID || existingVersion != command.CartVersion || existingCoupon != command.Coupon.Code { return commerce.Order{}, rollback(transaction, commerce.ErrConflict) }
+		value, loadErr := loadOrder(ctx, transaction, command.Order.OrganizationID, command.Order.CustomerID, existingOrderID); if loadErr != nil { return commerce.Order{}, rollback(transaction, loadErr) }
+		if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit checkout replay: %w", err) }; return value, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) { return commerce.Order{}, rollback(transaction, err) }
+	result, err := transaction.Exec(ctx, `update commerce_carts set status = 'checked_out', version = version + 1, updated_at = $1 where id = $2 and coalesce(organization_id, '') = $3 and customer_id = $4 and status = 'active' and version = $5`, command.Order.UpdatedAt, command.CartID, command.Order.OrganizationID, command.Order.CustomerID, command.CartVersion)
+	if err != nil || result.RowsAffected() != 1 { if err == nil { err = commerce.ErrConflict }; return commerce.Order{}, rollback(transaction, err) }
+	if command.Campaign.ID != "" {
+		result, err = transaction.Exec(ctx, `update commerce_campaigns set updated_at = updated_at where id = $1 and coalesce(organization_id, '') = $2 and status = 'active' and starts_at <= $3 and ends_at > $3 and minimum_minor <= $4`, command.Campaign.ID, command.Order.OrganizationID, command.Order.CreatedAt, command.Order.SubtotalMinor)
+		if err != nil || result.RowsAffected() != 1 { if err == nil { err = commerce.ErrConflict }; return commerce.Order{}, rollback(transaction, err) }
+	}
+	if command.Coupon.ID != "" {
+		result, err = transaction.Exec(ctx, `update commerce_coupons set redeemed_uses = redeemed_uses + 1 where id = $1 and campaign_id = $2 and coalesce(organization_id, '') = $3 and code = $4 and redeemed_uses < maximum_uses`, command.Coupon.ID, command.Campaign.ID, command.Order.OrganizationID, command.Coupon.Code)
+		if err != nil || result.RowsAffected() != 1 { if err == nil { err = commerce.ErrConflict }; return commerce.Order{}, rollback(transaction, err) }
+	}
+	_, err = transaction.Exec(ctx, `insert into commerce_orders (id, organization_id, customer_id, status, currency, subtotal_minor, discount_minor, total_minor, campaign_id, coupon_code, fulfillment_ref, return_reason, version, created_at, updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,nullif($9,''),nullif($10,''),'','',1,$11,$11)`, command.Order.ID, nullableOrganization(command.Order.OrganizationID), command.Order.CustomerID, command.Order.Status, command.Order.Currency, command.Order.SubtotalMinor, command.Order.DiscountMinor, command.Order.TotalMinor, command.Order.CampaignID, command.Order.CouponCode, command.Order.CreatedAt)
+	if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
+	for _, line := range command.Order.Lines {
+		_, err = transaction.Exec(ctx, `insert into commerce_order_lines (order_id, product_id, sku, name, unit_minor, quantity, line_minor) values ($1,$2,$3,$4,$5,$6,$7)`, command.Order.ID, line.ProductID, line.SKU, line.Name, line.UnitMinor, line.Quantity, line.LineMinor)
+		if err != nil { return commerce.Order{}, rollback(transaction, err) }
+	}
+	_, err = transaction.Exec(ctx, `insert into commerce_payment_intents (id, order_id, provider, provider_ref, status, amount_minor, refunded_minor, currency, updated_at) values ($1,$2,$3,$4,$5,$6,0,$7,$8)`, command.Order.Payment.ID, command.Order.ID, command.Order.Payment.Provider, command.Order.Payment.ProviderRef, command.Order.Payment.Status, command.Order.Payment.AmountMinor, command.Order.Payment.Currency, command.Order.Payment.UpdatedAt)
+	if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
+	_, err = transaction.Exec(ctx, `insert into commerce_checkout_idempotency (organization_scope, customer_id, idempotency_key, cart_id, cart_version, coupon_code, order_id) values ($1,$2,$3,$4,$5,$6,$7)`, command.Order.OrganizationID, command.Order.CustomerID, command.IdempotencyKey, command.CartID, command.CartVersion, command.Coupon.Code, command.Order.ID)
+	if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
+	if err := appendOrderEvent(ctx, transaction, command.Order.ID, "", string(command.Order.Status), "", command.Order.CreatedAt); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := appendAudit(ctx, transaction, command.Audit); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit checkout: %w", err) }
+	return command.Order, nil
+}
+
+func (store *Store) GetOrder(ctx context.Context, organizationID, customerID, id string) (commerce.Order, error) {
+	return loadOrder(ctx, store.pool, organizationID, customerID, id)
+}
+
+func (store *Store) ListOrders(ctx context.Context, organizationID, customerID, cursor string, limit int) ([]commerce.Order, string, error) {
+	rows, err := store.pool.Query(ctx, `select id from commerce_orders where coalesce(organization_id, '') = $1 and ($2 = '' or customer_id = $2) and ($3 = '' or id > $3) order by id limit $4`, organizationID, customerID, cursor, limit+1)
+	if err != nil { return nil, "", fmt.Errorf("query order page: %w", err) }
+	defer rows.Close(); ids := make([]string, 0, limit+1)
+	for rows.Next() { var id string; if err := rows.Scan(&id); err != nil { return nil, "", err }; ids = append(ids, id) }
+	if err := rows.Err(); err != nil { return nil, "", err }
+	next := ""; if len(ids) > limit { next = ids[limit-1]; ids = ids[:limit] }
+	items := make([]commerce.Order, 0, len(ids)); for _, id := range ids { value, err := loadOrder(ctx, store.pool, organizationID, customerID, id); if err != nil { return nil, "", err }; items = append(items, value) }
+	return items, next, nil
+}
+
+func (store *Store) ApplyPayment(ctx context.Context, providerRef, eventID string, status commerce.PaymentStatus, now time.Time) (commerce.Order, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Order{}, fmt.Errorf("begin payment event: %w", err) }
+	var existingRef, existingStatus, existingOrder string
+	err = transaction.QueryRow(ctx, `select provider_ref, status, order_id from commerce_payment_events where provider = 'sandbox' and event_id = $1`, eventID).Scan(&existingRef, &existingStatus, &existingOrder)
+	if err == nil {
+		if existingRef != providerRef || existingStatus != string(status) { return commerce.Order{}, rollback(transaction, commerce.ErrConflict) }
+		value, loadErr := loadOrder(ctx, transaction, "", "", existingOrder); if loadErr != nil { return commerce.Order{}, rollback(transaction, loadErr) }; if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, err }; return value, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) { return commerce.Order{}, rollback(transaction, err) }
+	var orderID, organizationID string; var current commerce.PaymentStatus
+	err = transaction.QueryRow(ctx, `select payment.order_id, coalesce(order_value.organization_id, ''), payment.status from commerce_payment_intents payment join commerce_orders order_value on order_value.id = payment.order_id where payment.provider_ref = $1 for update`, providerRef).Scan(&orderID, &organizationID, &current)
+	if err != nil { return commerce.Order{}, rollback(transaction, notFound(err)) }
+	if current != commerce.PaymentRequiresAction && current != status { return commerce.Order{}, rollback(transaction, commerce.ErrConflict) }
+	if current == commerce.PaymentRequiresAction {
+		_, err = transaction.Exec(ctx, `update commerce_payment_intents set status = $1, updated_at = $2 where provider_ref = $3 and status = 'requires_action'`, status, now, providerRef); if err != nil { return commerce.Order{}, rollback(transaction, err) }
+		to := commerce.OrderCancelled; if status == commerce.PaymentSucceeded { to = commerce.OrderConfirmed }
+		result, transitionErr := transaction.Exec(ctx, `update commerce_orders set status = $1, version = version + 1, updated_at = $2 where id = $3 and status = 'pending_payment'`, to, now, orderID)
+		if transitionErr != nil || result.RowsAffected() != 1 { if transitionErr == nil { transitionErr = commerce.ErrConflict }; return commerce.Order{}, rollback(transaction, transitionErr) }
+		if err := appendOrderEvent(ctx, transaction, orderID, string(commerce.OrderPendingPayment), string(to), providerRef, now); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	}
+	_, err = transaction.Exec(ctx, `insert into commerce_payment_events (provider, event_id, provider_ref, status, order_id, created_at) values ('sandbox',$1,$2,$3,$4,$5)`, eventID, providerRef, status, orderID, now)
+	if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
+	value, err := loadOrder(ctx, transaction, organizationID, "", orderID); if err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit payment event: %w", err) }; return value, nil
+}
+
+func (store *Store) TransitionOrder(ctx context.Context, organizationID, id string, version int64, from, to commerce.OrderStatus, reference string, now time.Time, audit identity.AuditEvent) (commerce.Order, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Order{}, fmt.Errorf("begin order transition: %w", err) }
+	fulfillment := ""; returnReason := ""
+	if to == commerce.OrderFulfilled { fulfillment = reference }; if to == commerce.OrderReturnRequested { returnReason = reference }
+	result, err := transaction.Exec(ctx, `update commerce_orders set status=$1, fulfillment_ref=case when $2<>'' then $2 else fulfillment_ref end, return_reason=case when $3<>'' then $3 else return_reason end, version=version+1, updated_at=$4 where id=$5 and coalesce(organization_id,'')=$6 and version=$7 and status=$8`, to, fulfillment, returnReason, now, id, organizationID, version, from)
+	if err != nil || result.RowsAffected() != 1 { if err == nil { err = commerce.ErrConflict }; return commerce.Order{}, rollback(transaction, err) }
+	if err := appendOrderEvent(ctx, transaction, id, string(from), string(to), reference, now); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := appendAudit(ctx, transaction, audit); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	value, err := loadOrder(ctx, transaction, organizationID, "", id); if err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit order transition: %w", err) }; return value, nil
+}
+
+func (store *Store) Refund(ctx context.Context, organizationID, orderID string, amount int64, key, providerRefundRef string, now time.Time, audit identity.AuditEvent) (commerce.Order, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Order{}, fmt.Errorf("begin refund: %w", err) }
+	var existingPayment, existingProvider string; var existingAmount int64
+	err = transaction.QueryRow(ctx, `select payment_id, provider_ref, amount_minor from commerce_refunds where organization_scope=$1 and idempotency_key=$2`, organizationID, key).Scan(&existingPayment, &existingProvider, &existingAmount)
+	if err == nil {
+		var paymentID string; queryErr := transaction.QueryRow(ctx, `select id from commerce_payment_intents where order_id=$1`, orderID).Scan(&paymentID); if queryErr != nil || paymentID != existingPayment || existingProvider != providerRefundRef || existingAmount != amount { return commerce.Order{}, rollback(transaction, commerce.ErrConflict) }
+		value, loadErr := loadOrder(ctx, transaction, organizationID, "", orderID); if loadErr != nil { return commerce.Order{}, rollback(transaction, loadErr) }; if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, err }; return value, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) { return commerce.Order{}, rollback(transaction, err) }
+	var paymentID string
+	err = transaction.QueryRow(ctx, `update commerce_payment_intents payment set refunded_minor=refunded_minor+$1, updated_at=$2 from commerce_orders order_value where payment.order_id=order_value.id and order_value.id=$3 and coalesce(order_value.organization_id,'')=$4 and payment.status='succeeded' and payment.refunded_minor+$1<=payment.amount_minor returning payment.id`, amount, now, orderID, organizationID).Scan(&paymentID)
+	if err != nil { return commerce.Order{}, rollback(transaction, conflictNotFound(err)) }
+	_, err = transaction.Exec(ctx, `insert into commerce_refunds (organization_scope,payment_id,idempotency_key,provider_ref,amount_minor,created_at) values ($1,$2,$3,$4,$5,$6)`, organizationID, paymentID, key, providerRefundRef, amount, now); if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
+	if err := appendAudit(ctx, transaction, audit); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	value, err := loadOrder(ctx, transaction, organizationID, "", orderID); if err != nil { return commerce.Order{}, rollback(transaction, err) }
+	if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit refund: %w", err) }; return value, nil
+}
+
+func (store *Store) CreateCampaign(ctx context.Context, value commerce.Campaign, audit identity.AuditEvent) error {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return err }
+	_, err = transaction.Exec(ctx, `insert into commerce_campaigns (id,organization_id,name,kind,value,minimum_minor,currency,priority,coupon_required,status,starts_at,ends_at,version,created_at,updated_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, value.ID, nullableOrganization(value.OrganizationID), value.Name, value.Kind, value.Value, value.MinimumMinor, value.Currency, value.Priority, value.CouponRequired, value.Status, value.StartsAt, value.EndsAt, value.Version, value.CreatedAt, value.UpdatedAt)
+	if err != nil { return rollback(transaction, persistenceError(err)) }; if err := appendAudit(ctx, transaction, audit); err != nil { return rollback(transaction, err) }; return transaction.Commit(ctx)
+}
+
+func (store *Store) TransitionCampaign(ctx context.Context, organizationID, id string, version int64, from, to commerce.CampaignStatus, now time.Time, audit identity.AuditEvent) (commerce.Campaign, error) {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return commerce.Campaign{}, err }
+	var value commerce.Campaign
+	err = scanCampaign(transaction.QueryRow(ctx, `update commerce_campaigns set status=$1,version=version+1,updated_at=$2 where id=$3 and coalesce(organization_id,'')=$4 and version=$5 and status=$6 returning id,coalesce(organization_id,''),name,kind,value,minimum_minor,currency,priority,coupon_required,status,starts_at,ends_at,version,created_at,updated_at`, to, now, id, organizationID, version, from), &value)
+	if errors.Is(err, commerce.ErrNotFound) { err = commerce.ErrConflict }; if err != nil { return commerce.Campaign{}, rollback(transaction, err) }; if err := appendAudit(ctx, transaction, audit); err != nil { return commerce.Campaign{}, rollback(transaction, err) }; if err := transaction.Commit(ctx); err != nil { return commerce.Campaign{}, err }; return value, nil
+}
+
+func (store *Store) CreateCoupon(ctx context.Context, value commerce.Coupon, audit identity.AuditEvent) error {
+	transaction, err := store.pool.Begin(ctx); if err != nil { return err }
+	result, err := transaction.Exec(ctx, `insert into commerce_coupons (id,organization_id,campaign_id,code,maximum_uses,redeemed_uses,created_at) select $1,$2,$3,$4,$5,0,$6 from commerce_campaigns where id=$3 and coalesce(organization_id,'')=$7 and coupon_required=true and status<>'archived'`, value.ID, nullableOrganization(value.OrganizationID), value.CampaignID, value.Code, value.MaximumUses, value.CreatedAt, value.OrganizationID)
+	if err != nil { return rollback(transaction, persistenceError(err)) }; if result.RowsAffected()!=1 { return rollback(transaction, commerce.ErrConflict) }; if err := appendAudit(ctx, transaction, audit); err != nil { return rollback(transaction, err) }; return transaction.Commit(ctx)
+}
+
+func (store *Store) ListCampaigns(ctx context.Context, organizationID, cursor string, limit int) ([]commerce.Campaign, string, error) {
+	rows, err := store.pool.Query(ctx, `select id,coalesce(organization_id,''),name,kind,value,minimum_minor,currency,priority,coupon_required,status,starts_at,ends_at,version,created_at,updated_at from commerce_campaigns where coalesce(organization_id,'')=$1 and ($2='' or id>$2) order by id limit $3`, organizationID, cursor, limit+1); if err != nil { return nil,"",err }; defer rows.Close()
+	items:=make([]commerce.Campaign,0,limit+1); for rows.Next(){ var value commerce.Campaign; if err:=scanCampaign(rows,&value); err!=nil{return nil,"",err}; items=append(items,value) }; if err:=rows.Err();err!=nil{return nil,"",err}; next:="";if len(items)>limit{next=items[limit-1].ID;items=items[:limit]};return items,next,nil
+}
+
+type queryer interface { Query(context.Context,string,...any)(pgx.Rows,error); QueryRow(context.Context,string,...any) pgx.Row }
+
+func loadCart(ctx context.Context, database queryer, organizationID, customerID, currency string) (commerce.Cart, error) {
+	var value commerce.Cart
+	err:=database.QueryRow(ctx,`select cart.id,coalesce(cart.organization_id,''),cart.customer_id,cart.currency,cart.status,cart.version,cart.created_at,cart.updated_at from commerce_carts cart{{if .Tenancy}} join organizations organization on organization.id=cart.organization_id and organization.status='active'{{end}} where coalesce(cart.organization_id,'')=$1 and cart.customer_id=$2 and cart.currency=$3 and cart.status='active'`,organizationID,customerID,currency).Scan(&value.ID,&value.OrganizationID,&value.CustomerID,&value.Currency,&value.Status,&value.Version,&value.CreatedAt,&value.UpdatedAt)
+	if err!=nil{return commerce.Cart{},notFound(err)}
+	rows,err:=database.Query(ctx,`select product_id,sku,name,unit_minor,quantity,unit_minor*quantity from commerce_cart_lines where cart_id=$1 order by product_id`,value.ID);if err!=nil{return commerce.Cart{},err};defer rows.Close()
+	value.Lines=[]commerce.CartLine{};for rows.Next(){var line commerce.CartLine;if err:=rows.Scan(&line.ProductID,&line.SKU,&line.Name,&line.UnitMinor,&line.Quantity,&line.LineMinor);err!=nil{return commerce.Cart{},err};if line.LineMinor>0&&value.SubtotalMinor>int64(^uint64(0)>>1)-line.LineMinor{return commerce.Cart{},commerce.ErrConflict};value.SubtotalMinor+=line.LineMinor;value.Lines=append(value.Lines,line)};if err:=rows.Err();err!=nil{return commerce.Cart{},err};return value,nil
+}
+
+func loadOrder(ctx context.Context, database queryer, organizationID, customerID, id string) (commerce.Order,error){
+	var value commerce.Order
+	err:=database.QueryRow(ctx,`select order_value.id,coalesce(order_value.organization_id,''),order_value.customer_id,order_value.status,order_value.currency,order_value.subtotal_minor,order_value.discount_minor,order_value.total_minor,coalesce(order_value.campaign_id,''),coalesce(order_value.coupon_code,''),order_value.fulfillment_ref,order_value.return_reason,order_value.version,order_value.created_at,order_value.updated_at,payment.id,payment.provider,payment.provider_ref,payment.status,payment.amount_minor,payment.refunded_minor,payment.currency,payment.updated_at from commerce_orders order_value join commerce_payment_intents payment on payment.order_id=order_value.id where order_value.id=$1 and ($2='' or coalesce(order_value.organization_id,'')=$2) and ($3='' or order_value.customer_id=$3)`,id,organizationID,customerID).Scan(&value.ID,&value.OrganizationID,&value.CustomerID,&value.Status,&value.Currency,&value.SubtotalMinor,&value.DiscountMinor,&value.TotalMinor,&value.CampaignID,&value.CouponCode,&value.FulfillmentRef,&value.ReturnReason,&value.Version,&value.CreatedAt,&value.UpdatedAt,&value.Payment.ID,&value.Payment.Provider,&value.Payment.ProviderRef,&value.Payment.Status,&value.Payment.AmountMinor,&value.Payment.RefundedMinor,&value.Payment.Currency,&value.Payment.UpdatedAt);if err!=nil{return commerce.Order{},notFound(err)}
+	rows,err:=database.Query(ctx,`select product_id,sku,name,unit_minor,quantity,line_minor from commerce_order_lines where order_id=$1 order by product_id`,id);if err!=nil{return commerce.Order{},err};defer rows.Close();value.Lines=[]commerce.OrderLine{};for rows.Next(){var line commerce.OrderLine;if err:=rows.Scan(&line.ProductID,&line.SKU,&line.Name,&line.UnitMinor,&line.Quantity,&line.LineMinor);err!=nil{return commerce.Order{},err};value.Lines=append(value.Lines,line)};return value,rows.Err()
+}
+
+type rowScanner interface{Scan(...any)error}
+func scanCampaign(row rowScanner,value *commerce.Campaign)error{if err:=row.Scan(&value.ID,&value.OrganizationID,&value.Name,&value.Kind,&value.Value,&value.MinimumMinor,&value.Currency,&value.Priority,&value.CouponRequired,&value.Status,&value.StartsAt,&value.EndsAt,&value.Version,&value.CreatedAt,&value.UpdatedAt);err!=nil{return notFound(err)};return nil}
+func appendOrderEvent(ctx context.Context,tx pgx.Tx,orderID,from,to,reference string,now time.Time)error{_,err:=tx.Exec(ctx,`insert into commerce_order_events (id,order_id,from_status,to_status,reference,created_at) values ($1,$2,$3,$4,$5,$6)`,fmt.Sprintf("%s:%d",orderID,now.UnixNano()),orderID,from,to,reference,now);return err}
+func appendAudit(ctx context.Context,tx pgx.Tx,event identity.AuditEvent)error{_,err:=tx.Exec(ctx,`insert into audit_events (id,user_id,action,outcome,target,ip_address,user_agent,created_at) values ($1,nullif($2,''),$3,$4,nullif($5,''),nullif($6,''),nullif($7,''),$8)`,event.ID,event.UserID,event.Action,event.Outcome,event.Target,event.IPAddress,event.UserAgent,event.CreatedAt);return err}
+func nullableOrganization(value string)any{if value==""{return nil};return value}
+func notFound(err error)error{if errors.Is(err,pgx.ErrNoRows){return commerce.ErrNotFound};return err}
+func conflictNotFound(err error)error{if errors.Is(err,pgx.ErrNoRows){return commerce.ErrConflict};return err}
+func persistenceError(err error)error{var databaseError *pgconn.PgError;if errors.As(err,&databaseError)&&databaseError.Code=="23505"{return commerce.ErrConflict};return err}
+func rollback(transaction pgx.Tx,cause error)error{ctx,cancel:=context.WithTimeout(context.Background(),cleanupTimeout);defer cancel();if err:=transaction.Rollback(ctx);err!=nil&&!errors.Is(err,pgx.ErrTxClosed){return errors.Join(cause,err)};return cause}
+
+var _ commerce.Repository = (*Store)(nil)

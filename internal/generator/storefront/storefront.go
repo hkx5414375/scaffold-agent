@@ -27,6 +27,7 @@ type Data struct {
 	DescriptionLong  bool
 	Catalog          bool
 	CustomerAccounts bool
+	Commerce         bool
 	Tenancy          bool
 }
 
@@ -107,6 +108,27 @@ var CustomerAccountTemplates = map[string]string{
 	"web/storefront/server/utils/customer.ts":                       "templates/server/utils/customer.ts",
 	"web/storefront/shared/types/customer.ts":                       "templates/shared/types/customer.ts",
 	"web/storefront/test/customer.test.ts":                          "templates/test/customer.test.ts",
+}
+
+// CommerceTemplates maps cart, checkout, and customer order storefront outputs.
+var CommerceTemplates = map[string]string{
+	"web/storefront/app/assets/css/commerce.css":                                   "templates/app/assets/css/commerce.css",
+	"web/storefront/app/pages/cart.vue":                                            "templates/app/pages/cart.vue",
+	"web/storefront/app/pages/checkout.vue":                                        "templates/app/pages/checkout.vue",
+	"web/storefront/app/pages/account/orders/index.vue":                            "templates/app/pages/account/orders/index.vue",
+	"web/storefront/app/pages/account/orders/[id].vue":                             "templates/app/pages/account/orders/[id].vue",
+	"web/storefront/app/utils/commerce.ts":                                         "templates/app/utils/commerce.ts",
+	"web/storefront/server/api/storefront/cart.get.ts":                             "templates/server/api/storefront/cart.get.ts",
+	"web/storefront/server/api/storefront/cart/lines/[product_id].put.ts":          "templates/server/api/storefront/cart/lines/[product_id].put.ts",
+	"web/storefront/server/api/storefront/cart/lines/[product_id]/remove.post.ts":  "templates/server/api/storefront/cart/lines/[product_id]/remove.post.ts",
+	"web/storefront/server/api/storefront/checkout.post.ts":                        "templates/server/api/storefront/checkout.post.ts",
+	"web/storefront/server/api/storefront/orders.get.ts":                           "templates/server/api/storefront/orders.get.ts",
+	"web/storefront/server/api/storefront/orders/[id].get.ts":                      "templates/server/api/storefront/orders/[id].get.ts",
+	"web/storefront/server/api/storefront/orders/[id]/return.post.ts":              "templates/server/api/storefront/orders/[id]/return.post.ts",
+	"web/storefront/server/api/storefront/sandbox/payments/[provider_ref].post.ts": "templates/server/api/storefront/sandbox/payments/[provider_ref].post.ts",
+	"web/storefront/server/utils/commerce.ts":                                      "templates/server/utils/commerce.ts",
+	"web/storefront/shared/types/commerce.ts":                                      "templates/shared/types/commerce.ts",
+	"web/storefront/test/commerce.test.ts":                                         "templates/test/commerce.test.ts",
 }
 
 // Render executes one shared template against a backend-neutral data shape.

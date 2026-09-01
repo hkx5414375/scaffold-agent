@@ -308,6 +308,65 @@ export interface InventoryPage<T> {
   next_cursor?: string;
 }
 {{- end}}
+{{- if .Commerce}}
+
+export type CommerceOrderStatus =
+  | "pending_payment"
+  | "confirmed"
+  | "fulfilling"
+  | "fulfilled"
+  | "return_requested"
+  | "returned"
+  | "cancelled";
+export type CommercePaymentStatus = "requires_action" | "succeeded" | "failed";
+export type CommerceCampaignStatus = "draft" | "active" | "archived";
+export type CommerceDiscountKind = "fixed" | "percent";
+
+export interface CommercePayment {
+  id: string;
+  provider: string;
+  provider_ref: string;
+  status: CommercePaymentStatus;
+  amount_minor: string;
+  refunded_minor: string;
+  currency: string;
+}
+
+export interface CommerceOrder {
+  id: string;
+  customer_id: string;
+  status: CommerceOrderStatus;
+  currency: string;
+  subtotal_minor: string;
+  discount_minor: string;
+  total_minor: string;
+  payment: CommercePayment;
+  fulfillment_ref?: string;
+  return_reason?: string;
+  version: string;
+  created_at: string;
+}
+
+export interface CommerceCampaign {
+  id: string;
+  name: string;
+  kind: CommerceDiscountKind;
+  value: string;
+  minimum_minor: string;
+  currency: string;
+  priority: number;
+  coupon_required: boolean;
+  status: CommerceCampaignStatus;
+  starts_at: string;
+  ends_at: string;
+  version: string;
+}
+
+export interface CommercePage<T> {
+  items: T[];
+  next_cursor?: string;
+}
+{{- end}}
 {{- if .Business}}
 
 export interface BusinessEntity {

@@ -16,7 +16,12 @@ details to the browser.[[if .Catalog]]
 
 The catalog capability adds server-rendered product list and detail pages. The
 browser still calls only same-origin Nuxt endpoints; Nuxt validates pagination
-and identifiers before forwarding bounded requests to the generated backend.[[end]]
+and identifiers before forwarding bounded requests to the generated backend.[[end]][[if .Commerce]]
+
+The commerce capability adds cart, checkout, customer order history, and return
+pages. For local demonstrations only, set `COMMERCE_SANDBOX_ENABLED=true` on the
+backend and `NUXT_PUBLIC_COMMERCE_SANDBOX_ENABLED=true` on the storefront. Both
+flags are disabled by default.[[end]]
 
 ## Commands
 

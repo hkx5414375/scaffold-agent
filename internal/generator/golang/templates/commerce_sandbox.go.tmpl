@@ -1,0 +1,55 @@
+// Package sandbox provides a deterministic, no-network payment gateway for local development.
+package sandbox
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	"{{.ModulePath}}/internal/commerce"
+)
+
+// Gateway stores only deterministic local payment state in process memory.
+type Gateway struct {
+	mu     sync.RWMutex
+	states map[string]commerce.PaymentStatus
+	refunds map[string]string
+}
+
+func New() *Gateway { return &Gateway{states: make(map[string]commerce.PaymentStatus), refunds: make(map[string]string)} }
+
+func (gateway *Gateway) CreateIntent(_ context.Context, orderID string, amountMinor int64, currency string) (string, error) {
+	if orderID == "" || amountMinor < 0 || currency == "" { return "", errors.New("invalid sandbox payment intent") }
+	reference := fmt.Sprintf("sandbox_%s", orderID)
+	gateway.mu.Lock(); defer gateway.mu.Unlock()
+	if _, exists := gateway.states[reference]; !exists { gateway.states[reference] = commerce.PaymentRequiresAction }
+	return reference, nil
+}
+
+func (gateway *Gateway) Lookup(_ context.Context, providerRef string) (commerce.PaymentStatus, error) {
+	gateway.mu.RLock(); defer gateway.mu.RUnlock()
+	status, exists := gateway.states[providerRef]; if !exists { return "", commerce.ErrNotFound }; return status, nil
+}
+
+func (gateway *Gateway) Refund(_ context.Context, providerRef, idempotencyKey string, amountMinor int64) (string, error) {
+	if providerRef == "" || idempotencyKey == "" || amountMinor < 1 { return "", commerce.ErrInvalidInput }
+	gateway.mu.Lock(); defer gateway.mu.Unlock()
+	if gateway.states[providerRef] != commerce.PaymentSucceeded { return "", commerce.ErrConflict }
+	key := providerRef + ":" + idempotencyKey
+	if reference, exists := gateway.refunds[key]; exists { return reference, nil }
+	reference := "sandbox_refund_" + idempotencyKey
+	gateway.refunds[key] = reference
+	return reference, nil
+}
+
+// Complete changes a known local intent; production adapters must not expose this operation.
+func (gateway *Gateway) Complete(providerRef string, status commerce.PaymentStatus) error {
+	if status != commerce.PaymentSucceeded && status != commerce.PaymentFailed { return commerce.ErrInvalidInput }
+	gateway.mu.Lock(); defer gateway.mu.Unlock()
+	if _, exists := gateway.states[providerRef]; !exists { return commerce.ErrNotFound }
+	gateway.states[providerRef] = status
+	return nil
+}
+
+var _ commerce.Gateway = (*Gateway)(nil)

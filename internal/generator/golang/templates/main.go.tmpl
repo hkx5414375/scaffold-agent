@@ -34,6 +34,12 @@ import (
 	customerhttp "{{.ModulePath}}/internal/customeraccounts/httpapi"
 	customerdatabase "{{.ModulePath}}/internal/customeraccounts/{{.Database.PackageName}}"
 {{- end}}
+{{- if .Commerce}}
+	"{{.ModulePath}}/internal/commerce"
+	commercehttp "{{.ModulePath}}/internal/commerce/httpapi"
+	commercedatabase "{{.ModulePath}}/internal/commerce/{{.Database.PackageName}}"
+	"{{.ModulePath}}/internal/commerce/sandbox"
+{{- end}}
 {{- if .CRM}}
 	"{{.ModulePath}}/internal/crm"
 	crmhttp "{{.ModulePath}}/internal/crm/httpapi"
@@ -148,6 +154,13 @@ func run() error {
 	customerService := customeraccounts.NewService(customerdatabase.New(pool))
 	customerAPI := customerhttp.New(customerService, secureCookies)
 {{- end}}
+{{- if .Commerce}}
+	commerceSandboxEnabled, err := optionalBoolean("COMMERCE_SANDBOX_ENABLED", false)
+	if err != nil { return err }
+	commerceGateway := sandbox.New()
+	commerceService := commerce.NewService(commercedatabase.New(pool), catalogService, commerceGateway)
+	commerceAPI := commercehttp.New(commerceService, customerService, commerceGateway, commerceSandboxEnabled)
+{{- end}}
 {{- if .CRM}}
 	crmService := crm.NewService(crmdatabase.New(pool))
 	crmAPI := crmhttp.New(crmService)
@@ -192,6 +205,9 @@ func run() error {
 {{- end}}
 {{- if .CustomerAccounts}}
 		customerAPI.Register(mux, identityAPI)
+{{- end}}
+{{- if .Commerce}}
+		commerceAPI.Register(mux, identityAPI)
 {{- end}}
 {{- if .CRM}}
 		crmAPI.Register(mux, identityAPI)
@@ -273,4 +289,12 @@ func secureCookieSetting(value string) (bool, error) {
 		return false, errors.New("COOKIE_SECURE must be true or false")
 	}
 	return secure, nil
+}
+
+func optionalBoolean(name string, defaultValue bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" { return defaultValue, nil }
+	parsed, err := strconv.ParseBool(value)
+	if err != nil { return false, fmt.Errorf("%s must be true or false", name) }
+	return parsed, nil
 }

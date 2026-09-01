@@ -1,0 +1,71 @@
+package commerce
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/customeraccounts"
+	"{{.ModulePath}}/internal/identity"
+)
+
+func TestCalculateDiscountUsesIntegerFloorAndSubtotalCap(t *testing.T) {
+	t.Parallel()
+	percentage, err := calculateDiscount(999, Campaign{ID: "campaign", Kind: DiscountPercent, Value: 1250})
+	if err != nil || percentage != 124 { t.Fatalf("percentage discount = %d, %v", percentage, err) }
+	fixed, err := calculateDiscount(999, Campaign{ID: "campaign", Kind: DiscountFixed, Value: 2000})
+	if err != nil || fixed != 999 { t.Fatalf("fixed discount = %d, %v", fixed, err) }
+}
+
+func TestCheckoutFreezesCartAndPromotionSnapshots(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	repository := &fakeRepository{
+		cart: Cart{ID: "cart-1", CustomerID: "customer-1", Currency: "USD", Status: CartActive, Version: 3, SubtotalMinor: 2500, Lines: []CartLine{CartLine{ProductID: "product-1", SKU: "SKU-1", Name: "Widget", UnitMinor: 1250, Quantity: 2, LineMinor: 2500}}},
+		campaign: Campaign{ID: "campaign-1", Kind: DiscountPercent, Value: 1000, MinimumMinor: 2000},
+		coupon: Coupon{ID: "coupon-1", Code: "SAVE10"},
+	}
+	gateway := &fakeGateway{}
+	service := NewService(repository, fakeCatalog{}, gateway); service.now = func() time.Time { return now }
+	value, err := service.Checkout(context.Background(), customeraccounts.Account{ID: "customer-1"}, CheckoutInput{Currency: "usd", CouponCode: "save10", IdempotencyKey: "checkout-1", Version: 3})
+	if err != nil { t.Fatalf("Checkout() error = %v", err) }
+	if value.SubtotalMinor != 2500 || value.DiscountMinor != 250 || value.TotalMinor != 2250 || value.Lines[0].Name != "Widget" || value.Payment.ProviderRef == "" { t.Fatalf("Checkout() = %#v", value) }
+	if repository.checkout.CartVersion != 3 || repository.checkout.IdempotencyKey != "checkout-1" || repository.checkout.Coupon.Code != "SAVE10" { t.Fatalf("checkout command = %#v", repository.checkout) }
+}
+
+func TestPutLineRejectsCurrencyMismatchBeforePersistence(t *testing.T) {
+	t.Parallel()
+	repository := &fakeRepository{}
+	service := NewService(repository, fakeCatalog{product: catalog.Product{ID: "product-1", SKU: "SKU", Name: "Widget", Currency: "EUR", PriceMinor: 10}}, &fakeGateway{})
+	_, err := service.PutLine(context.Background(), customeraccounts.Account{ID: "customer-1"}, "product-1", LineInput{Currency: "USD", Quantity: 1})
+	if !errors.Is(err, ErrConflict) || repository.putCalled { t.Fatalf("PutLine() error = %v, putCalled = %v", err, repository.putCalled) }
+}
+
+type fakeCatalog struct { product catalog.Product }
+func (value fakeCatalog) GetPublic(context.Context, string, string) (catalog.Product, error) { if value.product.ID == "" { return catalog.Product{}, catalog.ErrNotFound }; return value.product, nil }
+
+type fakeGateway struct{}
+func (*fakeGateway) CreateIntent(_ context.Context, orderID string, _ int64, _ string) (string, error) { return "sandbox_" + orderID, nil }
+func (*fakeGateway) Lookup(context.Context, string) (PaymentStatus, error) { return PaymentSucceeded, nil }
+func (*fakeGateway) Refund(_ context.Context, _ string, key string, _ int64) (string, error) { return "refund_" + key, nil }
+
+type fakeRepository struct { cart Cart; campaign Campaign; coupon Coupon; checkout CheckoutCommand; putCalled bool }
+func (value *fakeRepository) Cart(context.Context,string,string,string)(Cart,error){if value.cart.ID==""{return Cart{},ErrNotFound};return value.cart,nil}
+func (value *fakeRepository) PutLine(_ context.Context, command CartLineCommand)(Cart,error){value.putCalled=true;return Cart{ID:command.CartID,Lines:[]CartLine{command.Line}},nil}
+func (*fakeRepository) RemoveLine(context.Context,string,string,string,string,int64,time.Time)(Cart,error){return Cart{},nil}
+func (value *fakeRepository) Promotion(context.Context,string,string,string,int64,time.Time)(Campaign,Coupon,error){if value.campaign.ID==""{return Campaign{},Coupon{},ErrNotFound};return value.campaign,value.coupon,nil}
+func (*fakeRepository) ReplayCheckout(context.Context,string,string,string,string,string,int64)(Order,error){return Order{},ErrNotFound}
+func (value *fakeRepository) Checkout(_ context.Context, command CheckoutCommand)(Order,error){value.checkout=command;return command.Order,nil}
+func (*fakeRepository) GetOrder(context.Context,string,string,string)(Order,error){return Order{},ErrNotFound}
+func (*fakeRepository) ListOrders(context.Context,string,string,string,int)([]Order,string,error){return nil,"",nil}
+func (*fakeRepository) ApplyPayment(context.Context,string,string,PaymentStatus,time.Time)(Order,error){return Order{},nil}
+func (*fakeRepository) TransitionOrder(context.Context,string,string,int64,OrderStatus,OrderStatus,string,time.Time,identity.AuditEvent)(Order,error){return Order{},nil}
+func (*fakeRepository) Refund(context.Context,string,string,int64,string,string,time.Time,identity.AuditEvent)(Order,error){return Order{},nil}
+func (*fakeRepository) CreateCampaign(context.Context,Campaign,identity.AuditEvent)error{return nil}
+func (*fakeRepository) TransitionCampaign(context.Context,string,string,int64,CampaignStatus,CampaignStatus,time.Time,identity.AuditEvent)(Campaign,error){return Campaign{},nil}
+func (*fakeRepository) CreateCoupon(context.Context,Coupon,identity.AuditEvent)error{return nil}
+func (*fakeRepository) ListCampaigns(context.Context,string,string,int)([]Campaign,string,error){return nil,"",nil}
+
+var _ Repository = (*fakeRepository)(nil)

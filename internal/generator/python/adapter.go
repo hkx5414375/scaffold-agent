@@ -275,6 +275,7 @@ type templateData struct {
 	CustomerAccounts      bool
 	CRM                   bool
 	Inventory             bool
+	Commerce              bool
 	CSVTransfer           bool
 }
 

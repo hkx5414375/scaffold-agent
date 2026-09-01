@@ -1,0 +1,163 @@
+insert into identity_permissions (code, description) values
+    ('commerce:orders:read', 'Read commerce orders'),
+    ('commerce:fulfillment:manage', 'Manage fulfillment and returns'),
+    ('commerce:marketing:manage', 'Manage campaigns and coupons'),
+    ('commerce:payments:manage', 'Reconcile and refund payments')
+on conflict (code) do nothing;
+
+insert into identity_role_permissions (role_code, permission_code) values
+    ('admin', 'commerce:orders:read'),
+    ('admin', 'commerce:fulfillment:manage'),
+    ('admin', 'commerce:marketing:manage'),
+    ('admin', 'commerce:payments:manage')
+on conflict (role_code, permission_code) do nothing;
+
+create table commerce_carts (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    customer_id text not null references customer_accounts (id),
+    currency varchar(3) not null check (currency ~ '^[A-Z]{3}$'),
+    status varchar(16) not null check (status in ('active', 'checked_out')),
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+create unique index commerce_active_cart_unique on commerce_carts (coalesce(organization_id, ''), customer_id, currency) where status = 'active';
+
+create table commerce_cart_lines (
+    cart_id text not null references commerce_carts (id) on delete cascade,
+    product_id text not null references catalog_products (id),
+    sku varchar(64) not null,
+    name varchar(160) not null,
+    unit_minor bigint not null check (unit_minor >= 0),
+    quantity bigint not null check (quantity between 1 and 999),
+    primary key (cart_id, product_id)
+);
+
+create table commerce_campaigns (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    name varchar(160) not null,
+    kind varchar(16) not null check (kind in ('fixed', 'percent')),
+    value bigint not null check (value > 0),
+    minimum_minor bigint not null check (minimum_minor >= 0),
+    currency varchar(3) not null check (currency ~ '^[A-Z]{3}$'),
+    priority integer not null check (priority between -1000 and 1000),
+    coupon_required boolean not null,
+    status varchar(16) not null check (status in ('draft', 'active', 'archived')),
+    starts_at timestamptz not null,
+    ends_at timestamptz not null,
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null,
+    check (starts_at < ends_at),
+    check (kind <> 'percent' or value <= 10000)
+);
+create index commerce_campaign_evaluation_idx on commerce_campaigns (organization_id, currency, status, priority desc, id);
+
+create table commerce_coupons (
+    id text primary key,
+    organization_id text null,
+    campaign_id text not null references commerce_campaigns (id),
+    code varchar(64) not null check (code ~ '^[A-Z0-9][A-Z0-9_-]{0,63}$'),
+    maximum_uses bigint not null check (maximum_uses > 0),
+    redeemed_uses bigint not null default 0 check (redeemed_uses between 0 and maximum_uses),
+    created_at timestamptz not null
+);
+create unique index commerce_coupon_scope_code_unique on commerce_coupons (coalesce(organization_id, ''), code);
+
+create table commerce_orders (
+    id text primary key,
+{{- if .Tenancy}}
+    organization_id text not null references organizations (id) on delete cascade,
+{{- else}}
+    organization_id text null,
+{{- end}}
+    customer_id text not null references customer_accounts (id),
+    status varchar(24) not null check (status in ('pending_payment', 'confirmed', 'fulfilling', 'fulfilled', 'return_requested', 'returned', 'cancelled')),
+    currency varchar(3) not null check (currency ~ '^[A-Z]{3}$'),
+    subtotal_minor bigint not null check (subtotal_minor >= 0),
+    discount_minor bigint not null check (discount_minor >= 0 and discount_minor <= subtotal_minor),
+    total_minor bigint not null check (total_minor = subtotal_minor - discount_minor),
+    campaign_id text null references commerce_campaigns (id),
+    coupon_code varchar(64) null,
+    fulfillment_ref varchar(191) not null default '',
+    return_reason varchar(500) not null default '',
+    version bigint not null check (version > 0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null
+);
+create index commerce_order_customer_idx on commerce_orders (organization_id, customer_id, id);
+create index commerce_order_admin_idx on commerce_orders (organization_id, id);
+
+create table commerce_order_lines (
+    order_id text not null references commerce_orders (id) on delete cascade,
+    product_id text not null,
+    sku varchar(64) not null,
+    name varchar(160) not null,
+    unit_minor bigint not null check (unit_minor >= 0),
+    quantity bigint not null check (quantity between 1 and 999),
+    line_minor bigint not null check (line_minor = unit_minor * quantity),
+    primary key (order_id, product_id)
+);
+
+create table commerce_payment_intents (
+    id text primary key,
+    order_id text not null unique references commerce_orders (id),
+    provider varchar(32) not null,
+    provider_ref varchar(191) not null unique,
+    status varchar(24) not null check (status in ('requires_action', 'succeeded', 'failed')),
+    amount_minor bigint not null check (amount_minor >= 0),
+    refunded_minor bigint not null default 0 check (refunded_minor >= 0 and refunded_minor <= amount_minor),
+    currency varchar(3) not null,
+    updated_at timestamptz not null
+);
+
+create table commerce_checkout_idempotency (
+    organization_scope text not null,
+    customer_id text not null,
+    idempotency_key varchar(191) not null,
+    cart_id text not null,
+    cart_version bigint not null,
+    coupon_code varchar(64) not null default '',
+    order_id text not null references commerce_orders (id),
+    primary key (organization_scope, customer_id, idempotency_key)
+);
+
+create table commerce_payment_events (
+    provider varchar(32) not null,
+    event_id varchar(191) not null,
+    provider_ref varchar(191) not null,
+    status varchar(24) not null,
+    order_id text not null references commerce_orders (id),
+    created_at timestamptz not null,
+    primary key (provider, event_id)
+);
+
+create table commerce_refunds (
+    organization_scope text not null,
+    payment_id text not null references commerce_payment_intents (id),
+    idempotency_key varchar(191) not null,
+    provider_ref varchar(191) not null,
+    amount_minor bigint not null check (amount_minor > 0),
+    created_at timestamptz not null,
+    primary key (organization_scope, idempotency_key)
+);
+
+create table commerce_order_events (
+    id text primary key,
+    order_id text not null references commerce_orders (id) on delete cascade,
+    from_status varchar(24) not null,
+    to_status varchar(24) not null,
+    reference varchar(500) not null default '',
+    created_at timestamptz not null
+);
+create index commerce_order_events_order_idx on commerce_order_events (order_id, created_at, id);

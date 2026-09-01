@@ -1,0 +1,571 @@
+// Package commerce owns portable carts, checkout, orders, promotions, and payments.
+package commerce
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"math"
+	"regexp"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"{{.ModulePath}}/internal/catalog"
+	"{{.ModulePath}}/internal/customeraccounts"
+	"{{.ModulePath}}/internal/identity"
+)
+
+const (
+	maximumIdentifierLength = 191
+	maximumNameLength       = 160
+	maximumCodeLength       = 64
+	maximumQuantity         = 999
+)
+
+var (
+	// ErrNotFound hides missing and cross-scope commerce records.
+	ErrNotFound = errors.New("commerce record not found")
+	// ErrConflict means optimistic state or idempotency input conflicts.
+	ErrConflict = errors.New("commerce state conflicts with current state")
+	// ErrInvalidInput means the request cannot form a portable commerce command.
+	ErrInvalidInput = errors.New("commerce input is invalid")
+	codePattern = regexp.MustCompile(`^[A-Z0-9][A-Z0-9_-]{0,63}$`)
+	currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
+)
+
+// CartStatus is the cart lifecycle.
+type CartStatus string
+
+const (
+	CartActive     CartStatus = "active"
+	CartCheckedOut CartStatus = "checked_out"
+)
+
+// OrderStatus is the forward-only order lifecycle.
+type OrderStatus string
+
+const (
+	OrderPendingPayment OrderStatus = "pending_payment"
+	OrderConfirmed      OrderStatus = "confirmed"
+	OrderFulfilling     OrderStatus = "fulfilling"
+	OrderFulfilled      OrderStatus = "fulfilled"
+	OrderReturnRequested OrderStatus = "return_requested"
+	OrderReturned       OrderStatus = "returned"
+	OrderCancelled      OrderStatus = "cancelled"
+)
+
+// PaymentStatus is the provider-independent payment state.
+type PaymentStatus string
+
+const (
+	PaymentRequiresAction PaymentStatus = "requires_action"
+	PaymentSucceeded      PaymentStatus = "succeeded"
+	PaymentFailed         PaymentStatus = "failed"
+)
+
+// CampaignStatus is the marketing campaign lifecycle.
+type CampaignStatus string
+
+const (
+	CampaignDraft    CampaignStatus = "draft"
+	CampaignActive   CampaignStatus = "active"
+	CampaignArchived CampaignStatus = "archived"
+)
+
+// DiscountKind controls deterministic promotion arithmetic.
+type DiscountKind string
+
+const (
+	DiscountFixed   DiscountKind = "fixed"
+	DiscountPercent DiscountKind = "percent"
+)
+
+// CartLine stores the current public product price snapshot.
+type CartLine struct {
+	ProductID   string `json:"product_id"`
+	SKU         string `json:"sku"`
+	Name        string `json:"name"`
+	UnitMinor   int64  `json:"unit_minor,string"`
+	Quantity    int64  `json:"quantity,string"`
+	LineMinor   int64  `json:"line_minor,string"`
+}
+
+// Cart is one scoped mutable customer cart.
+type Cart struct {
+	ID             string     `json:"id"`
+	OrganizationID string     `json:"organization_id,omitempty"`
+	CustomerID     string     `json:"customer_id"`
+	Currency       string     `json:"currency"`
+	Status         CartStatus `json:"status"`
+	Lines          []CartLine `json:"lines"`
+	SubtotalMinor  int64      `json:"subtotal_minor,string"`
+	Version        int64      `json:"version,string"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// Campaign is one deterministic non-stacking promotion.
+type Campaign struct {
+	ID               string         `json:"id"`
+	OrganizationID   string         `json:"organization_id,omitempty"`
+	Name             string         `json:"name"`
+	Kind             DiscountKind   `json:"kind"`
+	Value            int64          `json:"value,string"`
+	MinimumMinor     int64          `json:"minimum_minor,string"`
+	Currency         string         `json:"currency"`
+	Priority         int            `json:"priority"`
+	CouponRequired   bool           `json:"coupon_required"`
+	Status           CampaignStatus `json:"status"`
+	StartsAt         time.Time      `json:"starts_at"`
+	EndsAt           time.Time      `json:"ends_at"`
+	Version          int64          `json:"version,string"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
+// Coupon unlocks one campaign and has a bounded redemption count.
+type Coupon struct {
+	ID             string    `json:"id"`
+	OrganizationID string    `json:"organization_id,omitempty"`
+	CampaignID     string    `json:"campaign_id"`
+	Code           string    `json:"code"`
+	MaximumUses    int64     `json:"maximum_uses,string"`
+	RedeemedUses   int64     `json:"redeemed_uses,string"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// OrderLine is an immutable checkout snapshot.
+type OrderLine struct {
+	ProductID string `json:"product_id"`
+	SKU       string `json:"sku"`
+	Name      string `json:"name"`
+	UnitMinor int64  `json:"unit_minor,string"`
+	Quantity  int64  `json:"quantity,string"`
+	LineMinor int64  `json:"line_minor,string"`
+}
+
+// PaymentIntent is one provider-independent collection record.
+type PaymentIntent struct {
+	ID             string        `json:"id"`
+	Provider       string        `json:"provider"`
+	ProviderRef    string        `json:"provider_ref"`
+	Status         PaymentStatus `json:"status"`
+	AmountMinor    int64         `json:"amount_minor,string"`
+	RefundedMinor  int64         `json:"refunded_minor,string"`
+	Currency       string        `json:"currency"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+}
+
+// Order is the immutable monetary snapshot plus its current lifecycle.
+type Order struct {
+	ID               string        `json:"id"`
+	OrganizationID   string        `json:"organization_id,omitempty"`
+	CustomerID       string        `json:"customer_id"`
+	Status           OrderStatus   `json:"status"`
+	Currency         string        `json:"currency"`
+	SubtotalMinor    int64         `json:"subtotal_minor,string"`
+	DiscountMinor    int64         `json:"discount_minor,string"`
+	TotalMinor       int64         `json:"total_minor,string"`
+	CampaignID       string        `json:"campaign_id,omitempty"`
+	CouponCode       string        `json:"coupon_code,omitempty"`
+	Lines            []OrderLine   `json:"lines"`
+	Payment          PaymentIntent `json:"payment"`
+	FulfillmentRef   string        `json:"fulfillment_ref,omitempty"`
+	ReturnReason     string        `json:"return_reason,omitempty"`
+	Version          int64         `json:"version,string"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
+}
+
+// Page is one bounded keyset order page.
+type Page struct {
+	Items      []Order `json:"items"`
+	NextCursor string  `json:"next_cursor,omitempty"`
+}
+
+// CampaignPage is one bounded campaign page.
+type CampaignPage struct {
+	Items      []Campaign `json:"items"`
+	NextCursor string     `json:"next_cursor,omitempty"`
+}
+
+// LineInput replaces one cart line and carries the optimistic cart version.
+type LineInput struct {
+	Currency string `json:"currency"`
+	Quantity int64  `json:"quantity,string"`
+	Version  int64  `json:"version,string"`
+}
+
+// CartInput identifies the requested cart currency.
+type CartInput struct { Currency string `json:"currency"` }
+
+// CheckoutInput atomically turns the current cart into an order.
+type CheckoutInput struct {
+	Currency       string `json:"currency"`
+	CouponCode     string `json:"coupon_code,omitempty"`
+	IdempotencyKey string `json:"idempotency_key"`
+	Version        int64  `json:"version,string"`
+}
+
+// CampaignInput creates a draft marketing campaign.
+type CampaignInput struct {
+	Name           string       `json:"name"`
+	Kind           DiscountKind `json:"kind"`
+	Value          int64        `json:"value,string"`
+	MinimumMinor   int64        `json:"minimum_minor,string"`
+	Currency       string       `json:"currency"`
+	Priority       int          `json:"priority"`
+	CouponRequired bool         `json:"coupon_required"`
+	StartsAt       time.Time    `json:"starts_at"`
+	EndsAt         time.Time    `json:"ends_at"`
+}
+
+// CouponInput creates one normalized campaign coupon.
+type CouponInput struct {
+	CampaignID  string `json:"campaign_id"`
+	Code        string `json:"code"`
+	MaximumUses int64  `json:"maximum_uses,string"`
+}
+
+// TransitionInput carries optimistic state and an optional bounded reference.
+type TransitionInput struct {
+	Version   int64  `json:"version,string"`
+	Reference string `json:"reference,omitempty"`
+}
+
+// ReturnInput requests one whole-order return.
+type ReturnInput struct {
+	Version int64  `json:"version,string"`
+	Reason  string `json:"reason"`
+}
+
+// PaymentEventInput is the idempotent provider callback command.
+type PaymentEventInput struct {
+	EventID string        `json:"event_id"`
+	Status  PaymentStatus `json:"status"`
+}
+
+// RefundInput creates an idempotent bounded refund.
+type RefundInput struct {
+	AmountMinor   int64  `json:"amount_minor,string"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// CheckoutCommand contains a fully calculated immutable transaction snapshot.
+type CheckoutCommand struct {
+	Order          Order
+	CartID         string
+	CartVersion    int64
+	IdempotencyKey string
+	Campaign       Campaign
+	Coupon         Coupon
+	Audit          identity.AuditEvent
+}
+
+// CartLineCommand is an atomic cart mutation.
+type CartLineCommand struct {
+	CartID         string
+	OrganizationID string
+	CustomerID     string
+	Currency       string
+	Line           CartLine
+	Version        int64
+	Now            time.Time
+}
+
+// Repository is the transactional commerce persistence boundary.
+type Repository interface {
+	Cart(context.Context, string, string, string) (Cart, error)
+	PutLine(context.Context, CartLineCommand) (Cart, error)
+	RemoveLine(context.Context, string, string, string, string, int64, time.Time) (Cart, error)
+	Promotion(context.Context, string, string, string, int64, time.Time) (Campaign, Coupon, error)
+	ReplayCheckout(context.Context, string, string, string, string, string, int64) (Order, error)
+	Checkout(context.Context, CheckoutCommand) (Order, error)
+	GetOrder(context.Context, string, string, string) (Order, error)
+	ListOrders(context.Context, string, string, string, int) ([]Order, string, error)
+	ApplyPayment(context.Context, string, string, PaymentStatus, time.Time) (Order, error)
+	TransitionOrder(context.Context, string, string, int64, OrderStatus, OrderStatus, string, time.Time, identity.AuditEvent) (Order, error)
+	Refund(context.Context, string, string, int64, string, string, time.Time, identity.AuditEvent) (Order, error)
+	CreateCampaign(context.Context, Campaign, identity.AuditEvent) error
+	TransitionCampaign(context.Context, string, string, int64, CampaignStatus, CampaignStatus, time.Time, identity.AuditEvent) (Campaign, error)
+	CreateCoupon(context.Context, Coupon, identity.AuditEvent) error
+	ListCampaigns(context.Context, string, string, int) ([]Campaign, string, error)
+}
+
+// Gateway is the only payment-provider boundary required by the domain.
+type Gateway interface {
+	CreateIntent(context.Context, string, int64, string) (string, error)
+	Lookup(context.Context, string) (PaymentStatus, error)
+	Refund(context.Context, string, string, int64) (string, error)
+}
+
+// CatalogReader avoids coupling the commerce domain to catalog persistence.
+type CatalogReader interface {
+	GetPublic(context.Context, string, string) (catalog.Product, error)
+}
+
+// Service implements transport- and provider-independent commerce rules.
+type Service struct {
+	repository Repository
+	catalog    CatalogReader
+	gateway    Gateway
+	now        func() time.Time
+}
+
+func NewService(repository Repository, products CatalogReader, gateway Gateway) *Service {
+	return &Service{repository: repository, catalog: products, gateway: gateway, now: time.Now}
+}
+
+func (service *Service) Cart(ctx context.Context, account customeraccounts.Account, currency string) (Cart, error) {
+	currency, err := normalizeCurrency(currency)
+	if err != nil || account.ID == "" { return Cart{}, ErrInvalidInput }
+	value, err := service.repository.Cart(ctx, account.OrganizationID, account.ID, currency)
+	if errors.Is(err, ErrNotFound) {
+		return Cart{OrganizationID: account.OrganizationID, CustomerID: account.ID, Currency: currency, Status: CartActive, Lines: []CartLine{}}, nil
+	}
+	if err != nil { return Cart{}, fmt.Errorf("get cart: %w", err) }
+	return value, nil
+}
+
+func (service *Service) PutLine(ctx context.Context, account customeraccounts.Account, productID string, input LineInput) (Cart, error) {
+	currency, err := normalizeCurrency(input.Currency)
+	if err != nil || input.Quantity < 1 || input.Quantity > maximumQuantity || input.Version < 0 || account.ID == "" { return Cart{}, ErrInvalidInput }
+	productID, err = identifier(productID)
+	if err != nil { return Cart{}, err }
+	product, err := service.catalog.GetPublic(ctx, account.OrganizationID, productID)
+	if err != nil { return Cart{}, fmt.Errorf("read product for cart: %w", err) }
+	if product.Currency != currency || product.PriceMinor > math.MaxInt64/input.Quantity { return Cart{}, ErrConflict }
+	line := CartLine{ProductID: product.ID, SKU: product.SKU, Name: product.Name, UnitMinor: product.PriceMinor, Quantity: input.Quantity, LineMinor: product.PriceMinor * input.Quantity}
+	value, err := service.repository.PutLine(ctx, CartLineCommand{CartID: rand.Text(), OrganizationID: account.OrganizationID, CustomerID: account.ID, Currency: currency, Line: line, Version: input.Version, Now: service.now().UTC()})
+	if err != nil { return Cart{}, fmt.Errorf("put cart line: %w", err) }
+	return value, nil
+}
+
+func (service *Service) RemoveLine(ctx context.Context, account customeraccounts.Account, productID, currency string, version int64) (Cart, error) {
+	productID, firstErr := identifier(productID)
+	currency, secondErr := normalizeCurrency(currency)
+	if firstErr != nil || secondErr != nil || version < 1 || account.ID == "" { return Cart{}, ErrInvalidInput }
+	value, err := service.repository.RemoveLine(ctx, account.OrganizationID, account.ID, currency, productID, version, service.now().UTC())
+	if err != nil { return Cart{}, fmt.Errorf("remove cart line: %w", err) }
+	return value, nil
+}
+
+func (service *Service) Checkout(ctx context.Context, account customeraccounts.Account, input CheckoutInput) (Order, error) {
+	currency, firstErr := normalizeCurrency(input.Currency)
+	idempotencyKey, secondErr := bounded(input.IdempotencyKey, maximumIdentifierLength)
+	couponCode, thirdErr := optionalCode(input.CouponCode)
+	if firstErr != nil || secondErr != nil || thirdErr != nil || input.Version < 1 || account.ID == "" { return Order{}, ErrInvalidInput }
+	replayed, replayErr := service.repository.ReplayCheckout(ctx, account.OrganizationID, account.ID, idempotencyKey, currency, couponCode, input.Version)
+	if replayErr == nil { return replayed, nil }
+	if !errors.Is(replayErr, ErrNotFound) { return Order{}, fmt.Errorf("replay checkout: %w", replayErr) }
+	cart, err := service.repository.Cart(ctx, account.OrganizationID, account.ID, currency)
+	if err != nil { return Order{}, fmt.Errorf("load checkout cart: %w", err) }
+	if cart.Status != CartActive || cart.Version != input.Version || len(cart.Lines) == 0 || cart.SubtotalMinor < 0 { return Order{}, ErrConflict }
+	now := service.now().UTC()
+	campaign, coupon, err := service.repository.Promotion(ctx, account.OrganizationID, currency, couponCode, cart.SubtotalMinor, now)
+	if err != nil && !errors.Is(err, ErrNotFound) { return Order{}, fmt.Errorf("evaluate promotion: %w", err) }
+	discount, err := calculateDiscount(cart.SubtotalMinor, campaign)
+	if err != nil { return Order{}, err }
+	orderID := rand.Text()
+	providerRef, err := service.gateway.CreateIntent(ctx, orderID, cart.SubtotalMinor-discount, currency)
+	if err != nil { return Order{}, fmt.Errorf("create payment intent: %w", err) }
+	lines := make([]OrderLine, len(cart.Lines))
+	for index, line := range cart.Lines { lines[index] = OrderLine(line) }
+	order := Order{
+		ID: orderID, OrganizationID: account.OrganizationID, CustomerID: account.ID,
+		Status: OrderPendingPayment, Currency: currency, SubtotalMinor: cart.SubtotalMinor,
+		DiscountMinor: discount, TotalMinor: cart.SubtotalMinor - discount,
+		CampaignID: campaign.ID, CouponCode: coupon.Code, Lines: lines, Version: 1,
+		CreatedAt: now, UpdatedAt: now,
+		Payment: PaymentIntent{ID: rand.Text(), Provider: "sandbox", ProviderRef: providerRef, Status: PaymentRequiresAction, AmountMinor: cart.SubtotalMinor-discount, Currency: currency, UpdatedAt: now},
+	}
+	result, err := service.repository.Checkout(ctx, CheckoutCommand{Order: order, CartID: cart.ID, CartVersion: cart.Version, IdempotencyKey: idempotencyKey, Campaign: campaign, Coupon: coupon, Audit: audit(identity.Principal{}, "commerce.checkout", order.ID, now)})
+	if err != nil { return Order{}, fmt.Errorf("commit checkout: %w", err) }
+	return result, nil
+}
+
+func (service *Service) CustomerOrder(ctx context.Context, account customeraccounts.Account, id string) (Order, error) {
+	id, err := identifier(id); if err != nil || account.ID == "" { return Order{}, ErrInvalidInput }
+	value, err := service.repository.GetOrder(ctx, account.OrganizationID, account.ID, id)
+	if err != nil { return Order{}, fmt.Errorf("get customer order: %w", err) }
+	return value, nil
+}
+
+func (service *Service) CustomerOrders(ctx context.Context, account customeraccounts.Account, cursor string, limit int) (Page, error) {
+	cursor, err := optionalBounded(cursor, maximumIdentifierLength)
+	if err != nil || limit < 1 || limit > 100 || account.ID == "" { return Page{}, ErrInvalidInput }
+	items, next, err := service.repository.ListOrders(ctx, account.OrganizationID, account.ID, cursor, limit)
+	if err != nil { return Page{}, fmt.Errorf("list customer orders: %w", err) }
+	return Page{Items: items, NextCursor: next}, nil
+}
+
+func (service *Service) RequestReturn(ctx context.Context, account customeraccounts.Account, id string, input ReturnInput) (Order, error) {
+	id, firstErr := identifier(id); reason, secondErr := bounded(input.Reason, 500)
+	if firstErr != nil || secondErr != nil || input.Version < 1 || account.ID == "" { return Order{}, ErrInvalidInput }
+	current, err := service.repository.GetOrder(ctx, account.OrganizationID, account.ID, id)
+	if err != nil { return Order{}, fmt.Errorf("get return order: %w", err) }
+	if current.Status != OrderFulfilled || current.Version != input.Version { return Order{}, ErrConflict }
+	now := service.now().UTC()
+	value, err := service.repository.TransitionOrder(ctx, account.OrganizationID, id, input.Version, OrderFulfilled, OrderReturnRequested, reason, now, audit(identity.Principal{}, "commerce.return.request", id, now))
+	if err != nil { return Order{}, fmt.Errorf("request return: %w", err) }
+	return value, nil
+}
+
+func (service *Service) CompletePayment(ctx context.Context, providerRef string, input PaymentEventInput) (Order, error) {
+	providerRef, firstErr := identifier(providerRef); eventID, secondErr := bounded(input.EventID, maximumIdentifierLength)
+	if firstErr != nil || secondErr != nil || (input.Status != PaymentSucceeded && input.Status != PaymentFailed) { return Order{}, ErrInvalidInput }
+	value, err := service.repository.ApplyPayment(ctx, providerRef, eventID, input.Status, service.now().UTC())
+	if err != nil { return Order{}, fmt.Errorf("apply payment callback: %w", err) }
+	return value, nil
+}
+
+func (service *Service) Reconcile(ctx context.Context, id string, actor identity.Principal) (Order, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Order{}, err }
+	id, err = identifier(id); if err != nil { return Order{}, err }
+	order, err := service.repository.GetOrder(ctx, organizationID, "", id); if err != nil { return Order{}, fmt.Errorf("get reconciliation order: %w", err) }
+	status, err := service.gateway.Lookup(ctx, order.Payment.ProviderRef); if err != nil { return Order{}, fmt.Errorf("look up payment: %w", err) }
+	if status == order.Payment.Status { return order, nil }
+	if status != PaymentSucceeded && status != PaymentFailed { return Order{}, ErrConflict }
+	value, err := service.repository.ApplyPayment(ctx, order.Payment.ProviderRef, "reconcile:"+rand.Text(), status, service.now().UTC())
+	if err != nil { return Order{}, fmt.Errorf("reconcile payment: %w", err) }
+	return value, nil
+}
+
+func (service *Service) AdminOrders(ctx context.Context, cursor string, limit int, actor identity.Principal) (Page, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Page{}, err }
+	cursor, err = optionalBounded(cursor, maximumIdentifierLength); if err != nil || limit < 1 || limit > 100 { return Page{}, ErrInvalidInput }
+	items, next, err := service.repository.ListOrders(ctx, organizationID, "", cursor, limit); if err != nil { return Page{}, fmt.Errorf("list orders: %w", err) }
+	return Page{Items: items, NextCursor: next}, nil
+}
+
+func (service *Service) StartFulfillment(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Order, error) {
+	return service.transition(ctx, id, input, OrderConfirmed, OrderFulfilling, "commerce.fulfillment.start", actor)
+}
+
+func (service *Service) CompleteFulfillment(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Order, error) {
+	if strings.TrimSpace(input.Reference) == "" { return Order{}, ErrInvalidInput }
+	return service.transition(ctx, id, input, OrderFulfilling, OrderFulfilled, "commerce.fulfillment.complete", actor)
+}
+
+func (service *Service) CompleteReturn(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Order, error) {
+	return service.transition(ctx, id, input, OrderReturnRequested, OrderReturned, "commerce.return.complete", actor)
+}
+
+func (service *Service) transition(ctx context.Context, id string, input TransitionInput, from, to OrderStatus, action string, actor identity.Principal) (Order, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Order{}, err }
+	id, firstErr := identifier(id); reference, secondErr := optionalBounded(input.Reference, maximumIdentifierLength)
+	if firstErr != nil || secondErr != nil || input.Version < 1 { return Order{}, ErrInvalidInput }
+	now := service.now().UTC()
+	value, err := service.repository.TransitionOrder(ctx, organizationID, id, input.Version, from, to, reference, now, audit(actor, action, id, now))
+	if err != nil { return Order{}, fmt.Errorf("transition order: %w", err) }
+	return value, nil
+}
+
+func (service *Service) Refund(ctx context.Context, id string, input RefundInput, actor identity.Principal) (Order, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Order{}, err }
+	id, firstErr := identifier(id); key, secondErr := bounded(input.IdempotencyKey, maximumIdentifierLength)
+	if firstErr != nil || secondErr != nil || input.AmountMinor < 1 { return Order{}, ErrInvalidInput }
+	current, err := service.repository.GetOrder(ctx, organizationID, "", id)
+	if err != nil { return Order{}, fmt.Errorf("get refund order: %w", err) }
+	if current.Payment.Status != PaymentSucceeded || input.AmountMinor > current.Payment.AmountMinor-current.Payment.RefundedMinor { return Order{}, ErrConflict }
+	providerRef, err := service.gateway.Refund(ctx, current.Payment.ProviderRef, key, input.AmountMinor)
+	if err != nil { return Order{}, fmt.Errorf("refund provider payment: %w", err) }
+	now := service.now().UTC()
+	value, err := service.repository.Refund(ctx, organizationID, id, input.AmountMinor, key, providerRef, now, audit(actor, "commerce.payment.refund", id, now))
+	if err != nil { return Order{}, fmt.Errorf("refund payment: %w", err) }
+	return value, nil
+}
+
+func (service *Service) CreateCampaign(ctx context.Context, input CampaignInput, actor identity.Principal) (Campaign, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Campaign{}, err }
+	input.Name = strings.TrimSpace(input.Name); input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	if input.Name == "" || utf8.RuneCountInString(input.Name) > maximumNameLength || !printable(input.Name) || !currencyPattern.MatchString(input.Currency) || input.MinimumMinor < 0 || input.Priority < -1000 || input.Priority > 1000 || !input.StartsAt.Before(input.EndsAt) || (input.Kind != DiscountFixed && input.Kind != DiscountPercent) || input.Value < 1 || (input.Kind == DiscountPercent && input.Value > 10000) { return Campaign{}, ErrInvalidInput }
+	now := service.now().UTC()
+	value := Campaign{ID: rand.Text(), OrganizationID: organizationID, Name: input.Name, Kind: input.Kind, Value: input.Value, MinimumMinor: input.MinimumMinor, Currency: input.Currency, Priority: input.Priority, CouponRequired: input.CouponRequired, Status: CampaignDraft, StartsAt: input.StartsAt.UTC(), EndsAt: input.EndsAt.UTC(), Version: 1, CreatedAt: now, UpdatedAt: now}
+	if err := service.repository.CreateCampaign(ctx, value, audit(actor, "commerce.campaign.create", value.ID, now)); err != nil { return Campaign{}, fmt.Errorf("create campaign: %w", err) }
+	return value, nil
+}
+
+func (service *Service) ActivateCampaign(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Campaign, error) {
+	return service.transitionCampaign(ctx, id, input.Version, CampaignDraft, CampaignActive, "commerce.campaign.activate", actor)
+}
+
+func (service *Service) ArchiveCampaign(ctx context.Context, id string, input TransitionInput, actor identity.Principal) (Campaign, error) {
+	return service.transitionCampaign(ctx, id, input.Version, CampaignActive, CampaignArchived, "commerce.campaign.archive", actor)
+}
+
+func (service *Service) transitionCampaign(ctx context.Context, id string, version int64, from, to CampaignStatus, action string, actor identity.Principal) (Campaign, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Campaign{}, err }
+	id, err = identifier(id); if err != nil || version < 1 { return Campaign{}, ErrInvalidInput }
+	now := service.now().UTC()
+	value, err := service.repository.TransitionCampaign(ctx, organizationID, id, version, from, to, now, audit(actor, action, id, now)); if err != nil { return Campaign{}, fmt.Errorf("transition campaign: %w", err) }
+	return value, nil
+}
+
+func (service *Service) CreateCoupon(ctx context.Context, input CouponInput, actor identity.Principal) (Coupon, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return Coupon{}, err }
+	campaignID, firstErr := identifier(input.CampaignID); code, secondErr := optionalCode(input.Code)
+	if firstErr != nil || secondErr != nil || code == "" || input.MaximumUses < 1 { return Coupon{}, ErrInvalidInput }
+	now := service.now().UTC()
+	value := Coupon{ID: rand.Text(), OrganizationID: organizationID, CampaignID: campaignID, Code: code, MaximumUses: input.MaximumUses, CreatedAt: now}
+	if err := service.repository.CreateCoupon(ctx, value, audit(actor, "commerce.coupon.create", value.ID, now)); err != nil { return Coupon{}, fmt.Errorf("create coupon: %w", err) }
+	return value, nil
+}
+
+func (service *Service) Campaigns(ctx context.Context, cursor string, limit int, actor identity.Principal) (CampaignPage, error) {
+	organizationID, err := administrationScope(actor); if err != nil { return CampaignPage{}, err }
+	cursor, err = optionalBounded(cursor, maximumIdentifierLength); if err != nil || limit < 1 || limit > 100 { return CampaignPage{}, ErrInvalidInput }
+	items, next, err := service.repository.ListCampaigns(ctx, organizationID, cursor, limit); if err != nil { return CampaignPage{}, fmt.Errorf("list campaigns: %w", err) }
+	return CampaignPage{Items: items, NextCursor: next}, nil
+}
+
+func calculateDiscount(subtotal int64, campaign Campaign) (int64, error) {
+	if campaign.ID == "" { return 0, nil }
+	if subtotal < 0 || subtotal < campaign.MinimumMinor { return 0, ErrConflict }
+	var discount int64
+	switch campaign.Kind {
+	case DiscountFixed: discount = campaign.Value
+	case DiscountPercent:
+		if campaign.Value < 1 || campaign.Value > 10000 || (subtotal > 0 && campaign.Value > math.MaxInt64/subtotal) { return 0, ErrInvalidInput }
+		discount = subtotal * campaign.Value / 10000
+	default: return 0, ErrInvalidInput
+	}
+	if discount > subtotal { discount = subtotal }
+	return discount, nil
+}
+
+func normalizeCurrency(value string) (string, error) {
+	value = strings.ToUpper(strings.TrimSpace(value)); if !currencyPattern.MatchString(value) { return "", ErrInvalidInput }; return value, nil
+}
+
+func optionalCode(value string) (string, error) {
+	value = strings.ToUpper(strings.TrimSpace(value)); if value != "" && !codePattern.MatchString(value) { return "", ErrInvalidInput }; return value, nil
+}
+
+func identifier(value string) (string, error) { return bounded(value, maximumIdentifierLength) }
+
+func bounded(value string, maximum int) (string, error) {
+	value = strings.TrimSpace(value); if value == "" || len(value) > maximum || !printable(value) { return "", ErrInvalidInput }; return value, nil
+}
+
+func optionalBounded(value string, maximum int) (string, error) {
+	value = strings.TrimSpace(value); if value != "" && (len(value) > maximum || !printable(value)) { return "", ErrInvalidInput }; return value, nil
+}
+
+func printable(value string) bool { return strings.IndexFunc(value, func(character rune) bool { return !unicode.IsGraphic(character) }) < 0 }
+
+func administrationScope(actor identity.Principal) (string, error) {
+	if actor.UserID == "" || len(actor.UserID) > maximumIdentifierLength || !printable(actor.UserID) { return "", identity.ErrInvalidCredentials }
+{{- if .Tenancy}}
+	organizationID := strings.TrimSpace(actor.OrganizationID); if organizationID == "" || len(organizationID) > maximumIdentifierLength || !printable(organizationID) { return "", identity.ErrInvalidCredentials }; return organizationID, nil
+{{- else}}
+	return "", nil
+{{- end}}
+}
+
+func audit(actor identity.Principal, action, target string, now time.Time) identity.AuditEvent {
+	return identity.AuditEvent{ID: rand.Text(), UserID: actor.UserID, Action: action, Outcome: "succeeded", Target: target, CreatedAt: now}
+}

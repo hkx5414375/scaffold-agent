@@ -327,6 +327,22 @@ func TestGoERPInventoryWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) 
 	runGeneratedGoEndToEnd(t, "mysql", "element-plus", inventorySelection, "", 55, false)
 }
 
+func TestGoTenantCommerceOperationsPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", tenancyCommerceSelection, "0.3.0", 88, os.Getenv("SCAFFOLD_AGENT_RUN_ADMIN_BUILD") == "1")
+}
+
+func TestGoTenantCommerceOperationsMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", tenancyCommerceSelection, "0.3.0", 89, false)
+}
+
+func TestGoCommerceOperationsWithoutTenancyPostgreSQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "postgresql", "element-plus", commerceSelection, "", 68, false)
+}
+
+func TestGoCommerceOperationsWithoutTenancyMySQLPlanApplyVerifyEndToEnd(t *testing.T) {
+	runGeneratedGoEndToEnd(t, "mysql", "element-plus", commerceSelection, "", 69, false)
+}
+
 func TestJavaPostgreSQLIdentityPlanApplyVerifyEndToEnd(t *testing.T) {
 	runGeneratedJavaReference(t, "postgresql", false, false, "")
 }
@@ -1012,6 +1028,26 @@ const inventorySelection = `  capabilities:
       version: 0.1.0
 `
 
+const tenancyCommerceSelection = `  capabilities:
+    - name: organization-tenancy
+      version: 0.3.0
+    - name: commerce-catalog
+      version: 0.1.0
+    - name: customer-accounts
+      version: 0.1.0
+    - name: commerce-operations
+      version: 0.1.0
+`
+
+const commerceSelection = `  capabilities:
+    - name: commerce-catalog
+      version: 0.1.0
+    - name: customer-accounts
+      version: 0.1.0
+    - name: commerce-operations
+      version: 0.1.0
+`
+
 func runGeneratedGoEndToEnd(t *testing.T, database, adminUI, capabilities, expectedTenancyVersion string, wantChanges int, runAdminBuild bool) {
 	t.Helper()
 	root := t.TempDir()
@@ -1113,6 +1149,9 @@ WORKFLOWS
 	}
 	if strings.Contains(capabilities, "erp-inventory") && plannedData.CapabilityLock["erp-inventory"] != "0.1.0" {
 		t.Fatalf("Plan() ERP inventory lock = %#v", plannedData.CapabilityLock)
+	}
+	if strings.Contains(capabilities, "commerce-operations") && plannedData.CapabilityLock["commerce-operations"] != "0.1.0" {
+		t.Fatalf("Plan() commerce operations lock = %#v", plannedData.CapabilityLock)
 	}
 	previewed := application.Preview(ctx, PreviewInput{ProjectRoot: root, PlanID: plannedData.PlanID})
 	if previewed.Status != result.StatusOK {

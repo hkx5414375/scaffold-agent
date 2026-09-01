@@ -18,7 +18,36 @@ if (error.value) {
         ? "Product was not found"
         : "Catalog is temporarily unavailable",
   });
-}
+}[[if .Commerce]]
+const adding = ref(false);
+const addError = ref(false);
+
+async function addToCart(): Promise<void> {
+  if (!product.value || adding.value) return;
+  adding.value = true;
+  addError.value = false;
+  try {
+    const cart = await $fetch<{ version: string }>("/api/storefront/cart", {
+      query: { currency: product.value.currency },
+    });
+    await $fetch(
+      `/api/storefront/cart/lines/${encodeURIComponent(product.value.id)}`,
+      {
+        method: "PUT",
+        body: {
+          currency: product.value.currency,
+          quantity: "1",
+          version: cart.version,
+        },
+      },
+    );
+    await navigateTo("/cart");
+  } catch {
+    addError.value = true;
+  } finally {
+    adding.value = false;
+  }
+}[[end]]
 </script>
 
 <template>
@@ -31,6 +60,17 @@ if (error.value) {
     </p>
     <strong class="product-price">{{
       formatCatalogPrice(product.price_minor, product.currency)
-    }}</strong>
+    }}</strong>[[if .Commerce]]
+    <button
+      class="primary-action"
+      type="button"
+      :disabled="adding"
+      @click="addToCart"
+    >
+      {{ adding ? "Adding…" : "Add to cart" }}
+    </button>
+    <p v-if="addError" role="alert">
+      Sign in before adding this product, then try again.
+    </p>[[end]]
   </article>
 </template>
