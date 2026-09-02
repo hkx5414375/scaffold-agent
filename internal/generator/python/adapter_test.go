@@ -474,6 +474,12 @@ func TestGenerateCRMCoreAcrossDatabasesAndSurfaces(t *testing.T) {
 					"append_audit(connection, audit)",
 					"with_for_update()",
 				},
+				"src/demo_service/crm/models.py": {
+					`DATETIME(fsp=6)`,
+				},
+				"src/demo_service/migration/versions/000280_crm.py": {
+					`DATETIME(fsp=6)`,
+				},
 				"api/openapi.yaml": {
 					"/api/v1/crm/accounts:",
 					"/api/v1/crm/opportunities/{id}/advance:",
