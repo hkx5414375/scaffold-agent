@@ -5,10 +5,12 @@ from enum import StrEnum
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy.dialects.mysql import DATETIME
 
 from {{.PackageName}}.identity.models import metadata
 
 POSITIVE_VERSION = r"^[1-9][0-9]*$"
+TIMESTAMP = sa.DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql")
 
 approval_requests = sa.Table(
     "approval_requests",
@@ -43,9 +45,9 @@ approval_requests = sa.Table(
         sa.ForeignKey("identity_users.id"),
         nullable=True,
     ),
-    sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("resolved_at", TIMESTAMP, nullable=True),
+    sa.Column("created_at", TIMESTAMP, nullable=False),
+    sa.Column("updated_at", TIMESTAMP, nullable=False),
     sa.CheckConstraint(
         "subject_type = '{{.Business.ModuleName}}.{{.Business.EntityName}}'",
         name="approval_subject_type",
@@ -98,7 +100,7 @@ approval_events = sa.Table(
     sa.Column("status", sa.String(32), nullable=False),
     sa.Column("sequence", sa.BigInteger(), nullable=False),
     sa.Column("comment", sa.Text(), nullable=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("created_at", TIMESTAMP, nullable=False),
     sa.CheckConstraint(
         "status in ('pending', 'approved', 'rejected', 'cancelled')",
         name="approval_event_status",

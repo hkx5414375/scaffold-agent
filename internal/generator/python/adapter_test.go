@@ -911,6 +911,14 @@ func TestGenerateDurableJobsForBothDatabases(t *testing.T) {
 				!strings.Contains(readme, "JobService.enqueue") {
 				t.Fatalf("Generate(%s) README does not document the independent worker:\n%s", database, readme)
 			}
+			for _, path := range []string{
+				"src/demo_service/jobs/models.py",
+				"src/demo_service/migration/versions/000200_background_jobs.py",
+			} {
+				if !strings.Contains(string(outputContent(generated, path)), "DATETIME(fsp=6)") {
+					t.Errorf("Generate(%s) %s does not preserve MySQL scheduling precision", database, path)
+				}
+			}
 		})
 	}
 }
@@ -1530,10 +1538,17 @@ func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
 				`"approvals:decide"`,
 				"approval_pending_subject_unique",
 				"pending_subject_id",
+				"DATETIME(fsp=6)",
 			} {
 				if !strings.Contains(migration, fragment) {
 					t.Errorf("Generate(%s) migration does not contain %q", database, fragment)
 				}
+			}
+			if !strings.Contains(
+				string(outputContent(generated, "src/demo_service/approvals/models.py")),
+				"DATETIME(fsp=6)",
+			) {
+				t.Errorf("Generate(%s) approval models do not preserve MySQL timestamp precision", database)
 			}
 			contract := outputContent(generated, "api/openapi.yaml")
 			var openAPI map[string]any

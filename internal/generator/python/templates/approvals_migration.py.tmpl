@@ -4,11 +4,13 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.mysql import DATETIME
 
 revision: str = "000250_approval_workflows"
 down_revision: str | None = {{if .CSVTransfer}}"000240_csv_import_export"{{else if .JobAdmin}}"000230_job_administration"{{else if .Cache}}"000220_application_cache"{{else if .Files}}"000210_file_assets"{{else if .Jobs}}"000200_background_jobs"{{else if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000051_tenant_business"{{else}}"000002_business"{{end}}
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+TIMESTAMP = sa.DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql")
 
 
 def upgrade() -> None:
@@ -71,9 +73,9 @@ def upgrade() -> None:
             sa.ForeignKey("identity_users.id"),
             nullable=True,
         ),
-        sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("resolved_at", TIMESTAMP, nullable=True),
+        sa.Column("created_at", TIMESTAMP, nullable=False),
+        sa.Column("updated_at", TIMESTAMP, nullable=False),
         sa.CheckConstraint(
             "subject_type = '{{.Business.ModuleName}}.{{.Business.EntityName}}'",
             name="approval_subject_type",
@@ -157,7 +159,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("sequence", sa.BigInteger(), nullable=False),
         sa.Column("comment", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", TIMESTAMP, nullable=False),
         sa.CheckConstraint(
             "status in ('pending', 'approved', 'rejected', 'cancelled')",
             name="approval_event_status",

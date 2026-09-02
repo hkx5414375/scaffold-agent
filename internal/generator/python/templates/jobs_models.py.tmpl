@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.mysql import DATETIME
 
 from {{.PackageName}}.identity.models import metadata
+
+TIMESTAMP = sa.DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql")
 
 background_jobs = sa.Table(
     "background_jobs",
@@ -29,13 +32,13 @@ background_jobs = sa.Table(
     sa.Column("priority", sa.Integer, nullable=False),
     sa.Column("attempts", sa.Integer, nullable=False),
     sa.Column("max_attempts", sa.Integer, nullable=False),
-    sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+    sa.Column("available_at", TIMESTAMP, nullable=False),
     sa.Column("lease_owner", sa.String(128), nullable=True),
-    sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("lease_until", TIMESTAMP, nullable=True),
     sa.Column("last_error", sa.String(2000), nullable=True),
-    sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-    sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+    sa.Column("created_at", TIMESTAMP, nullable=False),
+    sa.Column("updated_at", TIMESTAMP, nullable=False),
+    sa.Column("completed_at", TIMESTAMP, nullable=True),
     sa.CheckConstraint(
         "status IN ('queued', 'running', 'succeeded', 'retry', 'dead')",
         name="background_jobs_status",

@@ -4,11 +4,13 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.mysql import DATETIME
 
 revision: str = "000200_background_jobs"
 down_revision: str | None = {{if .TenancyLifecycle}}"000070_tenancy_lifecycle"{{else if .TenancyMembers}}"000060_tenancy_members"{{else if .Tenancy}}"000050_tenancy"{{else}}"000001_identity"{{end}}
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+TIMESTAMP = sa.DateTime(timezone=True).with_variant(DATETIME(fsp=6), "mysql")
 
 
 def upgrade() -> None:
@@ -25,13 +27,13 @@ def upgrade() -> None:
         sa.Column("priority", sa.Integer(), nullable=False),
         sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column("max_attempts", sa.Integer(), nullable=False),
-        sa.Column("available_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("available_at", TIMESTAMP, nullable=False),
         sa.Column("lease_owner", sa.String(length=128), nullable=True),
-        sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("lease_until", TIMESTAMP, nullable=True),
         sa.Column("last_error", sa.String(length=2000), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("created_at", TIMESTAMP, nullable=False),
+        sa.Column("updated_at", TIMESTAMP, nullable=False),
+        sa.Column("completed_at", TIMESTAMP, nullable=True),
 {{- if .Tenancy}}
         sa.ForeignKeyConstraint(
             ["organization_id"],
