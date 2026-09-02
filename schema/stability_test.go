@@ -15,11 +15,11 @@ func TestV1ReleaseSchemaSnapshots(t *testing.T) {
 	t.Parallel()
 
 	want := map[string]string{
-		"capability-pack.schema.json": "3170177c7911dc1766f2c8a6a7d17316b7526a0398c08f30a3130d4637042258",
+		"capability-pack.schema.json": "f2fbe874b6dc94fd65887cdc20e4e5ea494400b22a012ac894f7d755605aaf7d",
 		"manifest.schema.json":        "ec6e1aa9b9f3262438b51163d563d61cd29f14ba021e6a5e91320c5a50519f89",
-		"plan.schema.json":            "f5631c86e1da56cfcfcd22c7cbce40d9ee3b24ebb0cca9dde752dfabad0c1eaa",
+		"plan.schema.json":            "6260c54864b549ee02853a1e193023a26419d3e8e826f0d8dcdcfb27b0de3821",
 		"project.schema.json":         "0dcbde21075782cb1421b4ab4e53df154f70ed5b2e2e0bfe8adfbf4dd48e2aef",
-		"result.schema.json":          "93b5d0465c8688e469b3ddffaa77c7081c0cf93cf414ea80541c65e0e374442a",
+		"result.schema.json":          "5484dd89346e59c8e24b5a5c597bc37bdb8c401a3a81c7cd48b20d3c6c17a55b",
 	}
 	for name, wantHash := range want {
 		content, err := Read("v1alpha1", name)
