@@ -59,6 +59,25 @@ func TestEmbeddedExceptionsRemainTracebackMutable(t *testing.T) {
 	}
 }
 
+func TestEmbeddedTextColumnsAvoidMySQLIncompatibleDefaults(t *testing.T) {
+	t.Parallel()
+
+	paths, err := fs.Glob(templateFS, "templates/*.py.tmpl")
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	textDefault := regexp.MustCompile(`sa\.Text\(\)[^\r\n]*server_default`)
+	for _, path := range paths {
+		content, err := templateFS.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		if textDefault.Match(content) {
+			t.Errorf("%s gives a TEXT column a default that MySQL rejects", path)
+		}
+	}
+}
+
 func TestGenerateFoundationForBothDatabases(t *testing.T) {
 	t.Parallel()
 

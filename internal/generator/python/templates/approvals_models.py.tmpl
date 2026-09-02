@@ -33,7 +33,7 @@ approval_requests = sa.Table(
         nullable=False,
     ),
     sa.Column("summary", sa.String(255), nullable=False),
-    sa.Column("details", sa.Text(), nullable=False, server_default=""),
+    sa.Column("details", sa.Text(), nullable=False),
     sa.Column("status", sa.String(32), nullable=False),
     sa.Column("version", sa.BigInteger(), nullable=False),
     sa.Column("resolution_comment", sa.Text(), nullable=True),

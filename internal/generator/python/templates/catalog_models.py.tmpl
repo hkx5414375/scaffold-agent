@@ -27,7 +27,7 @@ catalog_products = sa.Table(
     ),
     sa.Column("sku", sa.String(64), nullable=False),
     sa.Column("name", sa.String(160), nullable=False),
-    sa.Column("description", sa.Text(), nullable=False, server_default=""),
+    sa.Column("description", sa.Text(), nullable=False),
     sa.Column("price_minor", sa.BigInteger(), nullable=False),
     sa.Column("currency", sa.String(3), nullable=False),
     sa.Column("status", sa.String(16), nullable=False),
