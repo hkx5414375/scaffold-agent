@@ -155,9 +155,13 @@ class {{.Business.EntityClass}}DatabaseIntegrationTest {
             assertThat(
                             jdbcTemplate.queryForObject(
                                     "select count(*) from identity_role_permissions "
-                                            + "where role_code = 'admin' and permission_code like ?",
+                                            + "where role_code = 'admin' "
+                                            + "and permission_code in (?, ?, ?, ?)",
                                     Integer.class,
-                                    "{{.Business.PermissionPrefix}}:%"))
+                                    "{{.Business.PermissionPrefix}}:create",
+                                    "{{.Business.PermissionPrefix}}:read",
+                                    "{{.Business.PermissionPrefix}}:update",
+                                    "{{.Business.PermissionPrefix}}:delete"))
                     .isEqualTo(4);
         } finally {
 {{- if eq .Database.Engine "postgresql"}}

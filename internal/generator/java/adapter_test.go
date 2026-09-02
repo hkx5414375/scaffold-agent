@@ -1212,6 +1212,12 @@ func TestGenerateCSVImportExportForBothDatabases(t *testing.T) {
 				!strings.Contains(string(openAPI), "tasks:task:export") {
 				t.Fatalf("generated CSV OpenAPI is incomplete:\n%s", openAPI)
 			}
+			repository := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/tasks/transfer/JdbcCSVTransferRepository.java"))
+			if !strings.Contains(repository, "timestamp(value.dueAt())") ||
+				!strings.Contains(repository, "private static Timestamp timestamp(Instant value)") {
+				t.Fatalf("generated Java CSV import does not bind Instant fields portably:\n%s", repository)
+			}
 		})
 	}
 }

@@ -60,7 +60,11 @@ public final class JdbcCSVTransferRepository implements CSVTransferRepository {
                                     value.organizationId(),
 {{- end}}
 {{- range .Business.Fields}}
+{{- if eq .JavaType "Instant"}}
+                                    timestamp(value.{{.JavaName}}()),
+{{- else}}
                                     value.{{.JavaName}}(),
+{{- end}}
 {{- end}}
                                     value.version(),
                                     Timestamp.from(value.createdAt()),
@@ -160,6 +164,10 @@ public final class JdbcCSVTransferRepository implements CSVTransferRepository {
 
     private static Instant instant(Timestamp value) {
         return value == null ? null : value.toInstant();
+    }
+
+    private static Timestamp timestamp(Instant value) {
+        return value == null ? null : Timestamp.from(value);
     }
 
     private static String emptyToNull(String value) {
