@@ -9,7 +9,7 @@ and signed GitHub Artifact Attestations backed by Sigstore.
 Verify an asset before extracting it:
 
 ```bash
-gh attestation verify scaffold-agent_1.0.0_linux_amd64.tar.gz \
+gh attestation verify scaffold-agent_1.0.1_linux_amd64.tar.gz \
   --repo hkx5414375/scaffold-agent
 sha256sum -c SHA256SUMS --ignore-missing
 ```

@@ -119,4 +119,5 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] OIDC/Sigstore build provenance and SBOM attestations in the tag-only release workflow.
 - [x] Frozen 1.x public schema snapshots and wire identifiers with explicit compatibility rules.
 - [x] Bilingual installation, verification, release, upgrade, security, and support documentation.
-- [ ] Publish and independently verify the signed `v1.0.0` GitHub release.
+- [x] Preserve the failed-closed `v1.0.0` SBOM-attestation attempt without moving or reusing its tag.
+- [ ] Publish and independently verify the signed `v1.0.1` GitHub release.

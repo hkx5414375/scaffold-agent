@@ -9,8 +9,8 @@
 5. 在已审查提交上创建 annotated tag 并推送：
 
    ```bash
-   git tag -a v1.0.0 -m "Scaffold Agent v1.0.0"
-   git push origin v1.0.0
+   git tag -a v1.0.1 -m "Scaffold Agent v1.0.1"
+   git push origin v1.0.1
    ```
 
 6. 工作流会重新测试源码，生成 Linux/macOS/Windows 的 amd64/arm64 确定性归档、

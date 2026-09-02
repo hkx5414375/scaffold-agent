@@ -356,11 +356,12 @@ type goModule struct {
 }
 
 type cyclonedxBOM struct {
-	BOMFormat   string               `json:"bomFormat"`
-	SpecVersion string               `json:"specVersion"`
-	Version     int                  `json:"version"`
-	Metadata    cyclonedxMetadata    `json:"metadata"`
-	Components  []cyclonedxComponent `json:"components"`
+	BOMFormat    string               `json:"bomFormat"`
+	SerialNumber string               `json:"serialNumber"`
+	SpecVersion  string               `json:"specVersion"`
+	Version      int                  `json:"version"`
+	Metadata     cyclonedxMetadata    `json:"metadata"`
+	Components   []cyclonedxComponent `json:"components"`
 }
 
 type cyclonedxMetadata struct {
@@ -419,9 +420,10 @@ func writeSBOM(ctx context.Context, options Options) (File, error) {
 	license.License.ID = "Apache-2.0"
 	mainComponent.Licenses = []cyclonedxLicense{license}
 	bom := cyclonedxBOM{
-		BOMFormat:   "CycloneDX",
-		SpecVersion: sbomSpecVersion,
-		Version:     1,
+		BOMFormat:    "CycloneDX",
+		SerialNumber: cyclonedxSerialNumber(options.Version, options.Commit),
+		SpecVersion:  sbomSpecVersion,
+		Version:      1,
 		Metadata: cyclonedxMetadata{
 			Timestamp: options.BuildDate.Format(time.RFC3339),
 			Component: mainComponent,
@@ -457,6 +459,14 @@ func writeSBOM(ctx context.Context, options Options) (File, error) {
 		return File{}, fmt.Errorf("write SBOM: %w", err)
 	}
 	return describeFile(path)
+}
+
+func cyclonedxSerialNumber(version, commit string) string {
+	digest := sha256.Sum256([]byte("scaffold-agent-cyclonedx\x00" + version + "\x00" + commit))
+	id := digest[:16]
+	id[6] = (id[6] & 0x0f) | 0x80
+	id[8] = (id[8] & 0x3f) | 0x80
+	return fmt.Sprintf("urn:uuid:%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
 }
 
 func writeManifest(options Options, report Report) (File, error) {

@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +95,51 @@ func TestNormalizeRejectsOutputOutsideRepository(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("normalize() error = nil, want root containment error")
+	}
+}
+
+func TestWriteSBOMIncludesDeterministicCycloneDXSerialNumber(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n\ngo 1.27.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "dist")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Root:      root,
+		Output:    output,
+		Version:   "1.0.1",
+		Commit:    "0123456789abcdef0123456789abcdef01234567",
+		BuildDate: time.Date(2026, time.September, 2, 1, 2, 3, 0, time.UTC),
+	}
+	file, err := writeSBOM(t.Context(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(output, file.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bom struct {
+		BOMFormat    string `json:"bomFormat"`
+		SerialNumber string `json:"serialNumber"`
+		SpecVersion  string `json:"specVersion"`
+	}
+	if err := json.Unmarshal(content, &bom); err != nil {
+		t.Fatal(err)
+	}
+	if bom.BOMFormat != "CycloneDX" || bom.SpecVersion != sbomSpecVersion {
+		t.Fatalf("unexpected CycloneDX identity: %+v", bom)
+	}
+	if want := cyclonedxSerialNumber(options.Version, options.Commit); bom.SerialNumber != want {
+		t.Fatalf("serialNumber = %q, want %q", bom.SerialNumber, want)
+	}
+	if !regexp.MustCompile(`^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(bom.SerialNumber) {
+		t.Fatalf("serialNumber is not a canonical UUIDv8 URN: %q", bom.SerialNumber)
 	}
 }
 

@@ -12,8 +12,8 @@ binary publication path.
 5. Create an annotated tag from the reviewed commit:
 
    ```bash
-   git tag -a v1.0.0 -m "Scaffold Agent v1.0.0"
-   git push origin v1.0.0
+   git tag -a v1.0.1 -m "Scaffold Agent v1.0.1"
+   git push origin v1.0.1
    ```
 
 6. The release workflow rebuilds and tests the source, produces deterministic

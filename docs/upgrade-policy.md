@@ -14,7 +14,7 @@ new immutable Plan explicitly select compatible versions.
 
 The existing `v1alpha1` spelling is retained for early-user compatibility but
 is frozen as the stable 1.x wire identifier beginning with Scaffold Agent
-v1.0.0. Optional compatible additions are allowed; removals, changed meanings,
+v1.0.1, the first published stable release. Optional compatible additions are allowed; removals, changed meanings,
 new requirements, or changed tool semantics are not.
 
 File rollback cannot reverse an already-applied business database migration.

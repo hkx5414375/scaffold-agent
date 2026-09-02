@@ -3,6 +3,19 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and semantic versioning.
 
+## [1.0.1] - 2026-09-02
+
+### Fixed
+
+- Add a deterministic CycloneDX `serialNumber` so the official
+  `actions/attest@v4` SBOM parser accepts and signs release SBOMs.
+
+### Release
+
+- First published stable release. The `v1.0.0` tag failed closed at the SBOM
+  attestation gate and produced no GitHub Release; the tag remains unchanged as
+  an auditable record.
+
 ## [1.0.0] - 2026-09-02
 
 ### Added
@@ -30,4 +43,5 @@ and semantic versioning.
   writes, recovery journals, no telemetry by default, and no model credentials
   or model calls in the Engine.
 
-[1.0.0]: https://github.com/hkx5414375/scaffold-agent/releases/tag/v1.0.0
+[1.0.1]: https://github.com/hkx5414375/scaffold-agent/releases/tag/v1.0.1
+[1.0.0]: https://github.com/hkx5414375/scaffold-agent/tree/v1.0.0

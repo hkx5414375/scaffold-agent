@@ -19,7 +19,7 @@ Scaffold Agent v1 提供六个平台包：
 Artifact Attestations 生成的 Sigstore 来源证明。安装前先执行：
 
 ```bash
-gh attestation verify scaffold-agent_1.0.0_linux_amd64.tar.gz \
+gh attestation verify scaffold-agent_1.0.1_linux_amd64.tar.gz \
   --repo hkx5414375/scaffold-agent
 sha256sum -c SHA256SUMS --ignore-missing
 ```
@@ -27,7 +27,7 @@ sha256sum -c SHA256SUMS --ignore-missing
 Windows PowerShell 可检查单个文件：
 
 ```powershell
-$asset = 'scaffold-agent_1.0.0_windows_amd64.zip'
+$asset = 'scaffold-agent_1.0.1_windows_amd64.zip'
 $expected = (Select-String -LiteralPath SHA256SUMS -Pattern "  $asset$").Line.Split(' ')[0]
 $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'SHA-256 校验失败' }
@@ -41,7 +41,7 @@ gh attestation verify $asset --repo hkx5414375/scaffold-agent
 Linux/macOS：
 
 ```bash
-tar -xzf scaffold-agent_1.0.0_linux_amd64.tar.gz
+tar -xzf scaffold-agent_1.0.1_linux_amd64.tar.gz
 install -m 0755 scaffold-agent "$HOME/.local/bin/scaffold-agent"
 ```
 
