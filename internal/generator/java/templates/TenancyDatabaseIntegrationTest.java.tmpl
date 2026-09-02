@@ -69,7 +69,14 @@ class TenancyDatabaseIntegrationTest {
             TenancyService service =
                     new TenancyService(new JdbcTenancyRepository(jdbcTemplate, transactions));
             Organization organization = service.create("Acme", actor);
-            assertThat(service.list(actor)).containsExactly(organization);
+            var organizations = service.list(actor);
+            assertThat(organizations).hasSize(1);
+            assertThat(organizations.getFirst().id()).isEqualTo(organization.id());
+            assertThat(organizations.getFirst().name()).isEqualTo(organization.name());
+            assertThat(organizations.getFirst().role()).isEqualTo(organization.role());
+{{- if .TenancyLifecycle}}
+            assertThat(organizations.getFirst().status()).isEqualTo("active");
+{{- end}}
             Principal scoped =
                     service.authorize(
                             actor,

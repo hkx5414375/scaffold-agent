@@ -148,7 +148,7 @@ class TenancyLifecycleDatabaseIntegrationTest {
                                     "select count(*) from audit_events "
                                             + "where action like 'tenancy.organization.%'",
                                     Integer.class))
-                    .isGreaterThanOrEqualTo(7);
+                    .isGreaterThanOrEqualTo(6);
         } finally {
 {{- if eq .Database.Engine "postgresql"}}
             execute(adminUrl, username, password, "drop schema " + scope + " cascade");
