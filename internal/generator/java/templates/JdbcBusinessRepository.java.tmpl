@@ -39,34 +39,38 @@ public final class Jdbc{{.Business.EntityClass}}Repository
     }
 
     @Override
-    public void create({{.Business.EntityClass}} value, AuditEvent auditEvent) {
+    public {{.Business.EntityClass}} create(
+            {{.Business.EntityClass}} value, AuditEvent auditEvent) {
         try {
-            transactionTemplate.executeWithoutResult(
-                    status -> {
-                        jdbcTemplate.update(
-                                "insert into {{javaSQL .Business.TableName}} "
-                                        + "(id{{if .Tenancy}}, organization_id{{end}}"
+            return Objects.requireNonNull(
+                    transactionTemplate.execute(
+                            status -> {
+                                jdbcTemplate.update(
+                                        "insert into {{javaSQL .Business.TableName}} "
+                                                + "(id{{if .Tenancy}}, organization_id{{end}}"
 {{- range .Business.Fields}}
-                                        + ", {{javaSQL .Name}}"
+                                                + ", {{javaSQL .Name}}"
 {{- end}}
-                                        + ", version, created_at, updated_at) "
-                                        + "values (?{{if .Tenancy}}, ?{{end}}{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)",
-                                value.id(),
+                                                + ", version, created_at, updated_at) "
+                                                + "values (?{{if .Tenancy}}, ?{{end}}{{range .Business.Fields}}, ?{{end}}, ?, ?, ?)",
+                                        value.id(),
 {{- if .Tenancy}}
-                                value.organizationId(),
+                                        value.organizationId(),
 {{- end}}
 {{- range .Business.Fields}}
 {{- if eq .JavaType "Instant"}}
-                                timestamp(value.{{.JavaName}}()),
+                                        timestamp(value.{{.JavaName}}()),
 {{- else}}
-                                value.{{.JavaName}}(),
+                                        value.{{.JavaName}}(),
 {{- end}}
 {{- end}}
-                                value.version(),
-                                Timestamp.from(value.createdAt()),
-                                Timestamp.from(value.updatedAt()));
-                        appendAudit(auditEvent);
-                    });
+                                        value.version(),
+                                        Timestamp.from(value.createdAt()),
+                                        Timestamp.from(value.updatedAt()));
+                                appendAudit(auditEvent);
+                                return getInternal({{if .Tenancy}}value.organizationId(), {{end}}value.id())
+                                        .orElseThrow(() -> missing(value.id()));
+                            }));
         } catch (DataIntegrityViolationException exception) {
             throw conflict("a unique value already exists", exception);
         }

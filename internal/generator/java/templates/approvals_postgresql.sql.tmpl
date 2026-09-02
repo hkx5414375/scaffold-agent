@@ -53,8 +53,10 @@ create table approval_events (
     request_id text not null references approval_requests (id) on delete cascade,
     actor_user_id text not null references identity_users (id),
     status text not null check (status in ('pending', 'approved', 'rejected', 'cancelled')),
+    sequence bigint not null check (sequence in (1, 2)),
     comment text null,
-    created_at timestamptz not null
+    created_at timestamptz not null,
+    unique (request_id, sequence)
 );
 
-create index approval_events_request_idx on approval_events (request_id, created_at, id);
+create index approval_events_request_idx on approval_events (request_id, sequence, id);

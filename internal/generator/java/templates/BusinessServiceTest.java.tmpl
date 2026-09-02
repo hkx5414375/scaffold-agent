@@ -131,12 +131,14 @@ class {{.Business.EntityClass}}ServiceTest {
         private final List<String> auditActions = new ArrayList<>();
 
         @Override
-        public void create({{.Business.EntityClass}} candidate, AuditEvent auditEvent) {
+        public {{.Business.EntityClass}} create(
+                {{.Business.EntityClass}} candidate, AuditEvent auditEvent) {
             if (value != null) {
                 throw conflict();
             }
             value = candidate;
             auditActions.add(auditEvent.action());
+            return value;
         }
 
         @Override

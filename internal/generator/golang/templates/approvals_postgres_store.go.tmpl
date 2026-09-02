@@ -166,7 +166,7 @@ func (store *Store) Events(ctx context.Context, organizationID, requestID string
 		from approval_events event
 		join approval_requests request on request.id = event.request_id
 		where event.request_id = $1{{if .Tenancy}} and request.organization_id = $2{{end}}
-		order by event.created_at, event.id`, requestID{{if .Tenancy}}, organizationID{{end}})
+		order by event.sequence, event.id`, requestID{{if .Tenancy}}, organizationID{{end}})
 	if err != nil {
 		return nil, fmt.Errorf("query approval events: %w", err)
 	}
@@ -222,14 +222,21 @@ func scanRequest(row rowScanner) (approvals.Request, error) {
 
 func appendEvent(ctx context.Context, transaction pgx.Tx, event approvals.Event) error {
 	_, err := transaction.Exec(ctx, `
-		insert into approval_events (id, request_id, actor_user_id, status, comment, created_at)
-		values ($1, $2, $3, $4, nullif($5, ''), $6)`,
-		event.ID, event.RequestID, event.ActorUserID, event.Status, event.Comment, event.CreatedAt,
+		insert into approval_events (id, request_id, actor_user_id, status, sequence, comment, created_at)
+		values ($1, $2, $3, $4, $5, nullif($6, ''), $7)`,
+		event.ID, event.RequestID, event.ActorUserID, event.Status, eventSequence(event.Status), event.Comment, event.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("append approval event: %w", err)
 	}
 	return nil
+}
+
+func eventSequence(status string) int64 {
+	if status == approvals.StatusPending {
+		return 1
+	}
+	return 2
 }
 
 func appendAudit(ctx context.Context, transaction pgx.Tx, event identity.AuditEvent) error {

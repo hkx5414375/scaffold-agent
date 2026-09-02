@@ -763,6 +763,16 @@ func TestGenerateApprovalWorkflowsCapability(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
 		t.Fatalf("generated approval workflow OpenAPI is invalid YAML: %v", err)
 	}
+	postgresMigration := string(outputContent(generated,
+		"internal/platform/migrate/migrations/000250_approval_workflows.sql"))
+	postgresStore := string(outputContent(generated, "internal/approvals/postgres/store.go"))
+	if !strings.Contains(postgresMigration, "sequence bigint not null") ||
+		!strings.Contains(postgresMigration, "request_id, sequence") ||
+		!strings.Contains(postgresStore, "order by event.sequence, event.id") ||
+		!strings.Contains(postgresStore, "eventSequence(event.Status)") {
+		t.Fatalf("generated Go PostgreSQL approval history lacks stable business ordering:\n%s\n%s",
+			postgresMigration, postgresStore)
+	}
 	project.Spec.Database.Engine = "mysql"
 	generated, err = New().Generate(context.Background(), project)
 	if err != nil {
@@ -771,6 +781,13 @@ func TestGenerateApprovalWorkflowsCapability(t *testing.T) {
 	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000250_approval_workflows.sql"))
 	if strings.Contains(migration, "approval_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
 		t.Fatal("generated MySQL approval migration uses a disallowed cascade on a stored-column base")
+	}
+	store := string(outputContent(generated, "internal/approvals/mysql/store.go"))
+	if !strings.Contains(migration, "sequence bigint not null") ||
+		!strings.Contains(migration, "request_id, sequence") ||
+		!strings.Contains(store, "order by event.sequence, event.id") ||
+		!strings.Contains(store, "eventSequence(event.Status)") {
+		t.Fatalf("generated Go approval history lacks stable business ordering:\n%s\n%s", migration, store)
 	}
 }
 

@@ -196,7 +196,7 @@ public final class JdbcApprovalRepository implements ApprovalRepository {
                                 + "event.comment, event.created_at from approval_events event "
                                 + "join approval_requests request on request.id = event.request_id "
                                 + "where event.request_id = ?{{if .Tenancy}} and request.organization_id = ?{{end}}"
-                                + " order by event.created_at, event.id",
+                                + " order by event.sequence, event.id",
                         JdbcApprovalRepository::mapEvent,
                         {{if .Tenancy}}new Object[] {requestId, organizationId}{{else}}new Object[] {requestId}{{end}}));
     }
@@ -204,12 +204,13 @@ public final class JdbcApprovalRepository implements ApprovalRepository {
     private void appendEvent(ApprovalEvent event) {
         jdbcTemplate.update(
                 "insert into approval_events "
-                        + "(id, request_id, actor_user_id, status, comment, created_at) "
-                        + "values (?, ?, ?, ?, ?, ?)",
+                        + "(id, request_id, actor_user_id, status, sequence, comment, created_at) "
+                        + "values (?, ?, ?, ?, ?, ?, ?)",
                 event.id(),
                 event.requestId(),
                 event.actorUserId(),
                 event.status(),
+                ApprovalService.PENDING.equals(event.status()) ? 1L : 2L,
                 event.comment(),
                 Timestamp.from(event.createdAt()));
     }

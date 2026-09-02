@@ -1285,6 +1285,15 @@ func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
 					t.Fatal("generated Java MySQL approval migration uses a disallowed cascade on a stored-column base")
 				}
 			}
+			migration := string(outputContent(result,
+				"src/main/resources/db/migration/V000250__approval_workflows.sql"))
+			repository := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/approvals/JdbcApprovalRepository.java"))
+			if !strings.Contains(migration, "sequence bigint not null") ||
+				!strings.Contains(migration, "request_id, sequence") ||
+				!strings.Contains(repository, "order by event.sequence, event.id") {
+				t.Fatalf("generated Java approval history lacks stable business ordering:\n%s\n%s", migration, repository)
+			}
 		})
 	}
 }
@@ -1353,6 +1362,15 @@ func TestGeneratePortableBusinessCRUD(t *testing.T) {
 			if owner := outputOwner(result,
 				"src/main/java/com/scaffold/generated/demoservice/tasks/TaskService.java"); owner != businessOwner {
 				t.Fatalf("generated CRUD owner = %q, want %q", owner, businessOwner)
+			}
+			service := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/tasks/TaskService.java"))
+			repository := string(outputContent(result,
+				"src/main/java/com/scaffold/generated/demoservice/tasks/JdbcTaskRepository.java"))
+			if !strings.Contains(service, "return repository.create(") ||
+				!strings.Contains(repository, "return Objects.requireNonNull(") ||
+				!strings.Contains(repository, ".orElseThrow(() -> missing(value.id()))") {
+				t.Fatalf("generated Java CRUD create does not return the database-normalized record:\n%s\n%s", service, repository)
 			}
 			migration := string(outputContent(result,
 				"src/main/resources/db/migration/V000100__tasks_task.sql"))

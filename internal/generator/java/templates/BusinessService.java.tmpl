@@ -41,8 +41,9 @@ public final class {{.Business.EntityClass}}Service {
                         1L,
                         now,
                         now);
-        repository.create(value, audit(actor, "{{.Business.PermissionPrefix}}:create", value.id(), now));
-        return value;
+        return repository.create(
+                value,
+                audit(actor, "{{.Business.PermissionPrefix}}:create", value.id(), now));
     }
 
     public {{.Business.EntityClass}} get(String id, Principal actor) {
