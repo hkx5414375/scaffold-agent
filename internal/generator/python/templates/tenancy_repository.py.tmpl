@@ -102,24 +102,27 @@ class SQLAlchemyTenancyRepository:
         return [_map_organization(row) for row in rows]
 
     def membership_role(self, organization_id: str, user_id: str) -> str | None:
+{{- if .TenancyLifecycle}}
         statement = (
             select(organization_memberships.c.role_code)
-{{- if .TenancyLifecycle}}
             .select_from(
                 organization_memberships.join(
                     organizations,
                     organizations.c.id == organization_memberships.c.organization_id,
                 )
             )
-{{- end}}
             .where(
                 organization_memberships.c.organization_id == organization_id,
                 organization_memberships.c.user_id == user_id,
-{{- if .TenancyLifecycle}}
                 organizations.c.status == "active",
-{{- end}}
             )
         )
+{{- else}}
+        statement = select(organization_memberships.c.role_code).where(
+            organization_memberships.c.organization_id == organization_id,
+            organization_memberships.c.user_id == user_id,
+        )
+{{- end}}
         with self._engine.connect() as connection:
             value = connection.execute(statement).scalar_one_or_none()
         return str(value) if value is not None else None

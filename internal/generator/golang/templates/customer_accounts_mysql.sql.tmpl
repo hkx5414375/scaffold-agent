@@ -26,7 +26,7 @@ create table customer_accounts (
     constraint customer_accounts_status_check check (status in ('active', 'suspended', 'closed')),
     constraint customer_accounts_version_check check (version > 0),
 {{- if .Tenancy}}
-    constraint customer_accounts_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+    constraint customer_accounts_organization_fk foreign key (organization_id) references organizations (id),
 {{- end}}
     unique key customer_accounts_scope_email_unique (customer_scope, email),
     index customer_accounts_scope_status_idx (customer_scope, status, id)

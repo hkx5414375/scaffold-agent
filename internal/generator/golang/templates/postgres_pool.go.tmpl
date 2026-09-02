@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -23,6 +25,17 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config.MinConns = 2
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.MaxConnLifetime = 30 * time.Minute
+	config.AfterConnect = func(_ context.Context, connection *pgx.Conn) error {
+		connection.TypeMap().RegisterType(&pgtype.Type{
+			Name: "timestamp", OID: pgtype.TimestampOID,
+			Codec: &pgtype.TimestampCodec{ScanLocation: time.UTC},
+		})
+		connection.TypeMap().RegisterType(&pgtype.Type{
+			Name: "timestamptz", OID: pgtype.TimestamptzOID,
+			Codec: &pgtype.TimestamptzCodec{ScanLocation: time.UTC},
+		})
+		return nil
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)

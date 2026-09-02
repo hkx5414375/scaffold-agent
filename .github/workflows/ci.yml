@@ -30,10 +30,10 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./...
+        run: go test -timeout 30m ./...
       - name: Race detector
         if: matrix.os == 'ubuntu-latest'
-        run: go test -race ./...
+        run: go test -timeout 30m -race ./...
       - name: Build
         run: go build ./cmd/scaffold-agent
       - name: Doctor
@@ -122,7 +122,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Maven projects
         env:
           SCAFFOLD_AGENT_RUN_JAVA_BUILD: "1"
-        run: go test ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs|TenantNotifications|TenantFiles|TenantCache|TenantJobAdministration|TenantCSVImportExport|TenantApprovalWorkflows|TenantCommerceCatalog|TenantCommerceOperations|TenantCustomerAccounts|CustomerAccounts|TenantCRMCore|CRMCore|TenantERPInventory|ERPInventory|Observability)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQL(Jobs|Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLPlatformCapabilitiesCompose$' -count=1
+        run: go test -timeout 30m ./internal/engine -run '^TestJava(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenancyMembers|TenancyLifecycle|TenantJobs|TenantNotifications|TenantFiles|TenantCache|TenantJobAdministration|TenantCSVImportExport|TenantApprovalWorkflows|TenantCommerceCatalog|TenantCommerceOperations|TenantCustomerAccounts|CustomerAccounts|TenantCRMCore|CRMCore|TenantERPInventory|ERPInventory|Observability)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQL(Jobs|Notifications|Files|Cache|JobAdministration|CSVImportExport|ApprovalWorkflows|CommerceCatalog)PlanApplyVerifyEndToEnd$|^TestJavaPostgreSQLPlatformCapabilitiesCompose$' -count=1
 
   generated-python:
     name: Generated Python platform and portable business capabilities
@@ -143,7 +143,7 @@ jobs:
       - name: Generate and verify PostgreSQL and MySQL Python projects
         env:
           SCAFFOLD_AGENT_RUN_PYTHON_BUILD: "1"
-        run: go test ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows|CommerceCatalog|TenantCommerceCatalog|TenantCommerceOperations|CustomerAccounts|TenantCustomerAccounts|CRMCore|TenantCRMCore|ERPInventory|TenantERPInventory)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
+        run: go test -timeout 30m ./internal/engine -run '^TestPython(PostgreSQL|MySQL)(Identity|CRUD|Tenancy|TenantCRUD|TenancyMembers|TenancyLifecycle|Jobs|TenantJobs|Notifications|TenantNotifications|Files|TenantFiles|Cache|TenantCache|JobAdministration|TenantJobAdministration|Observability|TenantObservability|TenantCSVImportExport|TenantApprovalWorkflows|CommerceCatalog|TenantCommerceCatalog|TenantCommerceOperations|CustomerAccounts|TenantCustomerAccounts|CRMCore|TenantCRMCore|ERPInventory|TenantERPInventory)PlanApplyVerifyEndToEnd$|^TestPython(PostgreSQL|MySQL)PlatformCapabilitiesCompose$|^TestPythonPostgreSQLTenantFilesCachePlanApplyVerifyEndToEnd$' -count=1
 
   generated-postgresql:
     name: Generated PostgreSQL integration

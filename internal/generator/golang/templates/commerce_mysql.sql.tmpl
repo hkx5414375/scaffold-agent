@@ -27,7 +27,7 @@ create table commerce_carts (
     organization_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
     constraint commerce_cart_customer_fk foreign key (customer_id) references customer_accounts (id),
 {{- if .Tenancy}}
-    constraint commerce_cart_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+    constraint commerce_cart_organization_fk foreign key (organization_id) references organizations (id),
 {{- end}}
     constraint commerce_cart_status_check check (status in ('active', 'checked_out')),
     constraint commerce_cart_version_check check (version > 0),
@@ -89,7 +89,7 @@ create table commerce_coupons (
     organization_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
     constraint commerce_coupon_campaign_fk foreign key (campaign_id) references commerce_campaigns (id),
 {{- if .Tenancy}}
-    constraint commerce_coupon_organization_fk foreign key (organization_id) references organizations (id) on delete cascade,
+    constraint commerce_coupon_organization_fk foreign key (organization_id) references organizations (id),
 {{- end}}
     constraint commerce_coupon_uses_check check (maximum_uses > 0 and redeemed_uses between 0 and maximum_uses),
     unique key commerce_coupon_scope_code_unique (organization_scope, code)

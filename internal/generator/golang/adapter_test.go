@@ -760,6 +760,15 @@ func TestGenerateApprovalWorkflowsCapability(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(openAPI), &document); err != nil {
 		t.Fatalf("generated approval workflow OpenAPI is invalid YAML: %v", err)
 	}
+	project.Spec.Database.Engine = "mysql"
+	generated, err = New().Generate(context.Background(), project)
+	if err != nil {
+		t.Fatalf("Generate(MySQL) error = %v", err)
+	}
+	migration := string(outputContent(generated, "internal/platform/migrate/migrations/000250_approval_workflows.sql"))
+	if strings.Contains(migration, "approval_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+		t.Fatal("generated MySQL approval migration uses a disallowed cascade on a stored-column base")
+	}
 }
 
 func TestGenerateApprovalWorkflowsRequiresBusinessEntityAndExactWorkflow(t *testing.T) {
@@ -863,6 +872,14 @@ func TestGenerateCommerceCatalogAcrossDatabasesAndSurfaces(t *testing.T) {
 			if !strings.Contains(storefrontConfig, "SCAFFOLD_ORGANIZATION_ID") {
 				t.Fatal("Generate() did not keep tenant storefront scope server-only")
 			}
+			if engine == "mysql" {
+				migration := string(outputContent(generated, "internal/platform/migrate/migrations/000260_commerce_catalog.sql"))
+				if strings.Contains(migration, "regexp binary") ||
+					!strings.Contains(migration, "regexp_like(sku, '^[A-Z0-9][A-Z0-9._-]{0,63}$', 'c')") ||
+					strings.Contains(migration, "catalog_products_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+					t.Fatal("generated MySQL catalog migration is incompatible with case-sensitive regex or stored-column foreign-key rules")
+				}
+			}
 		})
 	}
 }
@@ -936,6 +953,12 @@ func TestGenerateCustomerAccountsAcrossDatabases(t *testing.T) {
 			mainSource := string(outputContent(generated, "cmd/server/main.go"))
 			if !strings.Contains(mainSource, "customerAPI.Register") || !strings.Contains(mainSource, "secureCookies") {
 				t.Fatal("Generate() did not wire customer routes with the shared secure cookie setting")
+			}
+			if engine == "mysql" {
+				migration := string(outputContent(generated, "internal/platform/migrate/migrations/000270_customer_accounts.sql"))
+				if strings.Contains(migration, "customer_accounts_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+					t.Fatal("generated MySQL customer migration uses a disallowed cascade on a stored-column base")
+				}
 			}
 			openAPI := outputContent(generated, "api/openapi.yaml")
 			var document struct {
@@ -1165,6 +1188,28 @@ func TestGenerateCommerceOperationsForBothDatabases(t *testing.T) {
 			} {
 				if outputContent(generated, path) == nil {
 					t.Errorf("commerce output %s is missing", path)
+				}
+			}
+			storePath := "internal/commerce/" + databaseTemplates[database].Data.PackageName + "/store.go"
+			storeSource := string(outputContent(generated, storePath))
+			if storeSource == "" || strings.Contains(storeSource, "return command.Order") {
+				t.Fatalf("generated commerce store does not return the database-normalized checkout")
+			}
+			if database == "postgresql" {
+				poolSource := string(outputContent(generated, "internal/platform/postgres/pool.go"))
+				if !strings.Contains(poolSource, "TimestamptzCodec{ScanLocation: time.UTC}") ||
+					!strings.Contains(poolSource, "TimestampCodec{ScanLocation: time.UTC}") {
+					t.Fatal("generated PostgreSQL pool does not normalize scanned timestamps to UTC")
+				}
+			} else {
+				migration := string(outputContent(generated, "internal/platform/migrate/migrations/000300_commerce_operations.sql"))
+				for _, disallowed := range []string{
+					"commerce_cart_organization_fk foreign key (organization_id) references organizations (id) on delete cascade",
+					"commerce_coupon_organization_fk foreign key (organization_id) references organizations (id) on delete cascade",
+				} {
+					if strings.Contains(migration, disallowed) {
+						t.Fatalf("generated MySQL commerce migration contains disallowed stored-column cascade %q", disallowed)
+					}
 				}
 			}
 			var document struct {

@@ -110,8 +110,10 @@ func (store *Store) Checkout(ctx context.Context, command commerce.CheckoutComma
 	if err != nil { return commerce.Order{}, rollback(transaction, persistenceError(err)) }
 	if err := appendOrderEvent(ctx, transaction, command.Order.ID, "", string(command.Order.Status), "", command.Order.CreatedAt); err != nil { return commerce.Order{}, rollback(transaction, err) }
 	if err := appendAudit(ctx, transaction, command.Audit); err != nil { return commerce.Order{}, rollback(transaction, err) }
+	value, err := loadOrder(ctx, transaction, command.Order.OrganizationID, command.Order.CustomerID, command.Order.ID)
+	if err != nil { return commerce.Order{}, rollback(transaction, err) }
 	if err := transaction.Commit(ctx); err != nil { return commerce.Order{}, fmt.Errorf("commit checkout: %w", err) }
-	return command.Order, nil
+	return value, nil
 }
 
 func (store *Store) GetOrder(ctx context.Context, organizationID, customerID, id string) (commerce.Order, error) {

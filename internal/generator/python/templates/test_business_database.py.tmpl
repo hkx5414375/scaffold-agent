@@ -14,7 +14,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
 from {{.PackageName}}.database import create_database_engine
-from {{.PackageName}}.identity.models import AuditEvent, audit_events, metadata{{if .Tenancy}}, roles, users{{end}}
+from {{.PackageName}}.identity.models import (
+    AuditEvent,
+    audit_events,
+    metadata,
+{{- if .Tenancy}}
+    roles,
+    users,
+{{- end}}
+)
 from {{.PackageName}}.migrations import upgrade_database
 from {{.PackageName}}.{{.Business.PackageName}}.models import {{.Business.EntityClass}}Record
 from {{.PackageName}}.{{.Business.PackageName}}.repository import (

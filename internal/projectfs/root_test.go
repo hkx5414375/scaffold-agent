@@ -61,12 +61,24 @@ func TestResolveRejectsEscapingSymlink(t *testing.T) {
 func TestOpenSupportsMissingProjectDirectory(t *testing.T) {
 	t.Parallel()
 
-	rootPath := filepath.Join(t.TempDir(), "new", "project")
+	temporaryRoot := t.TempDir()
+	rootPath := filepath.Join(temporaryRoot, "new", "project")
 	root, err := Open(rootPath)
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	if root.Path() != filepath.Clean(rootPath) {
-		t.Fatalf("Open() path = %q, want %q", root.Path(), filepath.Clean(rootPath))
+	if filepath.Base(root.Path()) != "project" || filepath.Base(filepath.Dir(root.Path())) != "new" {
+		t.Fatalf("Open() path = %q, want missing tail new/project", root.Path())
+	}
+	gotParent, err := os.Stat(filepath.Dir(filepath.Dir(root.Path())))
+	if err != nil {
+		t.Fatalf("Stat() resolved parent error = %v", err)
+	}
+	wantParent, err := os.Stat(temporaryRoot)
+	if err != nil {
+		t.Fatalf("Stat() temporary root error = %v", err)
+	}
+	if !os.SameFile(gotParent, wantParent) {
+		t.Fatalf("Open() parent = %q, want same physical directory as %q", filepath.Dir(filepath.Dir(root.Path())), temporaryRoot)
 	}
 }

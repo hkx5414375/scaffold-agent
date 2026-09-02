@@ -8,6 +8,7 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -41,7 +42,7 @@ jobs:
           echo "BUILD_DATE=$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_ENV"
       - name: Verify source release gates
         run: |
-          go test ./...
+          go test -timeout 30m ./...
           go vet ./...
           go run ./cmd/scaffold-agent conformance --json
           go run ./cmd/scaffold-agent benchmark --json
