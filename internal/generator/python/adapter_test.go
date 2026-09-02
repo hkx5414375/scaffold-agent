@@ -2,7 +2,9 @@ package python
 
 import (
 	"context"
+	"io/fs"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -12,6 +14,29 @@ import (
 	"github.com/hkx5414375/scaffold-agent/internal/spec"
 	"go.yaml.in/yaml/v3"
 )
+
+func TestEmbeddedMigrationIdentifiersStayPortable(t *testing.T) {
+	t.Parallel()
+
+	paths, err := fs.Glob(templateFS, "templates/*_migration.py.tmpl")
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	identifier := regexp.MustCompile(`"(?:fk|pk|uq|ix|ck)_[^"]+"`)
+	for _, path := range paths {
+		content, err := templateFS.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		for _, quoted := range identifier.FindAllString(string(content), -1) {
+			name := strings.Trim(quoted, `"`)
+			if len(name) > 63 {
+				t.Errorf("%s contains %d-character SQL identifier %q; PostgreSQL permits at most 63",
+					path, len(name), name)
+			}
+		}
+	}
+}
 
 func TestGenerateFoundationForBothDatabases(t *testing.T) {
 	t.Parallel()
