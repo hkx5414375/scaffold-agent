@@ -57,8 +57,7 @@ public final class FileAssetService {
                         storageKey,
                         now);
         try {
-            repository.create(asset, audit(actor, "files:create", id, now));
-            return asset;
+            return repository.create(asset, audit(actor, "files:create", id, now));
         } catch (RuntimeException exception) {
             try {
                 blobs.delete(storageKey);

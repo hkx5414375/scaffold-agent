@@ -132,12 +132,13 @@ class FileAssetServiceTest {
         private boolean restoreCalled;
 
         @Override
-        public void create(FileAsset value, AuditEvent auditEvent) {
+        public FileAsset create(FileAsset value, AuditEvent auditEvent) {
             if (createFailure) {
                 throw new IllegalStateException("database unavailable");
             }
             asset = value;
             deleted = false;
+            return value;
         }
 
         @Override

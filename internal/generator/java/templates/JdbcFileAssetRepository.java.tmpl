@@ -31,8 +31,9 @@ public final class JdbcFileAssetRepository implements FileAssetRepository {
     }
 
     @Override
-    public void create(FileAsset asset, AuditEvent auditEvent) {
-        transactions.executeWithoutResult(
+    public FileAsset create(FileAsset asset, AuditEvent auditEvent) {
+        FileAsset persisted =
+                transactions.execute(
                 status -> {
                     jdbc.update(
                             """
@@ -50,7 +51,12 @@ public final class JdbcFileAssetRepository implements FileAssetRepository {
                             asset.storageKey(),
                             Timestamp.from(asset.createdAt()));
                     appendAudit(auditEvent);
+                    return getAny(nullableOrganization(asset.organizationId()), asset.id());
                 });
+        if (persisted == null) {
+            throw new IllegalStateException("file creation transaction returned no value");
+        }
+        return persisted;
     }
 
     @Override

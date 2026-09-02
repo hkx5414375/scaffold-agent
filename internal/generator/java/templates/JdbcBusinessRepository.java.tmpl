@@ -56,7 +56,11 @@ public final class Jdbc{{.Business.EntityClass}}Repository
                                 value.organizationId(),
 {{- end}}
 {{- range .Business.Fields}}
+{{- if eq .JavaType "Instant"}}
+                                timestamp(value.{{.JavaName}}()),
+{{- else}}
                                 value.{{.JavaName}}(),
+{{- end}}
 {{- end}}
                                 value.version(),
                                 Timestamp.from(value.createdAt()),
@@ -116,7 +120,11 @@ public final class Jdbc{{.Business.EntityClass}}Repository
                                                         + ", version = version + 1, updated_at = ? "
                                                         + "where id = ?{{if .Tenancy}} and organization_id = ?{{end}} and version = ?",
 {{- range .Business.Fields}}
+{{- if eq .JavaType "Instant"}}
+                                                timestamp(value.{{.JavaName}}()),
+{{- else}}
                                                 value.{{.JavaName}}(),
+{{- end}}
 {{- end}}
                                                 Timestamp.from(value.updatedAt()),
                                                 value.id(),
@@ -223,6 +231,10 @@ public final class Jdbc{{.Business.EntityClass}}Repository
 
     private static Instant instant(Timestamp timestamp) {
         return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static Timestamp timestamp(Instant instant) {
+        return instant == null ? null : Timestamp.from(instant);
     }
 
     private static String emptyToNull(String value) {

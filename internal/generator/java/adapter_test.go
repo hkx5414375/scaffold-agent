@@ -139,6 +139,15 @@ func TestGenerateCommerceCatalogAcrossDatabasesAndSurfaces(t *testing.T) {
 					"/api/v1/storefront/**") {
 				t.Fatal("generated Java catalog lacks public or protected route wiring")
 			}
+			if database == "mysql" {
+				migration := strings.Join(strings.Fields(string(outputContent(result,
+					"src/main/resources/db/migration/V000260__commerce_catalog.sql"))), " ")
+				if strings.Contains(migration, "regexp binary") ||
+					!strings.Contains(migration, "regexp_like(sku, '^[A-Z0-9][A-Z0-9._-]{0,63}$', 'c')") ||
+					strings.Contains(migration, "catalog_products_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+					t.Fatal("generated Java MySQL catalog migration violates regex or stored-column foreign-key rules")
+				}
+			}
 		})
 	}
 }
@@ -215,6 +224,13 @@ func TestGenerateCustomerAccountsAcrossDatabasesAndSurfaces(t *testing.T) {
 				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")),
 					"CustomerAccountsView") {
 				t.Fatal("generated Java customer accounts lack public or administration wiring")
+			}
+			if database == "mysql" {
+				migration := strings.Join(strings.Fields(string(outputContent(result,
+					"src/main/resources/db/migration/V000270__customer_accounts.sql"))), " ")
+				if strings.Contains(migration, "customer_accounts_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+					t.Fatal("generated Java MySQL customer migration uses a disallowed cascade on a stored-column base")
+				}
 			}
 		})
 	}
@@ -424,6 +440,18 @@ func TestGenerateCommerceOperationsAcrossDatabasesAndSurfaces(t *testing.T) {
 				!strings.Contains(string(outputContent(result, "web/admin/src/App.vue")),
 					"CommerceView") {
 				t.Fatal("generated Java commerce lacks contract or surface wiring")
+			}
+			if database == "mysql" {
+				migration := strings.Join(strings.Fields(string(outputContent(result,
+					"src/main/resources/db/migration/V000300__commerce_operations.sql"))), " ")
+				for _, disallowed := range []string{
+					"commerce_cart_organization_fk foreign key (organization_id) references organizations (id) on delete cascade",
+					"commerce_coupon_organization_fk foreign key (organization_id) references organizations (id) on delete cascade",
+				} {
+					if strings.Contains(migration, disallowed) {
+						t.Fatalf("generated Java MySQL commerce migration contains disallowed stored-column cascade %q", disallowed)
+					}
+				}
 			}
 		})
 	}
@@ -1217,9 +1245,10 @@ func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
 				States: []string{"pending", "approved", "rejected", "cancelled"},
 			}}
 			project.Spec.Modules = []spec.Module{module}
-			project.Spec.Capabilities = []spec.CapabilitySelection{{
-				Name: approvalsOwner, Version: approvalsVersion,
-			}}
+			project.Spec.Capabilities = []spec.CapabilitySelection{
+				{Name: tenancyOwner, Version: tenancyLifecycleVersion},
+				{Name: approvalsOwner, Version: approvalsVersion},
+			}
 			result, err := New().Generate(context.Background(), project)
 			if err != nil {
 				t.Fatalf("Generate() error = %v", err)
@@ -1248,6 +1277,13 @@ func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
 			if !strings.Contains(string(openAPI), "/api/v1/approvals/{id}/approve:") ||
 				!strings.Contains(string(openAPI), "approvals:decide") {
 				t.Fatalf("generated approval OpenAPI is incomplete:\n%s", openAPI)
+			}
+			if database == "mysql" {
+				migration := strings.Join(strings.Fields(string(outputContent(result,
+					"src/main/resources/db/migration/V000250__approval_workflows.sql"))), " ")
+				if strings.Contains(migration, "approval_organization_fk foreign key (organization_id) references organizations (id) on delete cascade") {
+					t.Fatal("generated Java MySQL approval migration uses a disallowed cascade on a stored-column base")
+				}
 			}
 		})
 	}

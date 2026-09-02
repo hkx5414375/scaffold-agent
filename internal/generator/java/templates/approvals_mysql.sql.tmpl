@@ -49,7 +49,7 @@ create table approval_requests (
         foreign key (resolved_by_user_id) references identity_users (id),
 {{- if .Tenancy}}
     constraint approval_organization_fk
-        foreign key (organization_id) references organizations (id) on delete cascade,
+        foreign key (organization_id) references organizations (id),
 {{- end}}
     unique key approval_pending_subject_unique (approval_scope, pending_subject_id),
     index approval_scope_status_idx (approval_scope, status, id),

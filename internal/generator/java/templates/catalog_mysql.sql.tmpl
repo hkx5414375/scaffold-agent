@@ -26,13 +26,13 @@ create table catalog_products (
     updated_at datetime(6) not null,
     catalog_scope varchar(191) generated always as (coalesce(organization_id, '')) stored,
     constraint catalog_products_price_check check (price_minor >= 0),
-    constraint catalog_products_sku_check check (sku regexp binary '^[A-Z0-9][A-Z0-9._-]{0,63}$'),
-    constraint catalog_products_currency_check check (currency regexp '^[A-Z]{3}$'),
+    constraint catalog_products_sku_check check (regexp_like(sku, '^[A-Z0-9][A-Z0-9._-]{0,63}$', 'c')),
+    constraint catalog_products_currency_check check (regexp_like(currency, '^[A-Z]{3}$', 'c')),
     constraint catalog_products_status_check check (status in ('draft', 'active', 'archived')),
     constraint catalog_products_version_check check (version > 0),
 {{- if .Tenancy}}
     constraint catalog_products_organization_fk foreign key (organization_id)
-        references organizations (id) on delete cascade,
+        references organizations (id),
 {{- end}}
     unique key catalog_products_scope_sku_unique (catalog_scope, sku),
     index catalog_products_scope_status_idx (catalog_scope, status, id)
