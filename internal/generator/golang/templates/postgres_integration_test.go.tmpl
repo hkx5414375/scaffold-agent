@@ -72,6 +72,7 @@ import (
 	"{{.ModulePath}}/internal/notifications"
 {{- end}}
 	"{{.ModulePath}}/internal/platform/migrate"
+	platformpostgres "{{.ModulePath}}/internal/platform/postgres"
 	business "{{.ModulePath}}/internal/{{.Business.ModuleName}}"
 	businesspostgres "{{.ModulePath}}/internal/{{.Business.ModuleName}}/postgres"
 {{- if .CSVTransfer}}
@@ -1055,6 +1056,7 @@ func isolatedPostgreSQL(t *testing.T) *pgxpool.Pool {
 	testConfig.ConnConfig.RuntimeParams["search_path"] = schema
 	testConfig.MaxConns = 4
 	testConfig.MinConns = 0
+	platformpostgres.ConfigureUTC(testConfig)
 	pool, err := pgxpool.NewWithConfig(ctx, testConfig)
 	if err != nil {
 		t.Fatalf("create isolated pool: %v", err)

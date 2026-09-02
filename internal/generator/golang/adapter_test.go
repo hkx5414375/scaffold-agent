@@ -166,6 +166,9 @@ func TestGenerateBusinessModuleIsFormatted(t *testing.T) {
 		!strings.Contains(openAPISource, `pattern: "^[1-9][0-9]*$"`) {
 		t.Fatal("Generate() did not preserve int64 optimistic-lock versions as decimal strings")
 	}
+	if !strings.Contains(integrationTest, "platformpostgres.ConfigureUTC(testConfig)") {
+		t.Fatal("Generate() PostgreSQL integration test bypasses the production timestamp configuration")
+	}
 }
 
 func TestGenerateMySQLBusinessModuleIsFormatted(t *testing.T) {
@@ -1194,6 +1197,9 @@ func TestGenerateCommerceOperationsForBothDatabases(t *testing.T) {
 			storeSource := string(outputContent(generated, storePath))
 			if storeSource == "" || strings.Contains(storeSource, "return command.Order") {
 				t.Fatalf("generated commerce store does not return the database-normalized checkout")
+			}
+			if database == "mysql" && strings.Contains(storeSource, "set updated_at=updated_at") {
+				t.Fatal("generated MySQL commerce store relies on no-op update affected-row semantics")
 			}
 			if database == "postgresql" {
 				poolSource := string(outputContent(generated, "internal/platform/postgres/pool.go"))

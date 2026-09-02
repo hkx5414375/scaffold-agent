@@ -25,7 +25,27 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config.MinConns = 2
 	config.MaxConnIdleTime = 5 * time.Minute
 	config.MaxConnLifetime = 30 * time.Minute
-	config.AfterConnect = func(_ context.Context, connection *pgx.Conn) error {
+	ConfigureUTC(config)
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
+	}
+	return pool, nil
+}
+
+// ConfigureUTC makes timestamp scans deterministic while preserving existing connection hooks.
+func ConfigureUTC(config *pgxpool.Config) {
+	afterConnect := config.AfterConnect
+	config.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
+		if afterConnect != nil {
+			if err := afterConnect(ctx, connection); err != nil {
+				return err
+			}
+		}
 		connection.TypeMap().RegisterType(&pgtype.Type{
 			Name: "timestamp", OID: pgtype.TimestampOID,
 			Codec: &pgtype.TimestampCodec{ScanLocation: time.UTC},
@@ -36,13 +56,4 @@ func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 		})
 		return nil
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
-	}
-	return pool, nil
 }
