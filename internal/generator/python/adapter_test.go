@@ -38,6 +38,27 @@ func TestEmbeddedMigrationIdentifiersStayPortable(t *testing.T) {
 	}
 }
 
+func TestEmbeddedExceptionsRemainTracebackMutable(t *testing.T) {
+	t.Parallel()
+
+	paths, err := fs.Glob(templateFS, "templates/*.py.tmpl")
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	frozenException := regexp.MustCompile(
+		`(?m)@dataclass\(frozen=True, slots=True\)\r?\nclass [A-Za-z0-9_]+\(Exception\):`,
+	)
+	for _, path := range paths {
+		content, err := templateFS.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		if frozenException.Match(content) {
+			t.Errorf("%s freezes an Exception and prevents Python from attaching tracebacks", path)
+		}
+	}
+}
+
 func TestGenerateFoundationForBothDatabases(t *testing.T) {
 	t.Parallel()
 
@@ -58,7 +79,7 @@ func TestGenerateFoundationForBothDatabases(t *testing.T) {
 			if !reflect.DeepEqual(first, second) {
 				t.Fatal("Generate() is not deterministic")
 			}
-			if first.CapabilityLock[baseOwner] != baseVersion || len(first.Outputs) != 29 {
+			if first.CapabilityLock[baseOwner] != baseVersion || len(first.Outputs) != 30 {
 				t.Fatalf("Generate() result = %#v", first)
 			}
 			for _, path := range []string{
@@ -96,7 +117,7 @@ func TestGenerateSharedNuxtStorefrontFoundation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 29+len(storefrontui.BaseTemplates) ||
+	if len(generated.Outputs) != 30+len(storefrontui.BaseTemplates) ||
 		generated.CapabilityLock[storefrontOwner] != storefrontVersion {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
@@ -636,7 +657,7 @@ func TestGenerateOrganizationTenancyForBothDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 66 {
+			if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 67 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -681,7 +702,7 @@ func TestGenerateOrganizationTenancyWithoutBusiness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 37 {
+	if generated.CapabilityLock[tenancyOwner] != tenancyVersion || len(generated.Outputs) != 38 {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
 	if outputContent(generated, "src/demo_service/migration/versions/000051_tenant_business.py") != nil {
@@ -706,7 +727,7 @@ func TestGenerateOrganizationMemberAdministrationForBothDatabases(t *testing.T) 
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[tenancyOwner] != tenancyMembersVersion || len(generated.Outputs) != 74 {
+			if generated.CapabilityLock[tenancyOwner] != tenancyMembersVersion || len(generated.Outputs) != 75 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -753,8 +774,8 @@ func TestOrganizationMemberUpgradePreservesTenancyMigration(t *testing.T) {
 	if !reflect.DeepEqual(outputContent(baselineResult, path), outputContent(upgradedResult, path)) {
 		t.Fatal("organization member upgrade rewrote the 0.1.0 tenancy migration")
 	}
-	if len(upgradedResult.Outputs) != 44 {
-		t.Fatalf("Generate(upgraded) output count = %d, want 44", len(upgradedResult.Outputs))
+	if len(upgradedResult.Outputs) != 45 {
+		t.Fatalf("Generate(upgraded) output count = %d, want 45", len(upgradedResult.Outputs))
 	}
 }
 
@@ -775,7 +796,7 @@ func TestGenerateOrganizationLifecycleForBothDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion || len(generated.Outputs) != 81 {
+			if generated.CapabilityLock[tenancyOwner] != tenancyLifecycleVersion || len(generated.Outputs) != 82 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -822,8 +843,8 @@ func TestOrganizationLifecycleUpgradePreservesPriorMigrations(t *testing.T) {
 			t.Fatalf("organization lifecycle upgrade rewrote %s", path)
 		}
 	}
-	if len(lifecycleResult.Outputs) != 50 {
-		t.Fatalf("Generate(lifecycle) output count = %d, want 50", len(lifecycleResult.Outputs))
+	if len(lifecycleResult.Outputs) != 51 {
+		t.Fatalf("Generate(lifecycle) output count = %d, want 51", len(lifecycleResult.Outputs))
 	}
 }
 
@@ -843,7 +864,7 @@ func TestGenerateDurableJobsForBothDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[jobsOwner] != jobsVersion || len(generated.Outputs) != 38 {
+			if generated.CapabilityLock[jobsOwner] != jobsVersion || len(generated.Outputs) != 39 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -882,8 +903,8 @@ func TestGenerateDurableJobsComposesWithTenantLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 90 {
-		t.Fatalf("Generate() output count = %d, want 90", len(generated.Outputs))
+	if len(generated.Outputs) != 91 {
+		t.Fatalf("Generate() output count = %d, want 91", len(generated.Outputs))
 	}
 	migration := string(outputContent(
 		generated,
@@ -913,7 +934,7 @@ func TestGenerateNotificationsResolveJobsForBothDatabases(t *testing.T) {
 			}
 			if generated.CapabilityLock[jobsOwner] != jobsVersion ||
 				generated.CapabilityLock[notificationsOwner] != notificationsVersion ||
-				len(generated.Outputs) != 47 {
+				len(generated.Outputs) != 48 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -962,7 +983,7 @@ func TestGenerateNotificationsComposeWithTenantLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 99 ||
+	if len(generated.Outputs) != 100 ||
 		generated.CapabilityLock[jobsOwner] != jobsVersion ||
 		generated.CapabilityLock[notificationsOwner] != notificationsVersion {
 		t.Fatalf("Generate() result = %#v", generated)
@@ -985,7 +1006,7 @@ func TestGenerateFileAssetsForBothDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[filesOwner] != filesVersion || len(generated.Outputs) != 40 {
+			if generated.CapabilityLock[filesOwner] != filesVersion || len(generated.Outputs) != 41 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1044,7 +1065,7 @@ func TestGenerateFileAssetsComposeWithTenantLifecycleAndAdministration(t *testin
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 93 ||
+	if len(generated.Outputs) != 94 ||
 		generated.CapabilityLock[filesOwner] != filesVersion {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
@@ -1078,7 +1099,7 @@ func TestGenerateApplicationCacheForBothDatabases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
-			if generated.CapabilityLock[cacheOwner] != cacheVersion || len(generated.Outputs) != 36 {
+			if generated.CapabilityLock[cacheOwner] != cacheVersion || len(generated.Outputs) != 37 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1119,7 +1140,7 @@ func TestGenerateApplicationCacheComposesAfterFileAssets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 100 || generated.CapabilityLock[cacheOwner] != cacheVersion {
+	if len(generated.Outputs) != 101 || generated.CapabilityLock[cacheOwner] != cacheVersion {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
 	migration := string(outputContent(
@@ -1150,7 +1171,7 @@ func TestGenerateJobAdministrationForBothDatabases(t *testing.T) {
 			}
 			if generated.CapabilityLock[jobsOwner] != jobsVersion ||
 				generated.CapabilityLock[jobAdminOwner] != jobAdminVersion ||
-				len(generated.Outputs) != 47 {
+				len(generated.Outputs) != 48 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1200,7 +1221,7 @@ func TestGenerateJobAdministrationComposesWithTenantAdministration(t *testing.T)
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 100 ||
+	if len(generated.Outputs) != 101 ||
 		generated.CapabilityLock[jobAdminOwner] != jobAdminVersion ||
 		generated.CapabilityLock[jobsOwner] != jobsVersion {
 		t.Fatalf("Generate() result = %#v", generated)
@@ -1260,7 +1281,7 @@ func TestGenerateObservabilityForBothDatabases(t *testing.T) {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
 			if generated.CapabilityLock[observabilityOwner] != observabilityVersion ||
-				len(generated.Outputs) != 34 {
+				len(generated.Outputs) != 35 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1326,7 +1347,7 @@ func TestGenerateCSVTransferForBothDatabases(t *testing.T) {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
 			if generated.CapabilityLock[csvTransferOwner] != csvTransferVersion ||
-				len(generated.Outputs) != 46 {
+				len(generated.Outputs) != 47 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1393,7 +1414,7 @@ func TestGenerateCSVTransferComposesWithTenantAdministration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 90 ||
+	if len(generated.Outputs) != 91 ||
 		generated.CapabilityLock[csvTransferOwner] != csvTransferVersion {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
@@ -1451,7 +1472,7 @@ func TestGenerateApprovalWorkflowsForBothDatabases(t *testing.T) {
 				t.Fatalf("Generate(%s) error = %v", database, err)
 			}
 			if generated.CapabilityLock[approvalsOwner] != approvalsVersion ||
-				len(generated.Outputs) != 46 {
+				len(generated.Outputs) != 47 {
 				t.Fatalf("Generate(%s) result = %#v", database, generated)
 			}
 			for _, path := range []string{
@@ -1521,7 +1542,7 @@ func TestGenerateApprovalWorkflowsComposeWithTenantAdministration(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 91 ||
+	if len(generated.Outputs) != 92 ||
 		generated.CapabilityLock[approvalsOwner] != approvalsVersion {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
@@ -1555,8 +1576,8 @@ func TestGenerateCSVAndApprovalMigrationsCompose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if len(generated.Outputs) != 100 {
-		t.Fatalf("Generate() output count = %d, want 100", len(generated.Outputs))
+	if len(generated.Outputs) != 101 {
+		t.Fatalf("Generate() output count = %d, want 101", len(generated.Outputs))
 	}
 	migration := string(outputContent(
 		generated,
@@ -1614,7 +1635,7 @@ func TestGenerateSharedAdministration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
-	if generated.CapabilityLock[adminui.Owner] != adminui.Version || len(generated.Outputs) != 57 {
+	if generated.CapabilityLock[adminui.Owner] != adminui.Version || len(generated.Outputs) != 58 {
 		t.Fatalf("Generate() result = %#v", generated)
 	}
 	for _, path := range []string{
@@ -1639,7 +1660,7 @@ func TestGenerateBlueprintCRUDForBothDatabases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Generate(%s) error = %v", database, err)
 		}
-		if generated.CapabilityLock[crudOwner] != crudVersion || len(generated.Outputs) != 37 {
+		if generated.CapabilityLock[crudOwner] != crudVersion || len(generated.Outputs) != 38 {
 			t.Fatalf("Generate(%s) result = %#v", database, generated)
 		}
 		for _, path := range []string{

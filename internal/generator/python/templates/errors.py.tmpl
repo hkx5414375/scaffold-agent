@@ -1,6 +1,5 @@
 """Stable public API errors."""
 
-from dataclasses import dataclass
 from enum import StrEnum
 
 from fastapi import FastAPI, Request
@@ -16,12 +15,16 @@ class IdentityErrorKind(StrEnum):
     INVALID_INPUT = "invalid_input"
 
 
-@dataclass(frozen=True, slots=True)
 class IdentityError(Exception):
     """Expected identity failure without internal details."""
 
     kind: IdentityErrorKind
     message: str
+
+    def __init__(self, kind: IdentityErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class ApiError(BaseModel):

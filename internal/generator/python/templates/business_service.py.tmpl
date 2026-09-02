@@ -1,7 +1,6 @@
 """{{.Business.EntityClass}} application use cases."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
@@ -31,12 +30,16 @@ class BusinessErrorKind(StrEnum):
     CONFLICT = "conflict"
 
 
-@dataclass(frozen=True, slots=True)
 class BusinessError(Exception):
     """Expected business failure safe for public mapping."""
 
     kind: BusinessErrorKind
     message: str
+
+    def __init__(self, kind: BusinessErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class {{.Business.EntityClass}}Service:

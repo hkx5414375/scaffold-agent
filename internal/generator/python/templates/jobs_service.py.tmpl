@@ -3,7 +3,6 @@
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import uuid4
@@ -25,12 +24,16 @@ class JobErrorKind(StrEnum):
     LEASE_LOST = "lease_lost"
 
 
-@dataclass(frozen=True, slots=True)
 class JobError(Exception):
     """Expected queue failure without payload disclosure."""
 
     kind: JobErrorKind
     message: str
+
+    def __init__(self, kind: JobErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class JobService:

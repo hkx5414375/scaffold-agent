@@ -24,12 +24,16 @@ class NotificationErrorKind(StrEnum):
     DELIVERY = "delivery"
 
 
-@dataclass(frozen=True, slots=True)
 class NotificationError(Exception):
     """Expected notification failure without message-content disclosure."""
 
     kind: NotificationErrorKind
     message: str
+
+    def __init__(self, kind: NotificationErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 @dataclass(frozen=True, slots=True)

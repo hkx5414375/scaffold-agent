@@ -50,12 +50,16 @@ class CacheErrorKind(StrEnum):
     STORAGE = "storage"
 
 
-@dataclass(frozen=True, slots=True)
 class CacheError(Exception):
     """Cache failure without database or payload disclosure."""
 
     kind: CacheErrorKind
     message: str
+
+    def __init__(self, kind: CacheErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 @dataclass(frozen=True, slots=True)

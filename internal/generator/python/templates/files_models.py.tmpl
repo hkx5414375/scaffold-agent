@@ -53,12 +53,16 @@ class FileAssetErrorKind(StrEnum):
     STORAGE = "storage"
 
 
-@dataclass(frozen=True, slots=True)
 class FileAssetError(Exception):
     """Expected file failure without internal-key or path disclosure."""
 
     kind: FileAssetErrorKind
     message: str
+
+    def __init__(self, kind: FileAssetErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class FileAsset(BaseModel):

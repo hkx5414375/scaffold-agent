@@ -297,9 +297,9 @@ CAPABILITIES`
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	wantChanges := 59
+	wantChanges := 60
 	if tenancy {
-		wantChanges = 82
+		wantChanges = 83
 	}
 	if plannedData.ChangeCount != wantChanges ||
 		plannedData.CapabilityLock["erp-inventory"] != "0.1.0" ||
@@ -580,9 +580,9 @@ CAPABILITIES
 		t.Fatalf("Plan() = %#v, want ok", planned)
 	}
 	plannedData := planned.Data.(planData)
-	wantChanges := 30
+	wantChanges := 31
 	if business {
-		wantChanges = 38
+		wantChanges = 39
 	}
 	if admin {
 		wantChanges += 19

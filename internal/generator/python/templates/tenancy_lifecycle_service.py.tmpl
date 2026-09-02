@@ -1,7 +1,6 @@
 """Organization ownership and reversible lifecycle use cases."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
@@ -26,12 +25,16 @@ class LifecycleErrorKind(StrEnum):
     CONFLICT = "conflict"
 
 
-@dataclass(frozen=True, slots=True)
 class LifecycleError(Exception):
     """Expected lifecycle failure safe for public transport mapping."""
 
     kind: LifecycleErrorKind
     message: str
+
+    def __init__(self, kind: LifecycleErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class TenancyLifecycleService:

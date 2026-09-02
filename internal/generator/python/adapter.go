@@ -371,6 +371,7 @@ var baseTemplates = map[string]string{
 	"src/package/migration/versions/__init__.py":        "templates/migration_versions_init.py.tmpl",
 	"src/package/migration/versions/000001_identity.py": "templates/identity_migration.py.tmpl",
 	"tests/test_architecture.py":                        "templates/test_architecture.py.tmpl",
+	"tests/conftest.py":                                 "templates/conftest.py.tmpl",
 	"tests/test_health.py":                              "templates/test_health.py.tmpl",
 	"tests/test_identity.py":                            "templates/test_identity.py.tmpl",
 	"tests/test_identity_database.py":                   "templates/test_identity_database.py.tmpl",

@@ -191,6 +191,18 @@ def repository_contract(engine: Engine) -> None:
         assert len(connection.execute(select(audit_events)).all()) >= 3
 {{- if .Tenancy}}
     with engine.begin() as connection:
+        connection.execute(
+            delete(organization_memberships).where(
+                organization_memberships.c.organization_id.in_(
+                    [organization_id, other_organization_id]
+                )
+            )
+        )
+        connection.execute(
+            delete(organizations).where(
+                organizations.c.id.in_([organization_id, other_organization_id])
+            )
+        )
         connection.execute(delete(users).where(users.c.id == user_id))
 {{- end}}
 

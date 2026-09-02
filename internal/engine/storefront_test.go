@@ -20,7 +20,7 @@ func TestSharedNuxtStorefrontPlanApplyVerifyAllBackends(t *testing.T) {
 	}{
 		{name: "go", changeCount: 39},
 		{name: "java", changeCount: 50},
-		{name: "python", changeCount: 48},
+		{name: "python", changeCount: 49},
 	}
 	var reference map[string]string
 	for _, backend := range backends {
@@ -569,7 +569,7 @@ spec:
 				t.Fatalf("Plan() = %#v, want ok", planned)
 			}
 			plannedData := planned.Data.(planData)
-			if plannedData.ChangeCount != 87 ||
+			if plannedData.ChangeCount != 88 ||
 				plannedData.CapabilityLock["commerce-catalog"] != "0.1.0" ||
 				plannedData.CapabilityLock["nuxt-storefront"] != "0.1.0" {
 				t.Fatalf("Plan() data = %#v", plannedData)
@@ -645,7 +645,7 @@ spec:
 				t.Fatalf("Plan() = %#v, want ok", planned)
 			}
 			plannedData := planned.Data.(planData)
-			if plannedData.ChangeCount != 92 ||
+			if plannedData.ChangeCount != 93 ||
 				plannedData.CapabilityLock["customer-accounts"] != "0.1.0" ||
 				plannedData.CapabilityLock["nuxt-storefront"] != "0.1.0" {
 				t.Fatalf("Plan() data = %#v", plannedData)

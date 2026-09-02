@@ -4,7 +4,6 @@ import hashlib
 import re
 import secrets
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from uuid import uuid4
@@ -49,12 +48,16 @@ class MemberErrorKind(StrEnum):
     INVITATION_INVALID = "invitation_invalid"
 
 
-@dataclass(frozen=True, slots=True)
 class MemberError(Exception):
     """Expected member failure safe for public transport mapping."""
 
     kind: MemberErrorKind
     message: str
+
+    def __init__(self, kind: MemberErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class TenancyMemberService:

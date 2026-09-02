@@ -1,6 +1,5 @@
 """Safe public job metadata and administration failures."""
 
-from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
@@ -16,12 +15,16 @@ class JobAdministrationErrorKind(StrEnum):
     STORAGE = "storage"
 
 
-@dataclass(frozen=True, slots=True)
 class JobAdministrationError(Exception):
     """Expected administration failure without job payload disclosure."""
 
     kind: JobAdministrationErrorKind
     message: str
+
+    def __init__(self, kind: JobAdministrationErrorKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
 
 
 class JobAdministrationItem(BaseModel):
