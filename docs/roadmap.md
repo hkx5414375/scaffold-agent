@@ -120,4 +120,4 @@ Stable CLI JSON, six MCP tools, pagination, compact result storage, and Codex/Cl
 - [x] Frozen 1.x public schema snapshots and wire identifiers with explicit compatibility rules.
 - [x] Bilingual installation, verification, release, upgrade, security, and support documentation.
 - [x] Preserve the failed-closed `v1.0.0` SBOM-attestation attempt without moving or reusing its tag.
-- [ ] Publish and independently verify the signed `v1.0.1` GitHub release.
+- [x] Publish and independently verify the signed `v1.0.1` GitHub release.
